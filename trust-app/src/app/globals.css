@@ -84,14 +84,25 @@ body {
   letter-spacing: -0.005em;
 }
 
-/* Letterpress-style dot grid — atmospheric, premium.
-   A 1px dot every 18px, just visible enough to read as "this page
-   is on textured paper" without distracting from the content.
-   Only active on the public landing (gated by .landing class). */
+/* Letterpress-style dot grid — anchored to the top of the page,
+   height-capped, fades out as you scroll into the content.
+   Doesn't follow the scroll (position:absolute, not fixed) so the
+   dots truly belong to the hero area; once you've scrolled past
+   the fade, the rest of the page is plain cream paper.
+   The CSS mask creates the dissolve cleanly without requiring an
+   overlay-coloured gradient. */
+.landing {
+  position: relative;
+  overflow-x: clip;       /* contain the dot pattern's right edge */
+}
+
 .landing::before {
   content: "";
-  position: fixed;
-  inset: 0;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: min(900px, 100vh);
   pointer-events: none;
   z-index: 0;
   background-image: radial-gradient(
@@ -101,11 +112,19 @@ body {
   );
   background-size: 18px 18px;
   background-position: 0 0;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 1) 38%,
+    rgba(0, 0, 0, 0) 100%
+  );
+          mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 1) 38%,
+    rgba(0, 0, 0, 0) 100%
+  );
 }
-
-/* Anything that should sit ABOVE the dot grid (everything inside
-   the landing) gets z-index:1 via .k-container, plus the header
-   and footer set their own z-index explicitly. */
 
 a { color: inherit; text-decoration: none; }
 
