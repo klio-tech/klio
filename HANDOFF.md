@@ -17,9 +17,9 @@ docker compose ps
 
 | Component | Tests | Status |
 |---|---|---|
-| `engine/` (Python, FastAPI, Postgres, KMS, audit chain, ACL, recall, ingest) | **81** | ✅ all passing |
-| `bridge/` (Go, daemon + CLI + MCP shim + hooks + backfill) | **40+ across 13 packages** | ✅ all passing |
-| `trust-app/` (Next.js 15, App Router, security pages) | typecheck + production build | ✅ both green |
+| `engine/` (Python, FastAPI, Postgres, KMS, audit chain, ACL, recall, ingest, access requests, notarization, login-link) | **95** | ✅ all passing |
+| `bridge/` (Go, daemon + CLI + MCP shim + hooks + backfill + cert pinning + realtime subscriber) | **50+ across 13 packages** | ✅ all passing |
+| `trust-app/` (Next.js 15, App Router, security pages, access-requests page) | typecheck + production build | ✅ both green |
 
 ## Phases delivered
 
@@ -114,6 +114,18 @@ KLIO_ENGINE_URL="http://127.0.0.1:8000" KLIO_JWT_SIGNING_KEY="dev-secret" \
   ./node_modules/.bin/next dev -p 3001
 # open http://127.0.0.1:3001
 ```
+
+## All five originally-flagged TODOs are now closed
+
+| # | Item | Commit |
+|---|---|---|
+| 1 | `/v1/auth/login-link` lookup-by-email-hash + trust app integration | `7edf1f1` |
+| 2 | Daemon Redis subscriber wired to `daemon.Run` (auto-subscribes to user's spaces, refreshes every 5 min) | `8b6373f` |
+| 3 | `request_access` end-to-end: engine endpoints, model+migration, trust app surface, daemon's `RequestAccess` wired | `822a5e8` |
+| 4 | TLS cert pinning on daemon HTTPS client via `KLIO_PINNED_CERT_SHA256` env (additive to CA validation) | `e8b0c68` |
+| 5 | OpenTimestamps notarization: hourly cron, `audit_notarizations` table, OTS calendar submission with stub fallback | `2f95252` |
+
+Live verifications captured per commit. All 95 engine + 50+ bridge tests pass.
 
 ## What was deliberately not done locally (external accounts / billing)
 
