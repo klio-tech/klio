@@ -351,7 +351,7 @@ deployment.
 ## Author
 
 **Abhishek Singh** ·
-[@7hkaurg](https://github.com/7hkaurg) ·
+[@7hakurg](https://github.com/7hakurg) ·
 asingh@oppla.ai ·
 [oppla.ai](https://oppla.ai)
 
