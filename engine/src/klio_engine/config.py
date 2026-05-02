@@ -19,6 +19,9 @@ class Settings(BaseSettings):
 
     database_url: str
     kms_key_arn: str = "arn:aws:kms:us-east-1:000000000000:key/dev"
+    # When set, the engine uses LocalFileKMSClient with this master key
+    # path instead of AWS KMS. Local dev only — see crypto/local_kms.py.
+    dev_kms_path: str | None = None
     s3_bucket: str = "klio-raw-events-dev"
     aws_region: str = "us-east-1"
     redis_url: str = "redis://localhost:6380/0"
