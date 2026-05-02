@@ -46,3 +46,16 @@ class RefreshResponse(BaseModel):
     access_token: str
     refresh_token: str
     expires_in: int
+
+
+class LoginLinkRequest(BaseModel):
+    email: EmailStr
+
+
+class LoginLinkResponse(BaseModel):
+    """Always returns ok=True regardless of whether the email matched any
+    user. This avoids leaking which emails are registered.
+    """
+
+    ok: bool = True
+    expires_in_minutes: int = 15

@@ -16,6 +16,7 @@ from klio_engine.api.health import router as health_router
 from klio_engine.api.ingest import router as ingest_router
 from klio_engine.api.spaces import permissions_router
 from klio_engine.api.spaces import router as spaces_router
+from klio_engine.api.users import auth_router
 from klio_engine.api.users import router as users_router
 from klio_engine.api.users import tokens_router
 
@@ -30,6 +31,7 @@ def build_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(users_router)
     app.include_router(tokens_router)
+    app.include_router(auth_router)
     app.include_router(spaces_router)
     app.include_router(permissions_router)
     app.include_router(entries_router)

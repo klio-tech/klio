@@ -13,9 +13,24 @@ export async function requestLoginLink(_prev: State, formData: FormData): Promis
   if (!parsed.success) {
     return { ok: false, error: "Please enter a valid email." };
   }
-  // The engine's /v1/users/{user_id}/claim is per-user. For the trust app's
-  // login flow, we don't yet know the user_id — we'd add a /v1/auth/login-link
-  // endpoint that looks the user up by email_hash. Phase L wires that.
-  // For now, we just acknowledge to the user that we'd send the link.
+
+  try {
+    const res = await fetch(`${ENGINE_URL}/v1/auth/login-link`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: parsed.data.email }),
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      // The endpoint always returns 200 for valid input — non-200 means a
+      // server problem we should surface generically.
+      return { ok: false, error: "Could not send a link right now. Try again." };
+    }
+  } catch {
+    return { ok: false, error: "Could not reach Klio. Try again." };
+  }
+
+  // Always show the same success message — by design we don't reveal whether
+  // the email matched a registered user.
   return { ok: true, error: null };
 }

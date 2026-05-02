@@ -18,6 +18,8 @@ from klio_engine.dependencies import get_kms, get_session
 from klio_engine.schemas.users import (
     ClaimRequest,
     ClaimResponse,
+    LoginLinkRequest,
+    LoginLinkResponse,
     ProvisionRequest,
     ProvisionResponse,
     RefreshRequest,
@@ -137,6 +139,50 @@ async def verify(
     return VerifyResponse(
         user_id=user_id, session_token=session_token, access_token=access
     )
+
+
+auth_router = APIRouter(prefix="/v1/auth", tags=["auth"])
+
+
+@auth_router.post("/login-link", response_model=LoginLinkResponse)
+async def login_link(
+    body: LoginLinkRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> LoginLinkResponse:
+    """Browser-side magic-link request: looks up the user by email_hash and
+    silently issues a link. Always returns ok=True so unknown emails don't
+    leak the user database.
+    """
+    import hashlib
+
+    from sqlalchemy import select
+
+    from klio_engine.models.user import User
+
+    email_hash = hashlib.sha256(str(body.email).encode()).hexdigest()
+    user = (
+        await session.execute(select(User).where(User.email_hash == email_hash))
+    ).scalar_one_or_none()
+
+    if user is not None and user.deleted_at is None:
+        plaintext, _ = await issue_magic_link(
+            session,
+            user_id=user.id,
+            ttl_minutes=15,
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+        await session.commit()
+        import structlog
+
+        structlog.get_logger().info(
+            "login_link_dev_mode",
+            to_email=str(body.email),
+            link=f"https://app.klio.tech/verify?token={plaintext}&user_id={user.id}",
+            mode="login",
+        )
+    return LoginLinkResponse(ok=True)
 
 
 tokens_router = APIRouter(prefix="/v1/tokens", tags=["tokens"])
