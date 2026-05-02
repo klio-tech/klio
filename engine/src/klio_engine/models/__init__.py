@@ -4,6 +4,7 @@ from klio_engine.models.agent import Agent, AgentKind
 from klio_engine.models.audit import AuditLogEntry
 from klio_engine.models.base import Base
 from klio_engine.models.entry import Entry, EntryKind
+from klio_engine.models.notarization import AuditNotarization
 from klio_engine.models.permission import Permission, PermissionScope
 from klio_engine.models.refresh_token import MagicLinkToken, RefreshToken
 from klio_engine.models.session import Session
@@ -16,6 +17,7 @@ __all__ = [
     "Agent",
     "AgentKind",
     "AuditLogEntry",
+    "AuditNotarization",
     "Base",
     "Entry",
     "EntryKind",
