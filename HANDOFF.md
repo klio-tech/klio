@@ -3,7 +3,8 @@
 This document is the source of truth for what was built locally during the
 2026-05-02 session. The repo at `/Users/thakurg/Me/klio` contains the full
 Phase A through L implementation against the design and plan in
-`docs/plans/`.
+`docs/plans/`, plus the per-space pluggable embedding architecture
+documented in [docs/embedding-models.md](docs/embedding-models.md).
 
 ## What's running
 
@@ -11,14 +12,15 @@ Phase A through L implementation against the design and plan in
 docker compose ps
   klio-postgres  pgvector/pgvector:pg16  127.0.0.1:5433  (healthy)
   klio-redis     redis:7-alpine          127.0.0.1:6380  (healthy)
+  klio-ollama    ollama/ollama:latest    127.0.0.1:11434 (healthy)
 ```
 
 ## Test status (last run)
 
 | Component | Tests | Status |
 |---|---|---|
-| `engine/` (Python, FastAPI, Postgres, KMS, audit chain, ACL, recall, ingest, access requests, notarization, login-link) | **95** | ✅ all passing |
-| `bridge/` (Go, daemon + CLI + MCP shim + hooks + backfill + cert pinning + realtime subscriber) | **50+ across 13 packages** | ✅ all passing |
+| `engine/` (Python, FastAPI, Postgres, KMS, audit chain, ACL, recall, ingest, access requests, notarization, login-link, **per-space embeddings**, **reembed**) | **97 stub + 2 real-Ollama** | ✅ all passing |
+| `bridge/` (Go, daemon + CLI + MCP shim + hooks + backfill + cert pinning + realtime subscriber + **klio reembed**) | **50+ across 13 packages** | ✅ all passing |
 | `trust-app/` (Next.js 15, App Router, security pages, access-requests page) | typecheck + production build | ✅ both green |
 
 ## Phases delivered
@@ -62,23 +64,40 @@ docker compose ps
 
 ## How to run it again
 
+### 0. One-time setup (idempotent)
+
+```bash
+cd /Users/thakurg/Me/klio
+make first-run     # docker compose up + ollama-pull + migrate + build binaries
+```
+
 ### 1. Bring up dependencies
 ```bash
 cd /Users/thakurg/Me/klio
 docker compose up -d
+docker exec klio-ollama ollama pull nomic-embed-text       # 274 MB
+docker exec klio-ollama ollama pull qwen2.5:7b-instruct    # 4.7 GB (extraction)
 ```
 
 ### 2. Run the engine
+
+Easiest path: `make engine` reads the right env automatically.
+
+Manual:
 ```bash
 cd /Users/thakurg/Me/klio/engine
 source .venv/bin/activate
 KLIO_DATABASE_URL="postgresql+asyncpg://klio:klio_dev_password@127.0.0.1:5433/klio" \
 KLIO_JWT_SIGNING_KEY="dev-secret" \
-KLIO_EMBEDDING_MODEL="stub" \
-KLIO_EXTRACTION_MODEL="stub" \
+KLIO_EMBEDDING_MODEL="ollama/nomic-embed-text" \
+KLIO_EXTRACTION_MODEL="ollama/qwen2.5:7b-instruct" \
+KLIO_OLLAMA_API_BASE="http://127.0.0.1:11434" \
 KLIO_REDIS_URL="redis://127.0.0.1:6380/0" \
 python scripts/dev_server.py
 ```
+
+For tests / hermetic runs without Ollama, use `KLIO_EMBEDDING_MODEL="stub"`
+and `KLIO_EXTRACTION_MODEL="stub"`.
 
 ### 3. Build CLI binaries
 ```bash
@@ -114,6 +133,26 @@ KLIO_ENGINE_URL="http://127.0.0.1:8000" KLIO_JWT_SIGNING_KEY="dev-secret" \
   ./node_modules/.bin/next dev -p 3001
 # open http://127.0.0.1:3001
 ```
+
+## Pluggable embedding architecture (added after the original v0)
+
+Klio is now dim-agnostic at the schema level. Each space pins its own
+embedding model and dimension at creation time, and writes go to a
+per-dim shadow table (`entry_embeddings_768`, `_1024`, `_1536`). This
+unlocks:
+
+- A self-hoster on a small laptop using free `ollama/nomic-embed-text` (768d)
+- A Pro user using `text-embedding-3-small` (1536d, paid OpenAI)
+- Both side-by-side on the same engine, no schema change required
+
+To switch a space's model:
+
+```bash
+/tmp/klio reembed --space default --to ollama/snowflake-arctic-embed2
+```
+
+See [docs/embedding-models.md](docs/embedding-models.md) for the full
+registry, shadow-table layout, and "adding a new dim" procedure.
 
 ## All five originally-flagged TODOs are now closed
 
