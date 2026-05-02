@@ -65,7 +65,7 @@ async def test_full_entry_encryption_round_trip(
     e = Entry(
         user_id=u.id, space_id=s.id, agent_id=a.id, kind=EntryKind.MEMORY,
         content_ciphertext=ct, content_nonce=nonce,
-        embedding=[0.05] * 1536, confidence=1.0,
+        confidence=1.0,
     )
     session.add(e)
     await session.flush()

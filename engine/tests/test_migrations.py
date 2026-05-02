@@ -1,6 +1,7 @@
 """Migration applies cleanly to a fresh schema."""
 import os
 import subprocess
+import sys
 import uuid
 
 import pytest
@@ -29,8 +30,11 @@ async def test_alembic_upgrade_head_applies() -> None:
         # handles async via asyncio.run().
         env["KLIO_DATABASE_URL"] = TEST_DB_URL
 
+        # Invoke alembic via the same interpreter that runs pytest so the
+        # subprocess sees the project's `klio_engine` package regardless of
+        # how the test runner was launched (venv-activated shell vs Make).
         result = subprocess.run(
-            ["alembic", "-x", f"schema={schema}", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-x", f"schema={schema}", "upgrade", "head"],
             capture_output=True,
             text=True,
             cwd=os.path.join(os.path.dirname(__file__), ".."),

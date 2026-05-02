@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from klio_engine.models.agent import Agent, AgentKind
 from klio_engine.models.entry import Entry, EntryKind
+from klio_engine.models.entry_embedding import EntryEmbedding768
 from klio_engine.models.permission import Permission, PermissionScope
 from klio_engine.models.session import Session
 from klio_engine.models.space import Space
@@ -127,12 +128,15 @@ async def test_session_round_trip(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_entry_with_vector_round_trip(session: AsyncSession) -> None:
+async def test_entry_with_shadow_embedding_round_trip(session: AsyncSession) -> None:
+    """Entry rows no longer carry an embedding column; the embedding lives
+    in a per-dim shadow table (here `entry_embeddings_768`) keyed by
+    entry_id. Verifies the cascade FK by deletion."""
     u = User()
     session.add(u)
     await session.flush()
     a = Agent(user_id=u.id, kind=AgentKind.CLAUDE_CODE, install_id=uuid.uuid4())
-    s = Space(user_id=u.id, name="X", slug="x")
+    s = Space(user_id=u.id, name="X", slug="x")  # defaults: nomic / 768
     session.add_all([a, s])
     await session.flush()
 
@@ -143,12 +147,24 @@ async def test_entry_with_vector_round_trip(session: AsyncSession) -> None:
         kind=EntryKind.MEMORY,
         content_ciphertext=b"x" * 32,
         content_nonce=b"\x00" * 12,
-        embedding=[0.1] * 1536,
         confidence=0.95,
     )
     session.add(e)
     await session.flush()
-    assert len(e.embedding) == 1536
+
+    emb = EntryEmbedding768(
+        entry_id=e.id, embedding=[0.1] * 768, model="ollama/nomic-embed-text"
+    )
+    session.add(emb)
+    await session.flush()
+
+    fetched = (
+        await session.execute(
+            select(EntryEmbedding768).where(EntryEmbedding768.entry_id == e.id)
+        )
+    ).scalar_one()
+    assert len(fetched.embedding) == 768
+    assert fetched.model == "ollama/nomic-embed-text"
     assert e.kind is EntryKind.MEMORY
 
 
@@ -165,12 +181,12 @@ async def test_entry_supersedes_link(session: AsyncSession) -> None:
     older = Entry(
         user_id=u.id, space_id=s.id, agent_id=a.id, kind=EntryKind.MEMORY,
         content_ciphertext=b"a", content_nonce=b"\x00" * 12,
-        embedding=[0.0] * 1536, confidence=0.9,
+        confidence=0.9,
     )
     newer = Entry(
         user_id=u.id, space_id=s.id, agent_id=a.id, kind=EntryKind.MEMORY,
         content_ciphertext=b"b", content_nonce=b"\x00" * 12,
-        embedding=[0.1] * 1536, confidence=0.95,
+        confidence=0.95,
     )
     session.add_all([older, newer])
     await session.flush()
