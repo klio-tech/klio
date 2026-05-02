@@ -62,6 +62,30 @@ services:
       retries: 6
       start_period: 30s
 
+  # Trust app — Next.js dashboard for browsing your memories, spaces,
+  # and access requests. Connects to the engine running on the host
+  # (not in compose) via `host.docker.internal`. Auto-authenticates
+  # in local-dev mode using KLIO_LOCAL_USER_ID / KLIO_LOCAL_AGENT_ID
+  # from a project-level `.env` file (populated by `klio init`; can
+  # also be filled in by hand from `klio status` output).
+  #
+  # Reach it at http://127.0.0.1:3000 once the engine is up.
+  trust-app:
+    build:
+      context: ./trust-app
+      dockerfile: Dockerfile
+    container_name: klio-trust-app
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      KLIO_ENGINE_URL: http://host.docker.internal:8000
+      KLIO_JWT_SIGNING_KEY: ${KLIO_JWT_SIGNING_KEY:-dev-secret}
+      KLIO_LOCAL_DEV: "1"
+      KLIO_LOCAL_USER_ID: ${KLIO_LOCAL_USER_ID}
+      KLIO_LOCAL_AGENT_ID: ${KLIO_LOCAL_AGENT_ID}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   klio-postgres-data:
   klio-redis-data:

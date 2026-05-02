@@ -6,7 +6,24 @@ export type Space = {
   id: string;
   name: string;
   slug: string;
+  embedding_model: string;
+  embedding_dim: number;
   created_at: string;
+};
+
+export type EntryKind = "memory" | "observation" | "plan" | "decision" | "note";
+
+export type Entry = {
+  id: string;
+  space_id: string;
+  agent_id: string;
+  session_id: string | null;
+  kind: EntryKind;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  confidence: number;
+  created_at: string;
+  superseded_by: string | null;
 };
 
 export type Permission = {
@@ -54,6 +71,24 @@ async function authedFetch<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   listSpaces: () => authedFetch<Space[]>("/v1/spaces"),
   listAgents: () => authedFetch<Agent[]>("/v1/agents"),
+  listEntries: (
+    spaceId: string,
+    opts?: { kind?: EntryKind; since?: string; limit?: number },
+  ) => {
+    const qs = new URLSearchParams();
+    if (opts?.kind) qs.set("kind", opts.kind);
+    if (opts?.since) qs.set("since", opts.since);
+    qs.set("limit", String(opts?.limit ?? 100));
+    return authedFetch<Entry[]>(`/v1/spaces/${spaceId}/entries?${qs}`);
+  },
+  recall: (
+    spaceId: string,
+    body: { query: string; kind?: EntryKind; limit?: number },
+  ) =>
+    authedFetch<Entry[]>(`/v1/spaces/${spaceId}/recall`, {
+      method: "POST",
+      body: JSON.stringify({ limit: 20, ...body }),
+    }),
   listPermissions: (spaceId: string) =>
     authedFetch<Permission[]>(`/v1/spaces/${spaceId}/permissions`),
   listAccessRequests: () => authedFetch<AccessRequest[]>("/v1/access-requests"),
