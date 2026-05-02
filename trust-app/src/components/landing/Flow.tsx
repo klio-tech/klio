@@ -169,7 +169,7 @@ function FlowSVG() {
           markerHeight="7"
           orient="auto"
         >
-          <path d="M0,0 L10,5 L0,10 z" fill="#ff4500" />
+          <path d="M0,0 L10,5 L0,10 z" fill="#6f6b62" />
         </marker>
       </defs>
 
@@ -249,14 +249,14 @@ function FlowSVG() {
       <path
         d="M 1100 226 Q 1100 380 600 380 Q 240 380 240 230"
         fill="none"
-        stroke="#ff4500"
+        stroke="#6f6b62"
         strokeWidth="1"
         strokeDasharray="5 4"
         markerEnd="url(#arrow-accent)"
       />
       <text
         x="660" y="404"
-        fill="#ff4500"
+        fill="#6f6b62"
         fontSize="10"
         textAnchor="middle"
         fontFamily="var(--font-mono-stack)"
@@ -271,7 +271,7 @@ function FlowSVG() {
         y={96}
         width={6}
         height={44}
-        fill="#ff4500"
+        fill="#6f6b62"
       />
     </svg>
   );
@@ -307,7 +307,7 @@ function Box({
         height={h}
         rx={5}
         fill="#fafaf7"
-        stroke={accent ? "#ff4500" : "#0a0a0a"}
+        stroke={accent ? "#6f6b62" : "#0a0a0a"}
         strokeWidth={accent ? 1.4 : 1}
       />
       <text

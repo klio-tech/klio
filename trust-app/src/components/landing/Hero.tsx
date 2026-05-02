@@ -2,13 +2,13 @@ import { Frame } from "./Frame";
 import { Json } from "./Json";
 
 /**
- * Hero — split layout. Editorial serif H1 on the left; a real-looking
- * MCP recall response in a terminal/IDE-style frame on the right.
+ * Hero — split layout. Editorial serif H1 on the left, a real-looking
+ * MCP recall response in a calm paper-style card on the right.
  *
- * The frame isn't decorative — it's literally the JSON shape the
- * klio-mcp shim returns to a calling agent. A developer reading the
- * page recognises the protocol immediately and the value prop lands
- * without prose having to claim it.
+ * The card isn't decorative — it's literally the JSON shape that
+ * klio-mcp returns to a calling agent. A developer reading the
+ * page recognises the protocol immediately and the value prop
+ * lands without prose having to claim it.
  */
 
 const RECALL_RESPONSE = {
@@ -18,11 +18,15 @@ const RECALL_RESPONSE = {
     content: [
       {
         type: "text",
-        text: "Found 3 relevant entries:\n1. [memory] User prefers Bun runtime over Node and npm\n2. [decision] Deploy on Railway, not Fly.io — reduces code complexity\n3. [memory] Klio uses per-space embeddings with shadow tables (768/1024/1536)",
+        text:
+          "Found 3 relevant entries:\n" +
+          "1. [memory]   User prefers Bun runtime over Node and npm\n" +
+          "2. [decision] Deploy on Railway, not Fly.io\n" +
+          "3. [memory]   Klio uses per-space embeddings (768/1024/1536)",
       },
     ],
     metadata: {
-      space_id: "f11e05be-e340-4073-a08d-3854f8fe49d1",
+      space_id: "f11e05be-…",
       embedding_model: "ollama/nomic-embed-text",
       dim: 768,
       ranked_by: "cosine",
@@ -50,8 +54,10 @@ export function Hero() {
           {/* Left column — editorial */}
           <div>
             <p className="k-eyebrow k-rise" data-stagger="1">
-              <span style={{ color: "var(--klio-accent)" }}>●</span>{" "}
-              <span style={{ marginLeft: "0.4rem" }}>memory layer · model context protocol</span>
+              <span style={{ color: "var(--klio-accent)" }}>●</span>
+              <span style={{ marginLeft: "0.5rem" }}>
+                memory layer · model context protocol
+              </span>
             </p>
 
             <h1
@@ -108,15 +114,15 @@ export function Hero() {
                   letterSpacing: "0.04em",
                 }}
               >
-                v0.1.0 · MIT-friendly · 0 telemetry
+                v0.1.0 · open source · 0 telemetry
               </span>
             </div>
           </div>
 
-          {/* Right column — IDE frame with a real MCP response */}
+          {/* Right column — calm paper card with a real MCP response */}
           <div className="k-rise" data-stagger="3" style={{ minWidth: 0 }}>
             <Frame
-              path="POST /v1/spaces/.../recall"
+              path="POST /v1/spaces/{id}/recall"
               badge="MCP"
               footL={
                 <>
@@ -126,31 +132,48 @@ export function Hero() {
               }
               footR="space:f11e05be · nomic-768"
             >
-              <div
+              <p
                 style={{
                   marginBottom: "0.85rem",
-                  color: "#8a8378",
+                  color: "var(--klio-muted)",
+                  fontFamily: "var(--font-mono-stack)",
                   fontSize: "0.74rem",
+                  fontStyle: "italic",
                 }}
               >
-                <span className="k-tok-comment">{`// klio-mcp recall — what the agent sees`}</span>
-              </div>
+                {`// what an agent receives back from klio-mcp`}
+              </p>
               <div
                 style={{
                   marginBottom: "0.65rem",
                   display: "flex",
                   gap: "0.5rem",
+                  fontFamily: "var(--font-mono-stack)",
+                  fontSize: "0.78rem",
                 }}
               >
-                <span style={{ color: "#6f6b62" }}>$</span>
-                <span style={{ color: "#cdebd1" }}>recall</span>
-                <span style={{ color: "#6f6b62" }}>(</span>
-                <span style={{ color: "#c8e6a0" }}>
+                <span style={{ color: "var(--klio-faint)" }}>{">"}</span>
+                <span style={{ color: "var(--klio-foreground)", fontWeight: 500 }}>
+                  recall
+                </span>
+                <span style={{ color: "var(--klio-faint)" }}>{"({"}</span>
+                <span className="k-tok-key">query</span>
+                <span style={{ color: "var(--klio-faint)" }}>: </span>
+                <span className="k-tok-str">
                   &quot;which JS runtime do I prefer?&quot;
                 </span>
-                <span style={{ color: "#6f6b62" }}>)</span>
+                <span style={{ color: "var(--klio-faint)" }}>{"})"}</span>
               </div>
-              <Json value={RECALL_RESPONSE} />
+              <div
+                style={{
+                  fontFamily: "var(--font-mono-stack)",
+                  fontSize: "0.78rem",
+                  lineHeight: 1.65,
+                  color: "var(--klio-foreground)",
+                }}
+              >
+                <Json value={RECALL_RESPONSE} />
+              </div>
             </Frame>
           </div>
         </div>

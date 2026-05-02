@@ -80,17 +80,20 @@ export function Pricing() {
             </a>
           </article>
 
-          {/* Cloud — waitlist */}
-          <article style={cardStyle("foreground")}>
-            <div style={{ ...planLabel, color: "rgba(255, 255, 255, 0.7)" }}>
-              klio cloud · waitlist
-            </div>
+          {/* Cloud — waitlist (paper, distinguished by a thicker
+              ink border + serif "soon" treatment, not by inverted color) */}
+          <article style={cardStyle("emphasis")}>
+            <div style={planLabel}>klio cloud · waitlist</div>
             <h3
-              className="k-h2"
               style={{
-                fontSize: "2.2rem",
+                fontFamily: "var(--font-serif-stack)",
+                fontWeight: 400,
+                fontStyle: "italic",
+                fontSize: "2.6rem",
+                lineHeight: 1.05,
                 marginTop: "0.6rem",
-                color: "var(--klio-background)",
+                color: "var(--klio-foreground)",
+                letterSpacing: "-0.02em",
               }}
             >
               soon
@@ -99,8 +102,9 @@ export function Pricing() {
                   fontFamily: "var(--font-mono-stack)",
                   fontSize: "0.85rem",
                   marginLeft: "0.5rem",
-                  color: "rgba(255,255,255,0.6)",
+                  color: "var(--klio-muted)",
                   fontWeight: 400,
+                  fontStyle: "normal",
                 }}
               >
                 / per-seat
@@ -108,18 +112,14 @@ export function Pricing() {
             </h3>
             <p
               className="k-lede"
-              style={{
-                fontSize: "0.95rem",
-                marginTop: "1rem",
-                color: "rgba(255,255,255,0.78)",
-              }}
+              style={{ fontSize: "0.95rem", marginTop: "1rem" }}
             >
               Hosted, multi-tenant, with team-scoped spaces, hosted SSO,
               cross-agent intelligence, premium connectors, and managed
               backups across regions.
             </p>
 
-            <ul style={{ ...ul, color: "rgba(255,255,255,0.78)" }}>
+            <ul style={ul}>
               {[
                 "Per-project / per-repo space auto-routing",
                 "Cross-agent conflict resolution",
@@ -128,7 +128,7 @@ export function Pricing() {
                 "Managed multi-region Postgres + AWS KMS",
                 "Hosted observability + audit notarization at scale",
               ].map((x) => (
-                <li key={x} style={{ ...li, color: "rgba(255,255,255,0.78)" }}>{x}</li>
+                <li key={x} style={li}>{x}</li>
               ))}
             </ul>
 
@@ -146,25 +146,17 @@ export function Pricing() {
   );
 }
 
-function cardStyle(theme: "paper" | "foreground"): React.CSSProperties {
+function cardStyle(theme: "paper" | "emphasis"): React.CSSProperties {
+  const base: React.CSSProperties = {
+    background: "var(--klio-background)",
+    borderRadius: "0.5rem",
+    padding: "2.5rem 2.2rem",
+    display: "flex",
+    flexDirection: "column",
+  };
   return theme === "paper"
-    ? {
-        background: "var(--klio-background)",
-        border: "1px solid var(--klio-border)",
-        borderRadius: "0.6rem",
-        padding: "2.5rem 2.2rem",
-        display: "flex",
-        flexDirection: "column",
-      }
-    : {
-        background: "var(--klio-foreground)",
-        color: "var(--klio-background)",
-        border: "1px solid var(--klio-foreground)",
-        borderRadius: "0.6rem",
-        padding: "2.5rem 2.2rem",
-        display: "flex",
-        flexDirection: "column",
-      };
+    ? { ...base, border: "1px solid var(--klio-border)" }
+    : { ...base, border: "2px solid var(--klio-foreground)" };
 }
 
 const planLabel: React.CSSProperties = {

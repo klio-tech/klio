@@ -3,12 +3,19 @@
    ───────────────────────────────────────────────────────────────────────── */
 
 :root {
-  /* Typography (set via next/font CSS variables in layout.tsx) */
-  --font-sans-stack: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-serif-stack: var(--font-serif), "Iowan Old Style", Georgia, serif;
+  /* Typography — two fonts only, supadata-style.
+     The "sans-stack" alias points at the same monospace as
+     "mono-stack" so legacy inline styles render with the right
+     glyphs without a per-file sweep. Hierarchy is built from
+     size + weight + serif-vs-mono contrast, not from a third
+     typeface. */
+  --font-sans-stack: var(--font-mono), "SF Mono", Menlo, Consolas, monospace;
   --font-mono-stack: var(--font-mono), "SF Mono", Menlo, Consolas, monospace;
+  --font-serif-stack: var(--font-serif), "Iowan Old Style", Georgia, serif;
 
-  /* Klio palette — paper white, near-black, single flame accent */
+  /* Klio palette — pure monochrome on warm paper. No accent.
+     Hierarchy is the typography's job; colour shouldn't be
+     fighting for attention. */
   --klio-background: #fafaf7;
   --klio-paper: #f5f3ec;
   --klio-foreground: #0a0a0a;
@@ -16,8 +23,13 @@
   --klio-faint: #a8a395;
   --klio-border: #e8e6e0;
   --klio-border-strong: #c8c5bc;
-  --klio-accent: #ff4500;
-  --klio-accent-soft: #fff4ee;
+  /* `--klio-accent` is intentionally the same as foreground.
+     Existing references to it across the codebase therefore
+     render as ink-on-paper, which is what we want now. If a
+     single tasteful accent ever earns its way back in, this is
+     the only line to change. */
+  --klio-accent: var(--klio-foreground);
+  --klio-accent-soft: var(--klio-paper);
 
   /* Layout */
   --klio-container: 1240px;
@@ -215,23 +227,23 @@ button.secondary { background: transparent; color: var(--foreground); border: 1p
   align-items: center;
   gap: 0.5rem;
   padding: 0.7rem 1.05rem;
-  font-family: var(--font-sans-stack);
-  font-size: 0.92rem;
+  font-family: var(--font-mono-stack);
+  font-size: 0.84rem;
   font-weight: 500;
-  letter-spacing: -0.005em;
-  border-radius: 999px;
+  letter-spacing: 0;
+  border-radius: 0.25rem;
   cursor: pointer;
-  transition: transform 200ms ease, background 200ms ease, border-color 200ms ease, color 200ms ease;
+  transition: background 180ms ease, color 180ms ease, border-color 180ms ease;
   border: 1px solid var(--klio-foreground);
 }
 .k-btn--primary {
-  background: var(--klio-accent);
-  color: #fff;
-  border-color: var(--klio-accent);
+  background: var(--klio-foreground);
+  color: var(--klio-background);
+  border-color: var(--klio-foreground);
 }
 .k-btn--primary:hover {
-  background: #e63d00;
-  border-color: #e63d00;
+  background: #1f1d1a;
+  border-color: #1f1d1a;
 }
 .k-btn--ghost {
   background: transparent;
@@ -342,131 +354,80 @@ button.secondary { background: transparent; color: var(--foreground); border: 1p
 
 /* ─── Code blocks ─────────────────────────────────────────────────── */
 
-.k-code {
-  font-family: var(--font-mono-stack);
-  background: var(--klio-foreground);
-  color: #f4f1ec;
-  padding: 1.5rem 1.75rem;
-  border-radius: 0.5rem;
-  font-size: 0.84rem;
-  line-height: 1.7;
-  overflow-x: auto;
-  border: 1px solid var(--klio-foreground);
-}
-.k-code .tk-comment { color: #8a8275; }
-.k-code .tk-cmd { color: #ff8a55; }
-.k-code .tk-flag { color: #f7d774; }
-.k-code .tk-arg { color: #cdebd1; }
-.k-code .tk-prompt { color: #6f6b62; user-select: none; padding-right: 0.5em; }
-
-/* ─── Frame chrome — IDE / terminal-style cards ───────────────────── */
+/* ─── Frame chrome — calm paper card with optional bar ────────────── */
 
 .k-frame {
-  background: #0d0d0c;
-  color: #e8e4dc;
-  border: 1px solid #1f1d1a;
-  border-radius: 0.65rem;
-  font-family: var(--font-mono-stack);
-  font-size: 0.78rem;
-  line-height: 1.6;
-  overflow: hidden;
-  box-shadow: 0 24px 60px -28px rgba(10, 10, 10, 0.45),
-              0 6px 20px -10px rgba(10, 10, 10, 0.25);
-}
-
-.k-frame--paper {
   background: var(--klio-paper);
   color: var(--klio-foreground);
   border: 1px solid var(--klio-border);
-  box-shadow: none;
+  border-radius: 0.5rem;
+  font-family: var(--font-mono-stack);
+  font-size: 0.8rem;
+  line-height: 1.65;
+  overflow: hidden;
 }
 
 .k-frame__bar {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  padding: 0.55rem 0.85rem;
-  background: rgba(255, 255, 255, 0.03);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  font-size: 0.7rem;
-  letter-spacing: 0.06em;
-  color: #999487;
-}
-.k-frame--paper .k-frame__bar {
+  padding: 0.5rem 0.85rem;
   background: var(--klio-background);
   border-bottom: 1px solid var(--klio-border);
+  font-size: 0.7rem;
+  letter-spacing: 0;
   color: var(--klio-muted);
 }
 
-.k-frame__dots {
-  display: inline-flex;
-  gap: 0.32rem;
-}
-.k-frame__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #2a2825;
-}
-.k-frame__dot--accent { background: var(--klio-accent); }
-
 .k-frame__path {
   flex: 1;
-  text-align: center;
   font-family: var(--font-mono-stack);
   font-size: 0.7rem;
-  color: #8a8378;
+  color: var(--klio-muted);
   letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.k-frame--paper .k-frame__path { color: var(--klio-muted); }
 
 .k-frame__badge {
   font-family: var(--font-mono-stack);
   font-size: 0.62rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--klio-accent);
-  padding: 0.15rem 0.5rem;
-  border: 1px solid rgba(255, 69, 0, 0.4);
-  border-radius: 4px;
+  color: var(--klio-foreground);
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--klio-border-strong);
+  border-radius: 2px;
+  flex-shrink: 0;
 }
 
 .k-frame__body {
   padding: 1.1rem 1.25rem;
   overflow-x: auto;
+  background: var(--klio-paper);
 }
 
 .k-frame__foot {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.55rem 1.25rem;
-  background: rgba(255, 255, 255, 0.02);
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
-  font-size: 0.68rem;
-  color: #8a8378;
-  letter-spacing: 0.04em;
-}
-.k-frame--paper .k-frame__foot {
+  padding: 0.5rem 1.25rem;
   background: var(--klio-background);
   border-top: 1px solid var(--klio-border);
+  font-size: 0.68rem;
   color: var(--klio-muted);
+  letter-spacing: 0.02em;
 }
 
-/* JSON syntax inside frames */
-.k-tok-key   { color: #ffb86c; }
-.k-tok-str   { color: #c8e6a0; }
-.k-tok-num   { color: #82b1ff; }
-.k-tok-bool  { color: #ff79c6; }
-.k-tok-null  { color: #888; }
-.k-tok-punct { color: #6f6b62; }
-.k-tok-comment { color: #8a8378; font-style: italic; }
-
-.k-frame--paper .k-tok-key   { color: #b35c00; }
-.k-frame--paper .k-tok-str   { color: #2c5e2c; }
-.k-frame--paper .k-tok-num   { color: #1f549c; }
-.k-frame--paper .k-tok-bool  { color: #a23076; }
-.k-frame--paper .k-tok-comment { color: var(--klio-muted); }
+/* JSON syntax — paper-friendly, low-contrast colors */
+.k-tok-key     { color: #b35c00; }
+.k-tok-str     { color: #2c5e2c; }
+.k-tok-num     { color: #1f549c; }
+.k-tok-bool    { color: #a23076; }
+.k-tok-null    { color: var(--klio-muted); }
+.k-tok-punct   { color: var(--klio-faint); }
+.k-tok-comment { color: var(--klio-muted); font-style: italic; }
 
 /* Anatomy section — multi-lens entry display */
 .k-anatomy-grid {

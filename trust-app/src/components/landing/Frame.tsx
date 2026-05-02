@@ -1,50 +1,41 @@
 import type { ReactNode } from "react";
 
 /**
- * IDE / terminal-style chrome card. Used as the visual focal point
- * across the landing — hero, anatomy lenses, quick start, etc. The
- * "dark" variant looks like a modern terminal/editor; the "paper"
- * variant blends into the editorial background for the lens cards.
+ * A calm card with a thin chrome bar. Used as the visual focal point
+ * across the landing — hero JSON sample, anatomy lenses, quick-start
+ * session, etc. Paper-only by design — the page's whole aesthetic is
+ * "premium minimal editorial on warm white", and dark IDE chrome was
+ * fighting it.
+ *
+ * The bar is optional. When present it carries: a small endpoint or
+ * filename label on the left, an optional badge on the right. No
+ * traffic-light dots — they're hokey on a magazine-grade landing.
  */
 export function Frame({
   children,
-  variant = "dark",
   path,
   badge,
   footL,
   footR,
-  showDots = true,
   bodyStyle,
   style,
 }: {
   children: ReactNode;
-  variant?: "dark" | "paper";
-  /** Filename / endpoint shown centered in the bar */
+  /** Filename / endpoint shown on the left of the bar */
   path?: string;
-  /** Right-aligned tag (e.g. "MCP", "RECALL", "768d") */
+  /** Right-aligned tag (e.g. "MCP", "768d", "AES-256-GCM") */
   badge?: string;
-  /** Footer status row, left side (e.g. "200 OK · 1.4 ms") */
+  /** Footer status row, left side */
   footL?: ReactNode;
-  /** Footer status row, right side (e.g. "3 entries · nomic-768") */
+  /** Footer status row, right side */
   footR?: ReactNode;
-  showDots?: boolean;
   bodyStyle?: React.CSSProperties;
   style?: React.CSSProperties;
 }) {
   return (
-    <div
-      className={`k-frame ${variant === "paper" ? "k-frame--paper" : ""}`.trim()}
-      style={style}
-    >
-      {(showDots || path || badge) && (
+    <div className="k-frame" style={style}>
+      {(path || badge) && (
         <div className="k-frame__bar">
-          {showDots && (
-            <span className="k-frame__dots" aria-hidden>
-              <span className="k-frame__dot" />
-              <span className="k-frame__dot" />
-              <span className="k-frame__dot k-frame__dot--accent" />
-            </span>
-          )}
           {path && <span className="k-frame__path">{path}</span>}
           {badge && <span className="k-frame__badge">{badge}</span>}
         </div>

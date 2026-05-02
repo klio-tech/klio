@@ -59,7 +59,6 @@ export function AnatomyOfMemory() {
           {/* Hero lens — the plaintext */}
           <div className="k-anatomy-grid__hero">
             <Frame
-              variant="paper"
               path="entry.id = 8fc8f94a-7901-490a-8c9e-44dc1824384d"
               badge="memory"
               footL="kind=memory · confidence=1.0"
@@ -104,7 +103,6 @@ export function AnatomyOfMemory() {
 
           {/* Lens 2 — encrypted ciphertext */}
           <Frame
-            variant="paper"
             path="entries.content_ciphertext"
             badge="AES-256-GCM"
           >
@@ -140,7 +138,6 @@ export function AnatomyOfMemory() {
 
           {/* Lens 3 — embedding */}
           <Frame
-            variant="paper"
             path="entry_embeddings_768.embedding"
             badge="768d · nomic"
           >
@@ -183,7 +180,6 @@ export function AnatomyOfMemory() {
 
           {/* Lens 4 — hash chain */}
           <Frame
-            variant="paper"
             path="audit_log.hash"
             badge="SHA-256"
           >
@@ -224,7 +220,6 @@ export function AnatomyOfMemory() {
 
           {/* Lens 5 — metadata */}
           <Frame
-            variant="paper"
             path="SELECT * FROM entries WHERE id = …"
             badge="postgres"
           >
@@ -262,7 +257,6 @@ export function AnatomyOfMemory() {
 
           {/* Lens 6 — wire frame */}
           <Frame
-            variant="paper"
             path="redis pub channel: space:f11e05be…"
             badge="frame"
           >

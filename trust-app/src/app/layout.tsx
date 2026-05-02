@@ -1,12 +1,26 @@
 import type { Metadata } from "next";
-import { Geist, Instrument_Serif, JetBrains_Mono } from "next/font/google";
+import { IBM_Plex_Mono, Instrument_Serif } from "next/font/google";
 
 import "./globals.css";
 
-const sans = Geist({
+/**
+ * Two fonts only — supadata-style. IBM Plex Mono carries body, lists,
+ * code, button text, and labels. Instrument Serif carries display
+ * headlines and italic emphasis. Hierarchy comes from size, weight,
+ * and serif-vs-mono contrast — not from a sans+mono+serif zoo or
+ * any colour accent.
+ *
+ * The font is loaded once and exposed via TWO CSS variables —
+ * `--font-mono` for explicit code-block contexts and `--font-sans`
+ * as the body alias — so legacy references to `--font-sans-stack`
+ * keep rendering the right glyphs without a sweep through every
+ * inline style.
+ */
+const mono = IBM_Plex_Mono({
   subsets: ["latin"],
   weight: ["300", "400", "500", "600"],
-  variable: "--font-sans",
+  style: ["normal", "italic"],
+  variable: "--font-mono",
   display: "swap",
 });
 
@@ -15,13 +29,6 @@ const serif = Instrument_Serif({
   weight: ["400"],
   style: ["normal", "italic"],
   variable: "--font-serif",
-  display: "swap",
-});
-
-const mono = JetBrains_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500", "700"],
-  variable: "--font-mono",
   display: "swap",
 });
 
@@ -58,7 +65,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${sans.variable} ${serif.variable} ${mono.variable}`}
+      className={`${serif.variable} ${mono.variable}`}
       suppressHydrationWarning
     >
       <body>{children}</body>

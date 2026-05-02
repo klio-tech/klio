@@ -149,7 +149,7 @@ export function QuickStart() {
                     line.emphasis === "ok"
                       ? "#9bd486"
                       : line.emphasis === "accent"
-                        ? "#ff8a55"
+                        ? "#0a0a0a"
                         : "#8a8378";
                   return (
                     <div
