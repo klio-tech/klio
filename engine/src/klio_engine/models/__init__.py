@@ -4,6 +4,12 @@ from klio_engine.models.agent import Agent, AgentKind
 from klio_engine.models.audit import AuditLogEntry
 from klio_engine.models.base import Base
 from klio_engine.models.entry import Entry, EntryKind
+from klio_engine.models.entry_embedding import (
+    SHADOW_BY_DIM,
+    EntryEmbedding768,
+    EntryEmbedding1024,
+    EntryEmbedding1536,
+)
 from klio_engine.models.notarization import AuditNotarization
 from klio_engine.models.permission import Permission, PermissionScope
 from klio_engine.models.refresh_token import MagicLinkToken, RefreshToken
@@ -21,6 +27,10 @@ __all__ = [
     "Base",
     "Entry",
     "EntryKind",
+    "EntryEmbedding768",
+    "EntryEmbedding1024",
+    "EntryEmbedding1536",
+    "SHADOW_BY_DIM",
     "MagicLinkToken",
     "Permission",
     "PermissionScope",

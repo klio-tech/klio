@@ -1,9 +1,16 @@
-"""Entry model — the unit of all stored content."""
+"""Entry model — the unit of all stored content.
+
+Embeddings are NOT stored on this row. They live in per-dim shadow tables
+(`entry_embeddings_768`, `entry_embeddings_1024`, `entry_embeddings_1536`)
+keyed by `entry_id`. This keeps the entries table dim-agnostic and lets a
+single user run different embedding models in different spaces. See
+`klio_engine.models.entry_embedding` for the shadow models and
+`klio_engine.services.embedding_models` for the supported-model registry.
+"""
 import enum
 import uuid
 from datetime import datetime
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Enum, Float, ForeignKey, Index, LargeBinary, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -57,8 +64,6 @@ class Entry(Base):
     metadata_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     encryption_key_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
-    # Plaintext, searchable.
-    embedding: Mapped[list[float]] = mapped_column(Vector(1536), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
 
     superseded_by: Mapped[uuid.UUID | None] = mapped_column(
