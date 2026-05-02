@@ -29,7 +29,7 @@ func makeCfg(t *testing.T, cloudURL string) *config.Config {
 	return &config.Config{
 		SocketPath:  filepath.Join(dir, "bridge.sock"),
 		CloudURL:    cloudURL,
-		LocalOnly:   false,
+		LocalOnly:   true, // skip realtime subscriber to keep tests hermetic
 		CacheDBPath: filepath.Join(dir, "cache.db"),
 	}
 }

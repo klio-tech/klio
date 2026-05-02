@@ -17,11 +17,17 @@ import (
 type Config struct {
 	SocketPath     string `json:"socket_path"`
 	CloudURL       string `json:"cloud_url"`
+	RedisURL       string `json:"redis_url"`
 	LocalOnly      bool   `json:"local_only"`
 	CacheDBPath    string `json:"cache_db_path"`
 	UpdatesURL     string `json:"updates_url"`
 	LogLevel       string `json:"log_level"`
 	TelemetryOptIn bool   `json:"telemetry_opt_in"`
+	// PinnedCertSHA256 is an optional SHA-256 fingerprint (hex) of the
+	// expected leaf TLS cert for KLIO_API_URL. When set, the daemon's HTTPS
+	// transport rejects any cert whose fingerprint does not match.
+	// Empty string disables pinning (default).
+	PinnedCertSHA256 string `json:"pinned_cert_sha256"`
 }
 
 // Load returns the bridge config, applying defaults, file overrides, then env overrides.
@@ -80,6 +86,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("KLIO_API_URL"); v != "" {
 		c.CloudURL = v
 	}
+	if v := os.Getenv("KLIO_REDIS_URL"); v != "" {
+		c.RedisURL = v
+	}
 	if v := os.Getenv("KLIO_LOCAL_ONLY"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.LocalOnly = b
@@ -93,5 +102,8 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("KLIO_CACHE_DB_PATH"); v != "" {
 		c.CacheDBPath = v
+	}
+	if v := os.Getenv("KLIO_PINNED_CERT_SHA256"); v != "" {
+		c.PinnedCertSHA256 = v
 	}
 }
