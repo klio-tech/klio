@@ -40,13 +40,13 @@ export function AnatomyOfMemory() {
           <Chapter num="01" eyebrow="plaintext · what you wrote" caption="written via mcp__klio__remember from a Claude Code session, May 2 · 18:11 UTC">
             <p
               style={{
-                fontFamily: "var(--font-serif-stack)",
-                fontSize: "2rem",
-                lineHeight: 1.25,
+                fontFamily: "var(--font-mono-stack)",
+                fontWeight: 600,
+                fontSize: "1.4rem",
+                lineHeight: 1.3,
                 color: "var(--klio-foreground)",
-                fontStyle: "italic",
-                letterSpacing: "-0.018em",
-                maxWidth: "30ch",
+                letterSpacing: "-0.012em",
+                maxWidth: "34ch",
               }}
             >
               &ldquo;User prefers Bun runtime over Node and npm for
@@ -110,10 +110,12 @@ export function AnatomyOfMemory() {
               <code style={{ color: "var(--klio-muted)" }}>9b2c…f4d1</code>
               <span
                 style={{
-                  fontFamily: "var(--font-serif-stack)",
-                  fontStyle: "italic",
+                  fontFamily: "var(--font-mono-stack)",
+                  fontWeight: 700,
                   color: "var(--klio-foreground)",
-                  fontSize: "1.1rem",
+                  fontSize: "1rem",
+                  letterSpacing: "0.04em",
+                  textTransform: "uppercase",
                 }}
               >
                 this
@@ -121,7 +123,7 @@ export function AnatomyOfMemory() {
               <code
                 style={{
                   color: "var(--klio-foreground)",
-                  fontWeight: 500,
+                  fontWeight: 600,
                 }}
               >
                 a3f1…00bc
@@ -172,24 +174,24 @@ export function AnatomyOfMemory() {
               {`{`}
               <br />
               {"  "}<span style={{ color: "var(--klio-muted)" }}>type</span>:{" "}
-              <span style={{ fontStyle: "italic" }}>&quot;entry.created&quot;</span>,
+              <span style={{ color: "var(--klio-muted)" }}>&quot;entry.created&quot;</span>,
               <br />
               {"  "}<span style={{ color: "var(--klio-muted)" }}>space_id</span>:{" "}
-              <span style={{ fontStyle: "italic" }}>&quot;f11e05be…&quot;</span>,
+              <span style={{ color: "var(--klio-muted)" }}>&quot;f11e05be…&quot;</span>,
               <br />
               {"  "}<span style={{ color: "var(--klio-muted)" }}>frame_id</span>:{" "}
-              <span style={{ fontStyle: "italic" }}>&quot;d2e1088e…&quot;</span>,
+              <span style={{ color: "var(--klio-muted)" }}>&quot;d2e1088e…&quot;</span>,
               <br />
               {"  "}<span style={{ color: "var(--klio-muted)" }}>entry</span>: {`{`}
               <br />
               {"    "}<span style={{ color: "var(--klio-muted)" }}>id</span>:{" "}
-              <span style={{ fontStyle: "italic" }}>&quot;8fc8f94a-7901-…&quot;</span>,
+              <span style={{ color: "var(--klio-muted)" }}>&quot;8fc8f94a-7901-…&quot;</span>,
               <br />
               {"    "}<span style={{ color: "var(--klio-muted)" }}>kind</span>:{" "}
-              <span style={{ fontStyle: "italic" }}>&quot;memory&quot;</span>,
+              <span style={{ color: "var(--klio-muted)" }}>&quot;memory&quot;</span>,
               <br />
               {"    "}<span style={{ color: "var(--klio-muted)" }}>created_at</span>:{" "}
-              <span style={{ fontStyle: "italic" }}>
+              <span style={{ color: "var(--klio-muted)" }}>
                 &quot;2026-05-02T18:11:52Z&quot;
               </span>
               <br />
@@ -237,12 +239,12 @@ function Chapter({
       <div>
         <div
           style={{
-            fontFamily: "var(--font-serif-stack)",
-            fontSize: "clamp(3.2rem, 6vw, 5rem)",
+            fontFamily: "var(--font-mono-stack)",
+            fontWeight: 700,
+            fontSize: "clamp(2.4rem, 4.4vw, 3.6rem)",
             lineHeight: 0.95,
-            letterSpacing: "-0.04em",
+            letterSpacing: "-0.03em",
             color: "var(--klio-foreground)",
-            fontStyle: "italic",
           }}
         >
           {num}

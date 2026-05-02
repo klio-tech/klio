@@ -34,17 +34,18 @@ export function LandingHeader() {
           style={{
             display: "inline-flex",
             alignItems: "center",
-            gap: "0.55rem",
+            gap: "0.7rem",
             color: "var(--klio-foreground)",
           }}
         >
-          <KlioMark size={22} />
+          <KlioMark size={32} />
           <span
             style={{
               fontFamily: "var(--font-mono-stack)",
-              fontSize: "1.02rem",
-              fontWeight: 500,
-              letterSpacing: "-0.005em",
+              fontSize: "1.45rem",
+              fontWeight: 700,
+              letterSpacing: "-0.01em",
+              lineHeight: 1,
             }}
           >
             klio

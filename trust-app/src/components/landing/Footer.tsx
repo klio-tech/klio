@@ -55,16 +55,18 @@ export function Footer() {
               style={{
                 display: "inline-flex",
                 alignItems: "center",
-                gap: "0.55rem",
+                gap: "0.7rem",
                 color: "var(--klio-foreground)",
               }}
             >
-              <KlioMark size={24} />
+              <KlioMark size={32} />
               <span
                 style={{
                   fontFamily: "var(--font-mono-stack)",
-                  fontSize: "1.05rem",
-                  fontWeight: 500,
+                  fontSize: "1.4rem",
+                  fontWeight: 700,
+                  letterSpacing: "-0.01em",
+                  lineHeight: 1,
                 }}
               >
                 klio
@@ -72,16 +74,17 @@ export function Footer() {
             </a>
             <p
               style={{
-                marginTop: "1rem",
-                fontFamily: "var(--font-serif-stack)",
-                fontSize: "1.15rem",
-                lineHeight: 1.4,
+                marginTop: "1.1rem",
+                fontFamily: "var(--font-mono-stack)",
+                fontSize: "0.92rem",
+                lineHeight: 1.5,
                 color: "var(--klio-muted)",
-                fontStyle: "italic",
                 maxWidth: "32ch",
               }}
             >
-              Persistent memory for every AI agent. Local-first, encrypted, MCP-native.
+              Shared memory for every AI coding agent.
+              <br />
+              Local-first, encrypted, MCP-native.
             </p>
           </div>
 

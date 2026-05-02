@@ -1,34 +1,25 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Mono, Instrument_Serif } from "next/font/google";
+import { IBM_Plex_Mono } from "next/font/google";
 
 import "./globals.css";
 
 /**
- * Two fonts only — supadata-style. IBM Plex Mono carries body, lists,
- * code, button text, and labels. Instrument Serif carries display
- * headlines and italic emphasis. Hierarchy comes from size, weight,
- * and serif-vs-mono contrast — not from a sans+mono+serif zoo or
- * any colour accent.
+ * One font — supadata's actual recipe. IBM Plex Mono carries
+ * everything (display, body, code, labels). Hierarchy comes from
+ * weight and size only. No serif, no sans, no third typeface.
  *
- * The font is loaded once and exposed via TWO CSS variables —
- * `--font-mono` for explicit code-block contexts and `--font-sans`
- * as the body alias — so legacy references to `--font-sans-stack`
- * keep rendering the right glyphs without a sweep through every
- * inline style.
+ * Weights loaded:
+ *   300 — light, used for caption-tier annotations
+ *   400 — body
+ *   500 — medium, used for emphasis within body
+ *   600 — semibold, used for h3 + button text
+ *   700 — bold, used for display headlines
  */
 const mono = IBM_Plex_Mono({
   subsets: ["latin"],
-  weight: ["300", "400", "500", "600"],
+  weight: ["300", "400", "500", "600", "700"],
   style: ["normal", "italic"],
   variable: "--font-mono",
-  display: "swap",
-});
-
-const serif = Instrument_Serif({
-  subsets: ["latin"],
-  weight: ["400"],
-  style: ["normal", "italic"],
-  variable: "--font-serif",
   display: "swap",
 });
 
@@ -65,7 +56,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${serif.variable} ${mono.variable}`}
+      className={mono.variable}
       suppressHydrationWarning
     >
       <body>{children}</body>

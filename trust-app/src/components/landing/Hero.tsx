@@ -114,19 +114,19 @@ export function Hero() {
             {/* Setup line — the cross-agent recall story */}
             <p
               style={{
-                fontFamily: "var(--font-serif-stack)",
-                fontStyle: "italic",
-                fontSize: "1.15rem",
-                lineHeight: 1.4,
+                fontFamily: "var(--font-mono-stack)",
+                fontSize: "0.92rem",
+                fontWeight: 500,
+                lineHeight: 1.5,
                 color: "var(--klio-muted)",
-                maxWidth: "32ch",
+                maxWidth: "36ch",
               }}
             >
               What another agent sees on{" "}
-              <span style={{ fontStyle: "normal" }} className="k-mono">
+              <code style={{ color: "var(--klio-foreground)", fontWeight: 600 }}>
                 recall(&hellip;)
-              </span>{" "}
-              — milliseconds after the first one writes.
+              </code>
+              {" "}— milliseconds after the first one writes.
             </p>
 
             {/* Top hairline */}
@@ -165,11 +165,16 @@ export function Hero() {
                   </span>
                   <span
                     style={{
-                      fontFamily: "var(--font-serif-stack)",
-                      fontStyle: "italic",
-                      fontSize: "0.95rem",
+                      fontFamily: "var(--font-mono-stack)",
+                      fontSize: "0.7rem",
+                      fontWeight: 600,
+                      letterSpacing: "0.14em",
+                      textTransform: "uppercase",
                       color: "var(--klio-foreground)",
-                      letterSpacing: "-0.005em",
+                      padding: "0.18rem 0.5rem",
+                      border: "1px solid var(--klio-border-strong)",
+                      borderRadius: "2px",
+                      whiteSpace: "nowrap",
                     }}
                   >
                     {e.kind}

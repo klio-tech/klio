@@ -28,17 +28,19 @@ export default async function AppLayout({
           style={{
             display: "inline-flex",
             alignItems: "center",
-            gap: "0.55rem",
+            gap: "0.65rem",
             textDecoration: "none",
             color: "var(--klio-foreground)",
           }}
         >
-          <KlioMark size={20} />
+          <KlioMark size={28} />
           <span
             style={{
               fontFamily: "var(--font-mono-stack)",
-              fontSize: "1rem",
-              fontWeight: 500,
+              fontSize: "1.25rem",
+              fontWeight: 700,
+              letterSpacing: "-0.01em",
+              lineHeight: 1,
             }}
           >
             klio

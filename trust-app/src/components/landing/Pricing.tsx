@@ -86,14 +86,13 @@ export function Pricing() {
             <div style={planLabel}>klio cloud · waitlist</div>
             <h3
               style={{
-                fontFamily: "var(--font-serif-stack)",
-                fontWeight: 400,
-                fontStyle: "italic",
-                fontSize: "2.6rem",
+                fontFamily: "var(--font-mono-stack)",
+                fontWeight: 700,
+                fontSize: "2.2rem",
                 lineHeight: 1.05,
                 marginTop: "0.6rem",
                 color: "var(--klio-foreground)",
-                letterSpacing: "-0.02em",
+                letterSpacing: "-0.025em",
               }}
             >
               soon
@@ -104,7 +103,6 @@ export function Pricing() {
                   marginLeft: "0.5rem",
                   color: "var(--klio-muted)",
                   fontWeight: 400,
-                  fontStyle: "normal",
                 }}
               >
                 / per-seat

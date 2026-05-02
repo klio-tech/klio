@@ -90,11 +90,11 @@ export function QuickStart() {
                 {/* Numeral */}
                 <div
                   style={{
-                    fontFamily: "var(--font-serif-stack)",
-                    fontStyle: "italic",
-                    fontSize: "clamp(2.4rem, 4vw, 3.4rem)",
+                    fontFamily: "var(--font-mono-stack)",
+                    fontWeight: 700,
+                    fontSize: "clamp(2rem, 3.4vw, 2.8rem)",
                     lineHeight: 0.95,
-                    letterSpacing: "-0.03em",
+                    letterSpacing: "-0.025em",
                     color: "var(--klio-foreground)",
                   }}
                 >
@@ -105,10 +105,10 @@ export function QuickStart() {
                 <div>
                   <h3
                     style={{
-                      fontFamily: "var(--font-serif-stack)",
-                      fontWeight: 400,
-                      fontSize: "1.45rem",
-                      lineHeight: 1.25,
+                      fontFamily: "var(--font-mono-stack)",
+                      fontWeight: 700,
+                      fontSize: "1.18rem",
+                      lineHeight: 1.3,
                       letterSpacing: "-0.012em",
                       color: "var(--klio-foreground)",
                       marginBottom: "1rem",
@@ -155,15 +155,15 @@ export function QuickStart() {
               </article>
             ))}
 
-            {/* Closing line — dashboard URL as an editorial flourish */}
+            {/* Closing line */}
             <p
               style={{
                 marginTop: "2.4rem",
-                fontFamily: "var(--font-serif-stack)",
-                fontStyle: "italic",
-                fontSize: "1.35rem",
+                fontFamily: "var(--font-mono-stack)",
+                fontWeight: 600,
+                fontSize: "1.05rem",
                 color: "var(--klio-foreground)",
-                letterSpacing: "-0.01em",
+                letterSpacing: "-0.005em",
               }}
             >
               Then{" "}
@@ -173,8 +173,8 @@ export function QuickStart() {
                 style={{ color: "var(--klio-foreground)" }}
               >
                 open the dashboard
-              </a>{" "}
-              — your memories, your machine.
+              </a>
+              {" "}— your memories, your machine.
             </p>
           </div>
         </div>

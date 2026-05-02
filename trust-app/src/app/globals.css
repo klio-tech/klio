@@ -3,21 +3,21 @@
    ───────────────────────────────────────────────────────────────────────── */
 
 :root {
-  /* Typography — two fonts only, supadata-style.
-     The "sans-stack" alias points at the same monospace as
-     "mono-stack" so legacy inline styles render with the right
-     glyphs without a per-file sweep. Hierarchy is built from
-     size + weight + serif-vs-mono contrast, not from a third
-     typeface. */
-  --font-sans-stack: var(--font-mono), "SF Mono", Menlo, Consolas, monospace;
-  --font-mono-stack: var(--font-mono), "SF Mono", Menlo, Consolas, monospace;
-  --font-serif-stack: var(--font-serif), "Iowan Old Style", Georgia, serif;
+  /* Typography — one font, supadata-style. IBM Plex Mono carries
+     everything; hierarchy is weight + size only. The sans + serif
+     stack aliases all resolve to mono so any legacy inline styles
+     render with the right glyphs. */
+  --font-sans-stack:  var(--font-mono), "SF Mono", Menlo, Consolas, monospace;
+  --font-mono-stack:  var(--font-mono), "SF Mono", Menlo, Consolas, monospace;
+  --font-serif-stack: var(--font-mono), "SF Mono", Menlo, Consolas, monospace;
 
-  /* Klio palette — pure monochrome on warm paper. No accent.
-     Hierarchy is the typography's job; colour shouldn't be
-     fighting for attention. */
-  --klio-background: #fafaf7;
-  --klio-paper: #f5f3ec;
+  /* Klio palette — pure monochrome on light cream paper. No accent.
+     Hierarchy is the typography's job; colour shouldn't be fighting
+     for attention. The background is bumped lighter than the
+     original #fafaf7 to read as cream-on-bright rather than
+     paper-with-yellowing. */
+  --klio-background: #fbfaf6;
+  --klio-paper: #f3f0e7;
   --klio-foreground: #0a0a0a;
   --klio-muted: #6f6b62;
   --klio-faint: #a8a395;
@@ -180,31 +180,31 @@ button.secondary { background: transparent; color: var(--foreground); border: 1p
 }
 
 .k-display {
-  font-family: var(--font-serif-stack);
-  font-weight: 400;
-  font-size: clamp(2.6rem, 6.4vw, 5.4rem);
-  line-height: 0.98;
-  letter-spacing: -0.025em;
-  color: var(--klio-foreground);
-}
-.k-display em {
-  font-style: italic;
-  font-weight: 400;
-}
-
-.k-h2 {
-  font-family: var(--font-serif-stack);
-  font-weight: 400;
-  font-size: clamp(1.9rem, 3.6vw, 3rem);
-  line-height: 1.04;
+  font-family: var(--font-mono-stack);
+  font-weight: 700;
+  font-size: clamp(2rem, 4.8vw, 3.6rem);
+  line-height: 1.1;
   letter-spacing: -0.02em;
   color: var(--klio-foreground);
 }
+.k-display em {
+  font-style: normal;
+  font-weight: 700;
+}
+
+.k-h2 {
+  font-family: var(--font-mono-stack);
+  font-weight: 700;
+  font-size: clamp(1.5rem, 2.8vw, 2.1rem);
+  line-height: 1.18;
+  letter-spacing: -0.012em;
+  color: var(--klio-foreground);
+}
 .k-h3 {
-  font-family: var(--font-sans-stack);
-  font-weight: 500;
-  font-size: 1.06rem;
-  letter-spacing: -0.005em;
+  font-family: var(--font-mono-stack);
+  font-weight: 600;
+  font-size: 1.02rem;
+  letter-spacing: 0;
   color: var(--klio-foreground);
 }
 
