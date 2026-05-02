@@ -1,86 +1,36 @@
-import { Frame } from "./Frame";
-import type { ReactNode } from "react";
-
 /**
- * Quick-start — terminal session, not a code block.
- *
- * Each command shows realistic post-execution output beneath it,
- * so a developer can see exactly what success looks like before
- * they run anything. No syntax highlighter library; the
- * `tk-*` classes from globals.css colour everything inline.
+ * Quick-start — numbered editorial steps. Each step is a serif-headed
+ * passage with a clean indented monospace code block underneath.
+ * No terminal chrome, no traffic-light dots, no "elapsed 1m 47s"
+ * theatrics. The information is the same; the form is editorial.
  */
 
-type Token = { kind?: "comment" | "cmd" | "flag" | "arg" | "ok"; text: string };
-type Line =
-  | { kind: "cmd"; tokens: Token[] }
-  | { kind: "out"; text: string; emphasis?: "ok" | "muted" | "accent" }
-  | { kind: "blank" };
-
-const SESSION: Line[] = [
-  { kind: "cmd", tokens: [{ kind: "comment", text: "# 1. clone + provision dependencies" }] },
+const STEPS: { n: string; title: string; lines: string[]; note?: string }[] = [
   {
-    kind: "cmd",
-    tokens: [
-      { kind: "cmd", text: "git" },
-      { text: " clone https://github.com/klio-tech/klio.git" },
+    n: "01",
+    title: "Clone the repo, bring everything up.",
+    lines: [
+      "git clone https://github.com/klio-tech/klio.git",
+      "cd klio && make first-run",
     ],
+    note: "Brings up Postgres + Redis + Ollama, runs migrations, builds /tmp/klio and /tmp/klio-mcp.",
   },
-  { kind: "out", text: "Cloning into 'klio'…  receiving objects: 100% (1247/1247) — 4.3 MiB", emphasis: "muted" },
   {
-    kind: "cmd",
-    tokens: [
-      { kind: "cmd", text: "cd" },
-      { text: " klio && " },
-      { kind: "cmd", text: "make" },
-      { kind: "arg", text: " first-run" },
-    ],
+    n: "02",
+    title: "Provision your account, wire Claude Code.",
+    lines: ["KLIO_USE_FILE_KEYCHAIN=1 /tmp/klio init"],
+    note: "Patches ~/.claude.json (MCP server) and ~/.claude/settings.json (six hooks + permissions). Writes ~/.klio/local-dev.env so the dashboard can auto-login.",
   },
-  { kind: "out", text: "✔  postgres up · pgvector ready · 5433/tcp",      emphasis: "ok" },
-  { kind: "out", text: "✔  redis up · 6380/tcp",                          emphasis: "ok" },
-  { kind: "out", text: "✔  ollama (native, metal) · nomic-embed-text",    emphasis: "ok" },
-  { kind: "out", text: "✔  alembic upgrade head — 5 migrations applied",  emphasis: "ok" },
-  { kind: "out", text: "✔  built  /tmp/klio  /tmp/klio-mcp",              emphasis: "ok" },
-
-  { kind: "blank" },
-  { kind: "cmd", tokens: [{ kind: "comment", text: "# 2. provision your account + wire claude code" }] },
   {
-    kind: "cmd",
-    tokens: [
-      { kind: "flag", text: "KLIO_USE_FILE_KEYCHAIN=1" },
-      { text: " " },
-      { kind: "cmd", text: "/tmp/klio" },
-      { kind: "arg", text: " init" },
+    n: "03",
+    title: "Run the daemon, start the dashboard.",
+    lines: [
+      "KLIO_USE_FILE_KEYCHAIN=1 /tmp/klio daemon &",
+      "docker compose up -d trust-app",
     ],
+    note: "Daemon binds the Unix socket; dashboard becomes available at http://127.0.0.1:3000.",
   },
-  { kind: "out", text: "✔  user_id           0311adba-2cf9-4caf-ae8e-a4b2da552579", emphasis: "ok" },
-  { kind: "out", text: "✔  default_space     f11e05be-e340-…  (768d · nomic)",      emphasis: "ok" },
-  { kind: "out", text: "✔  patched           ~/.claude.json + ~/.claude/settings.json", emphasis: "ok" },
-  { kind: "out", text: "✔  wrote             ~/.klio/local-dev.env  ./.env",        emphasis: "ok" },
-
-  { kind: "blank" },
-  { kind: "cmd", tokens: [{ kind: "comment", text: "# 3. start daemon + dashboard" }] },
-  {
-    kind: "cmd",
-    tokens: [
-      { kind: "cmd", text: "/tmp/klio" },
-      { kind: "arg", text: " daemon" },
-      { text: " &" },
-      { text: "  " },
-      { kind: "cmd", text: "docker" },
-      { kind: "arg", text: " compose up -d trust-app" },
-    ],
-  },
-  { kind: "out", text: "→ open http://127.0.0.1:3000", emphasis: "accent" },
 ];
-
-function token(t: Token, i: number): ReactNode {
-  if (!t.kind) return <span key={i}>{t.text}</span>;
-  return (
-    <span key={i} className={`tk-${t.kind}`}>
-      {t.text}
-    </span>
-  );
-}
 
 export function QuickStart() {
   return (
@@ -94,15 +44,15 @@ export function QuickStart() {
           className="quick-grid"
           style={{
             display: "grid",
-            gridTemplateColumns: "minmax(0, 5fr) minmax(0, 7fr)",
-            gap: "3rem",
+            gridTemplateColumns: "minmax(0, 0.9fr) minmax(0, 1.6fr)",
+            gap: "4rem",
             alignItems: "start",
           }}
         >
           <header>
             <p className="k-eyebrow">two minutes</p>
             <h2 className="k-h2" style={{ marginTop: "1rem" }}>
-              From zero to recall in five commands.
+              From zero to recall in three steps.
             </h2>
             <p className="k-lede" style={{ marginTop: "1.2rem" }}>
               Klio runs entirely on your machine. The bridge daemon talks to
@@ -123,52 +73,110 @@ export function QuickStart() {
             </p>
           </header>
 
-          <Frame
-            path="zsh — /Users/you/klio"
-            badge="LIVE"
-            footL={
-              <>
-                <span style={{ color: "var(--klio-accent)" }}>●</span>{" "}
-                healthcheck — postgres · redis · ollama
-              </>
-            }
-            footR="elapsed 1m 47s"
-            style={{ minWidth: 0 }}
-          >
-            <div
+          <div>
+            {STEPS.map((s, i) => (
+              <article
+                key={s.n}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(80px, 0.14fr) minmax(0, 1fr)",
+                  columnGap: "1.6rem",
+                  paddingBlock: "2.2rem",
+                  borderTop: i === 0 ? "1px solid var(--klio-foreground)" : "0",
+                  borderBottom: "1px solid var(--klio-foreground)",
+                }}
+                className="quick-step"
+              >
+                {/* Numeral */}
+                <div
+                  style={{
+                    fontFamily: "var(--font-serif-stack)",
+                    fontStyle: "italic",
+                    fontSize: "clamp(2.4rem, 4vw, 3.4rem)",
+                    lineHeight: 0.95,
+                    letterSpacing: "-0.03em",
+                    color: "var(--klio-foreground)",
+                  }}
+                >
+                  {s.n}
+                </div>
+
+                {/* Title + code + note */}
+                <div>
+                  <h3
+                    style={{
+                      fontFamily: "var(--font-serif-stack)",
+                      fontWeight: 400,
+                      fontSize: "1.45rem",
+                      lineHeight: 1.25,
+                      letterSpacing: "-0.012em",
+                      color: "var(--klio-foreground)",
+                      marginBottom: "1rem",
+                    }}
+                  >
+                    {s.title}
+                  </h3>
+
+                  <pre
+                    style={{
+                      margin: 0,
+                      padding: "1rem 1.2rem",
+                      borderLeft: "2px solid var(--klio-foreground)",
+                      background: "var(--klio-paper)",
+                      fontFamily: "var(--font-mono-stack)",
+                      fontSize: "0.86rem",
+                      lineHeight: 1.7,
+                      color: "var(--klio-foreground)",
+                      overflowX: "auto",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                    }}
+                  >
+                    {s.lines.map((line, idx) => (
+                      <div key={idx}>{line}</div>
+                    ))}
+                  </pre>
+
+                  {s.note && (
+                    <p
+                      style={{
+                        marginTop: "1rem",
+                        fontFamily: "var(--font-mono-stack)",
+                        fontSize: "0.78rem",
+                        color: "var(--klio-muted)",
+                        lineHeight: 1.55,
+                        maxWidth: "70ch",
+                      }}
+                    >
+                      {s.note}
+                    </p>
+                  )}
+                </div>
+              </article>
+            ))}
+
+            {/* Closing line — dashboard URL as an editorial flourish */}
+            <p
               style={{
-                fontFamily: "var(--font-mono-stack)",
-                fontSize: "0.78rem",
-                lineHeight: 1.7,
+                marginTop: "2.4rem",
+                fontFamily: "var(--font-serif-stack)",
+                fontStyle: "italic",
+                fontSize: "1.35rem",
+                color: "var(--klio-foreground)",
+                letterSpacing: "-0.01em",
               }}
             >
-              {SESSION.map((line, idx) => {
-                if (line.kind === "blank") return <div key={idx}>&nbsp;</div>;
-                if (line.kind === "out") {
-                  const color =
-                    line.emphasis === "ok"
-                      ? "#9bd486"
-                      : line.emphasis === "accent"
-                        ? "#0a0a0a"
-                        : "#8a8378";
-                  return (
-                    <div
-                      key={idx}
-                      style={{ color, paddingLeft: "1.2em" }}
-                    >
-                      {line.text}
-                    </div>
-                  );
-                }
-                return (
-                  <div key={idx}>
-                    <span style={{ color: "#6f6b62" }}>$ </span>
-                    {line.tokens.map(token)}
-                  </div>
-                );
-              })}
-            </div>
-          </Frame>
+              Then{" "}
+              <a
+                href="http://127.0.0.1:3000"
+                className="k-link"
+                style={{ color: "var(--klio-foreground)" }}
+              >
+                open the dashboard
+              </a>{" "}
+              — your memories, your machine.
+            </p>
+          </div>
         </div>
       </div>
     </section>

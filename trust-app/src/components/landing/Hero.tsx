@@ -1,39 +1,27 @@
-import { Frame } from "./Frame";
-import { Json } from "./Json";
-
 /**
- * Hero — split layout. Editorial serif H1 on the left, a real-looking
- * MCP recall response in a calm paper-style card on the right.
- *
- * The card isn't decorative — it's literally the JSON shape that
- * klio-mcp returns to a calling agent. A developer reading the
- * page recognises the protocol immediately and the value prop
- * lands without prose having to claim it.
+ * Hero — split layout. Editorial serif H1 on the left; on the right,
+ * an annotated specimen of what an agent actually receives back from
+ * a recall() call. No terminal chrome — the typography is the
+ * container.
  */
 
-const RECALL_RESPONSE = {
-  jsonrpc: "2.0",
-  id: 1,
-  result: {
-    content: [
-      {
-        type: "text",
-        text:
-          "Found 3 relevant entries:\n" +
-          "1. [memory]   User prefers Bun runtime over Node and npm\n" +
-          "2. [decision] Deploy on Railway, not Fly.io\n" +
-          "3. [memory]   Klio uses per-space embeddings (768/1024/1536)",
-      },
-    ],
-    metadata: {
-      space_id: "f11e05be-…",
-      embedding_model: "ollama/nomic-embed-text",
-      dim: 768,
-      ranked_by: "cosine",
-      total_ms: 4.2,
-    },
+const ENTRIES = [
+  {
+    n: "01",
+    kind: "memory",
+    text: "User prefers Bun runtime over Node and npm for JavaScript projects.",
   },
-};
+  {
+    n: "02",
+    kind: "decision",
+    text: "Deploy on Railway, not Fly.io — reduces code complexity.",
+  },
+  {
+    n: "03",
+    kind: "memory",
+    text: "Per-space embeddings with shadow tables (768 / 1024 / 1536).",
+  },
+];
 
 export function Hero() {
   return (
@@ -47,17 +35,14 @@ export function Hero() {
           style={{
             display: "grid",
             gridTemplateColumns: "minmax(0, 1.05fr) minmax(0, 0.95fr)",
-            gap: "3.5rem",
+            gap: "4rem",
             alignItems: "center",
           }}
         >
-          {/* Left column — editorial */}
+          {/* Left — editorial */}
           <div>
             <p className="k-eyebrow k-rise" data-stagger="1">
-              <span style={{ color: "var(--klio-accent)" }}>●</span>
-              <span style={{ marginLeft: "0.5rem" }}>
-                memory layer · model context protocol
-              </span>
+              memory layer · model context protocol
             </p>
 
             <h1
@@ -111,7 +96,6 @@ export function Hero() {
                   fontFamily: "var(--font-mono-stack)",
                   fontSize: "0.72rem",
                   color: "var(--klio-faint)",
-                  letterSpacing: "0.04em",
                 }}
               >
                 v0.1.0 · open source · 0 telemetry
@@ -119,63 +103,103 @@ export function Hero() {
             </div>
           </div>
 
-          {/* Right column — calm paper card with a real MCP response */}
-          <div className="k-rise" data-stagger="3" style={{ minWidth: 0 }}>
-            <Frame
-              path="POST /v1/spaces/{id}/recall"
-              badge="MCP"
-              footL={
-                <>
-                  <span style={{ color: "var(--klio-accent)" }}>●</span>{" "}
-                  200 OK · 4.2 ms
-                </>
-              }
-              footR="space:f11e05be · nomic-768"
+          {/* Right — recall specimen, no terminal chrome */}
+          <aside
+            className="k-rise"
+            data-stagger="3"
+            style={{ minWidth: 0, paddingLeft: "0.5rem" }}
+          >
+            {/* Setup line — the question being asked */}
+            <p
+              style={{
+                fontFamily: "var(--font-serif-stack)",
+                fontStyle: "italic",
+                fontSize: "1.15rem",
+                lineHeight: 1.4,
+                color: "var(--klio-muted)",
+                maxWidth: "30ch",
+              }}
             >
-              <p
-                style={{
-                  marginBottom: "0.85rem",
-                  color: "var(--klio-muted)",
-                  fontFamily: "var(--font-mono-stack)",
-                  fontSize: "0.74rem",
-                  fontStyle: "italic",
-                }}
-              >
-                {`// what an agent receives back from klio-mcp`}
-              </p>
-              <div
-                style={{
-                  marginBottom: "0.65rem",
-                  display: "flex",
-                  gap: "0.5rem",
-                  fontFamily: "var(--font-mono-stack)",
-                  fontSize: "0.78rem",
-                }}
-              >
-                <span style={{ color: "var(--klio-faint)" }}>{">"}</span>
-                <span style={{ color: "var(--klio-foreground)", fontWeight: 500 }}>
-                  recall
-                </span>
-                <span style={{ color: "var(--klio-faint)" }}>{"({"}</span>
-                <span className="k-tok-key">query</span>
-                <span style={{ color: "var(--klio-faint)" }}>: </span>
-                <span className="k-tok-str">
-                  &quot;which JS runtime do I prefer?&quot;
-                </span>
-                <span style={{ color: "var(--klio-faint)" }}>{"})"}</span>
-              </div>
-              <div
-                style={{
-                  fontFamily: "var(--font-mono-stack)",
-                  fontSize: "0.78rem",
-                  lineHeight: 1.65,
-                  color: "var(--klio-foreground)",
-                }}
-              >
-                <Json value={RECALL_RESPONSE} />
-              </div>
-            </Frame>
-          </div>
+              On a <span style={{ fontStyle: "normal" }} className="k-mono">recall(&hellip;)</span> call,
+              this is what an agent receives back.
+            </p>
+
+            {/* Top hairline */}
+            <hr
+              style={{
+                border: 0,
+                height: 1,
+                background: "var(--klio-foreground)",
+                margin: "1.4rem 0 0.9rem",
+              }}
+            />
+
+            {/* Three numbered specimen rows */}
+            <ol style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {ENTRIES.map((e) => (
+                <li
+                  key={e.n}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "auto auto 1fr",
+                    columnGap: "1.1rem",
+                    alignItems: "baseline",
+                    paddingBlock: "0.7rem",
+                    borderBottom: "1px solid var(--klio-border)",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: "var(--font-mono-stack)",
+                      fontSize: "0.7rem",
+                      color: "var(--klio-faint)",
+                      letterSpacing: "0.08em",
+                    }}
+                  >
+                    {e.n}
+                  </span>
+                  <span
+                    style={{
+                      fontFamily: "var(--font-serif-stack)",
+                      fontStyle: "italic",
+                      fontSize: "0.95rem",
+                      color: "var(--klio-foreground)",
+                      letterSpacing: "-0.005em",
+                    }}
+                  >
+                    {e.kind}
+                  </span>
+                  <span
+                    style={{
+                      fontFamily: "var(--font-mono-stack)",
+                      fontSize: "0.84rem",
+                      lineHeight: 1.45,
+                      color: "var(--klio-foreground)",
+                    }}
+                  >
+                    {e.text}
+                  </span>
+                </li>
+              ))}
+            </ol>
+
+            {/* Bottom annotation */}
+            <p
+              style={{
+                marginTop: "1rem",
+                fontFamily: "var(--font-mono-stack)",
+                fontSize: "0.72rem",
+                color: "var(--klio-muted)",
+                letterSpacing: "0.02em",
+              }}
+            >
+              ranked by cosine · 768-d nomic · 4.2 ms
+              <br />
+              <span style={{ color: "var(--klio-faint)" }}>
+                from your space — encrypted on disk, never leaves your laptop.
+              </span>
+            </p>
+          </aside>
         </div>
       </div>
     </section>

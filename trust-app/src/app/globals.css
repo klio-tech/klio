@@ -352,114 +352,19 @@ button.secondary { background: transparent; color: var(--foreground); border: 1p
 }
 .k-toggle--pending { opacity: 0.6; }
 
-/* ─── Code blocks ─────────────────────────────────────────────────── */
-
-/* ─── Frame chrome — calm paper card with optional bar ────────────── */
-
-.k-frame {
-  background: var(--klio-paper);
-  color: var(--klio-foreground);
-  border: 1px solid var(--klio-border);
-  border-radius: 0.5rem;
-  font-family: var(--font-mono-stack);
-  font-size: 0.8rem;
-  line-height: 1.65;
-  overflow: hidden;
+/* Anatomy + QuickStart — editorial chapters / numbered steps.
+   Layout lives inline in the components; the small responsive
+   collapse below stacks the numeral above the body on narrow
+   screens so it never gets squeezed. */
+@media (max-width: 720px) {
+  .anatomy-chapter,
+  .quick-step {
+    grid-template-columns: 1fr !important;
+    row-gap: 1rem !important;
+  }
 }
 
-.k-frame__bar {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.5rem 0.85rem;
-  background: var(--klio-background);
-  border-bottom: 1px solid var(--klio-border);
-  font-size: 0.7rem;
-  letter-spacing: 0;
-  color: var(--klio-muted);
-}
-
-.k-frame__path {
-  flex: 1;
-  font-family: var(--font-mono-stack);
-  font-size: 0.7rem;
-  color: var(--klio-muted);
-  letter-spacing: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.k-frame__badge {
-  font-family: var(--font-mono-stack);
-  font-size: 0.62rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--klio-foreground);
-  padding: 0.1rem 0.5rem;
-  border: 1px solid var(--klio-border-strong);
-  border-radius: 2px;
-  flex-shrink: 0;
-}
-
-.k-frame__body {
-  padding: 1.1rem 1.25rem;
-  overflow-x: auto;
-  background: var(--klio-paper);
-}
-
-.k-frame__foot {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.5rem 1.25rem;
-  background: var(--klio-background);
-  border-top: 1px solid var(--klio-border);
-  font-size: 0.68rem;
-  color: var(--klio-muted);
-  letter-spacing: 0.02em;
-}
-
-/* JSON syntax — paper-friendly, low-contrast colors */
-.k-tok-key     { color: #b35c00; }
-.k-tok-str     { color: #2c5e2c; }
-.k-tok-num     { color: #1f549c; }
-.k-tok-bool    { color: #a23076; }
-.k-tok-null    { color: var(--klio-muted); }
-.k-tok-punct   { color: var(--klio-faint); }
-.k-tok-comment { color: var(--klio-muted); font-style: italic; }
-
-/* Anatomy section — multi-lens entry display */
-.k-anatomy-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
-}
-@media (max-width: 880px) {
-  .k-anatomy-grid { grid-template-columns: 1fr; }
-}
-.k-anatomy-grid > .k-anatomy-grid__hero {
-  grid-column: 1 / -1;
-}
-.k-lens-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-family: var(--font-mono-stack);
-  font-size: 0.65rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--klio-faint);
-}
-.k-lens-label__num {
-  color: var(--klio-accent);
-  font-weight: 500;
-}
-
-/* Flow / architecture diagram lines */
-.k-flow {
-  position: relative;
-}
+/* Flow / architecture diagram caption */
 .k-flow__caption {
   font-family: var(--font-mono-stack);
   font-size: 0.7rem;
