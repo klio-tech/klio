@@ -50,7 +50,7 @@ SPDX identifier: `AGPL-3.0-or-later`.
   it's the entire reason AGPL was written.
 - **Embed AGPL Klio (engine, daemon, trust-app) inside a
   closed-source product**: not allowed without a commercial
-  license. Email asingh@oppla.ai to discuss one if you need
+  license. Email contact@klio.tech to discuss one if you need
   embedding rights.
 
 ### Why AGPL v3 instead of GPL v3 or Apache?
@@ -164,4 +164,4 @@ explicit when files get copied around.
 
 ## Questions / commercial license inquiries
 
-asingh@oppla.ai · [klio.tech](https://klio.tech)
+contact@klio.tech · [klio.tech](https://klio.tech)

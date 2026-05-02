@@ -3,8 +3,8 @@ name = "klio-engine"
 version = "0.0.1"
 description = "Klio substrate engine — the local-first, encrypted, MCP-native memory layer for AI agents."
 readme = "../README.md"
-authors = [{ name = "Abhishek Singh", email = "asingh@oppla.ai" }]
-maintainers = [{ name = "Abhishek Singh", email = "asingh@oppla.ai" }]
+authors = [{ name = "Abhishek Singh", email = "contact@klio.tech" }]
+maintainers = [{ name = "Abhishek Singh", email = "contact@klio.tech" }]
 license = { text = "AGPL-3.0-or-later" }
 keywords = [
     "ai-agents",

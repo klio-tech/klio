@@ -12,7 +12,7 @@ body:
         on without repro steps.
 
         For **security vulnerabilities**, do NOT use this form. Email
-        asingh@oppla.ai per [SECURITY.md](https://github.com/klio-tech/klio/blob/main/SECURITY.md).
+        contact@klio.tech per [SECURITY.md](https://github.com/klio-tech/klio/blob/main/SECURITY.md).
 
   - type: input
     id: version
@@ -103,5 +103,5 @@ body:
           required: true
         - label: I have searched existing issues for this bug
           required: true
-        - label: This is not a security vulnerability (those go to asingh@oppla.ai)
+        - label: This is not a security vulnerability (those go to contact@klio.tech)
           required: true

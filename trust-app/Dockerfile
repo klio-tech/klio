@@ -16,9 +16,9 @@
 
 FROM node:20-alpine AS deps
 WORKDIR /app
-# .npmrc carries `legacy-peer-deps=true` for the next@15.0.3 / react@19
-# peer-dep mismatch — must be in WORKDIR before npm ci runs.
-COPY package.json package-lock.json .npmrc ./
+# Next.js 16 + React 19 (stable) resolve cleanly under strict
+# peer-dep mode, so no .npmrc workaround is needed.
+COPY package.json package-lock.json ./
 RUN npm ci
 
 FROM node:20-alpine AS build

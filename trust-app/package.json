@@ -14,7 +14,7 @@
   },
   "author": {
     "name": "Abhishek Singh",
-    "email": "asingh@oppla.ai",
+    "email": "contact@klio.tech",
     "url": "https://klio.tech"
   },
   "license": "AGPL-3.0-or-later",
@@ -37,7 +37,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "next": "15.0.3",
+    "next": "^16.2.4",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "jose": "5.9.6",

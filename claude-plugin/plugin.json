@@ -4,7 +4,7 @@
   "description": "Klio — local-first, encrypted, MCP-native memory layer for AI agents. Adds shared cross-session memory to Claude Code via 7 MCP tools and 6 hook events.",
   "author": {
     "name": "Abhishek Singh",
-    "email": "asingh@oppla.ai",
+    "email": "contact@klio.tech",
     "url": "https://klio.tech"
   },
   "license": "Apache-2.0",

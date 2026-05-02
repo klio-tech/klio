@@ -11,7 +11,7 @@ the world before we have a chance to patch.
 
 Instead, email the author directly:
 
-  📧 **asingh@oppla.ai**
+  📧 **contact@klio.tech**
 
 Subject line prefix `[Klio Security]` so it doesn't get lost in
 normal correspondence.

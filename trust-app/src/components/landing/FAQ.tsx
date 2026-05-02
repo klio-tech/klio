@@ -28,7 +28,7 @@ const QA: { q: string; a: string }[] = [
   },
   {
     q: "What's the license, and can I embed Klio in a closed-source product?",
-    a: "Split license. The MCP shim and Claude Code plugin are Apache 2.0 — you can embed them anywhere. The engine, daemon, and trust-app are AGPL v3 — fork freely, but a hosted modified version must release its source. Email asingh@oppla.ai for a commercial license if you need to embed the AGPL components in a closed product.",
+    a: "Split license. The MCP shim and Claude Code plugin are Apache 2.0 — you can embed them anywhere. The engine, daemon, and trust-app are AGPL v3 — fork freely, but a hosted modified version must release its source. Email contact@klio.tech for a commercial license if you need to embed the AGPL components in a closed product.",
   },
 ];
 

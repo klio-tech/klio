@@ -353,7 +353,7 @@ deployment.
 
 **Abhishek Singh** ·
 [@7hakurg](https://github.com/7hakurg) ·
-asingh@oppla.ai ·
+contact@klio.tech ·
 [oppla.ai](https://oppla.ai)
 
 Klio is a separate brand from [Vex](https://tryvex.dev) — the author's
@@ -381,7 +381,7 @@ This split lets the protocol layer be embedded everywhere while protecting
 the engine from rent-seeking cloud forks.
 
 For commercial licensing of the AGPL components (e.g., to embed Klio's
-engine in a closed-source product), email asingh@oppla.ai.
+engine in a closed-source product), email contact@klio.tech.
 
 The future **Klio Cloud** (hosted, multi-tenant) is a separate proprietary
 product on top of the same AGPL engine — see [LICENSING.md](LICENSING.md)

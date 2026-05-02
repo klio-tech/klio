@@ -177,5 +177,5 @@ signed with Sigstore once we set that up post-launch.
 ## Help & questions
 
 - Discussion: [GitHub Discussions](https://github.com/klio-tech/klio/discussions)
-- Email the author: asingh@oppla.ai
+- Email the author: contact@klio.tech
 - Klio website: [klio.tech](https://klio.tech)

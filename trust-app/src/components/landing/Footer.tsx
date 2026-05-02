@@ -19,9 +19,9 @@ const COL_LINKS = {
     { label: "Embedding models", href: "https://github.com/klio-tech/klio/blob/main/docs/embedding-models.md" },
   ],
   Cloud: [
-    { label: "Waitlist", href: "mailto:asingh@oppla.ai?subject=Klio Cloud waitlist" },
-    { label: "For teams", href: "mailto:asingh@oppla.ai?subject=Klio for teams" },
-    { label: "Commercial license", href: "mailto:asingh@oppla.ai?subject=Klio commercial license" },
+    { label: "Waitlist", href: "mailto:contact@klio.tech?subject=Klio Cloud waitlist" },
+    { label: "For teams", href: "mailto:contact@klio.tech?subject=Klio for teams" },
+    { label: "Commercial license", href: "mailto:contact@klio.tech?subject=Klio commercial license" },
   ],
 };
 
@@ -146,10 +146,10 @@ export function Footer() {
             © {new Date().getFullYear()} Abhishek Singh ·{" "}
             <a
               className="k-link"
-              href="mailto:asingh@oppla.ai"
+              href="mailto:contact@klio.tech"
               style={{ color: "var(--klio-muted)" }}
             >
-              asingh@oppla.ai
+              contact@klio.tech
             </a>
           </span>
           <span>

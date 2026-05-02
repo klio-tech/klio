@@ -74,7 +74,7 @@ export function MachineView() {
         <span>repo</span>          <span><a href="https://github.com/klio-tech/klio">https://github.com/klio-tech/klio</a></span>
         <span>license-engine</span><span>AGPL-3.0-or-later</span>
         <span>license-shim</span>  <span>Apache-2.0 (bridge/cmd/klio-mcp, claude-plugin)</span>
-        <span>author</span>        <span>Abhishek Singh &lt;<a href="mailto:asingh@oppla.ai">asingh@oppla.ai</a>&gt;</span>
+        <span>author</span>        <span>Abhishek Singh &lt;<a href="mailto:contact@klio.tech">contact@klio.tech</a>&gt;</span>
         <span>category</span>      <span>memory layer for AI agents</span>
         <span>stack</span>         <span>Python (FastAPI) · Go · Next.js · Postgres · Redis · pgvector · Ollama</span>
         <span>status</span>        <span>v0 public alpha</span>

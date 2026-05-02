@@ -131,7 +131,7 @@ export function Pricing() {
             </ul>
 
             <a
-              href="mailto:asingh@oppla.ai?subject=Klio Cloud waitlist"
+              href="mailto:contact@klio.tech?subject=Klio Cloud waitlist"
               className="k-btn k-btn--primary"
               style={{ marginTop: "2rem" }}
             >
