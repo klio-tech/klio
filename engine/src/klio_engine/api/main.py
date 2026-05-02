@@ -13,6 +13,7 @@ from klio_engine.api.entries import entry_delete_router
 from klio_engine.api.entries import recall_router
 from klio_engine.api.entries import router as entries_router
 from klio_engine.api.health import router as health_router
+from klio_engine.api.ingest import router as ingest_router
 from klio_engine.api.spaces import permissions_router
 from klio_engine.api.spaces import router as spaces_router
 from klio_engine.api.users import router as users_router
@@ -36,6 +37,7 @@ def build_app() -> FastAPI:
     app.include_router(recall_router)
     app.include_router(agents_router)
     app.include_router(audit_router)
+    app.include_router(ingest_router)
     return app
 
 
