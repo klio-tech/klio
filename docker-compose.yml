@@ -31,6 +31,24 @@ services:
       timeout: 3s
       retries: 10
 
+  # Local embedding + extraction model server. Speaks the OpenAI-compatible
+  # API on :11434, which LiteLLM routes to via the `ollama/<model>` prefix.
+  # Pull models with `make ollama-pull` after the container is up.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: klio-ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - klio-ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
 volumes:
   klio-postgres-data:
   klio-redis-data:
+  klio-ollama-data:
