@@ -76,22 +76,22 @@ async def test_login_link_issues_token_for_known_user(
     api_client: TestClient,
 ) -> None:
     """When the email maps to a user, a magic-link row gets persisted."""
-    # Provision an account via the API
+    # Unique email per run so we don't collide with rows from prior test runs.
+    email = f"loginlink-test-{uuid.uuid4().hex[:12]}@example.com"
+
     prov = api_client.post(
         "/v1/users/provision",
         json={
             "agent_kind": "claude-code",
             "install_id": str(uuid.uuid4()),
-            "email": "claimed@example.com",
+            "email": email,
         },
     ).json()
     user_id = uuid.UUID(prov["user_id"])
 
     before_count = await _count_magic_links(user_id)
 
-    r = api_client.post(
-        "/v1/auth/login-link", json={"email": "claimed@example.com"}
-    )
+    r = api_client.post("/v1/auth/login-link", json={"email": email})
     assert r.status_code == 200
 
     after_count = await _count_magic_links(user_id)

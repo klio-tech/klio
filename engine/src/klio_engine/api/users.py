@@ -161,8 +161,16 @@ async def login_link(
     from klio_engine.models.user import User
 
     email_hash = hashlib.sha256(str(body.email).encode()).hexdigest()
+    # Use .first() rather than .scalar_one_or_none() to be tolerant of
+    # multiple rows sharing the same email_hash (legacy data, dev DB, etc).
+    # Picking the most-recently-claimed user is the right tiebreaker.
     user = (
-        await session.execute(select(User).where(User.email_hash == email_hash))
+        await session.execute(
+            select(User)
+            .where(User.email_hash == email_hash)
+            .order_by(User.claimed_at.desc().nulls_last(), User.created_at.desc())
+            .limit(1)
+        )
     ).scalar_one_or_none()
 
     if user is not None and user.deleted_at is None:
