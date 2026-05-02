@@ -1,0 +1,8 @@
+Contact: mailto:security@klio.tech
+Contact: https://klio.tech/security
+Encryption: https://klio.tech/security/pgp-public-key.asc
+Acknowledgments: https://klio.tech/security/hall-of-fame
+Policy: https://klio.tech/security
+Preferred-Languages: en
+Canonical: https://klio.tech/.well-known/security.txt
+Expires: 2027-05-02T00:00:00.000Z
