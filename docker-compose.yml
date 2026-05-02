@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: klio-postgres
+    environment:
+      POSTGRES_USER: klio
+      POSTGRES_PASSWORD: klio_dev_password
+      POSTGRES_DB: klio
+    ports:
+      - "5433:5432"
+    volumes:
+      - klio-postgres-data:/var/lib/postgresql/data
+      - ./infra/sql/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U klio -d klio"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: klio-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - klio-redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  klio-postgres-data:
+  klio-redis-data:

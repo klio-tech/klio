@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+dist/
+build/
+*.egg
+
+# Go
+bin/
+*.test
+*.out
+vendor/
+
+# Node
+node_modules/
+.next/
+.turbo/
+*.tsbuildinfo
+.pnpm-store/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Klio runtime
+.klio/
+*.klio-backup-*
