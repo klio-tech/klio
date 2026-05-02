@@ -12,9 +12,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
+	"github.com/klio-tech/bridge/internal/backfill"
 	"github.com/klio-tech/bridge/internal/bootstrap"
+	"github.com/klio-tech/bridge/internal/cloud"
 	"github.com/klio-tech/bridge/internal/config"
 	"github.com/klio-tech/bridge/internal/daemon"
 	"github.com/klio-tech/bridge/internal/hooks"
@@ -42,6 +45,8 @@ func main() {
 		runUninstall(os.Args[2:])
 	case "hook":
 		runHook(os.Args[2:])
+	case "backfill":
+		runBackfill(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
 		printUsage()
@@ -203,6 +208,102 @@ func runHook(args []string) {
 	os.Exit(exit)
 }
 
+func runBackfill(args []string) {
+	flags := flag.NewFlagSet("backfill", flag.ExitOnError)
+	defaultRoot := func() string {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".claude", "projects")
+	}()
+	root := flags.String("root", defaultRoot, "directory of session JSONL files")
+	confirm := flags.Bool("confirm", false, "skip the interactive 'proceed?' prompt")
+	maxParallel := flags.Int("parallel", 4, "max concurrent sessions to process")
+	_ = flags.Parse(args)
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		os.Exit(1)
+	}
+	keys := buildKeychain()
+
+	rt, err := keys.Get("refresh_token")
+	if err != nil || len(rt) == 0 {
+		fmt.Fprintln(os.Stderr, "no Klio credentials found — run `klio init` first")
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+
+	// Mint a fresh access token via /v1/tokens/refresh.
+	c := cloud.NewClient(cfg.CloudURL)
+	c.SetRefreshToken(string(rt))
+	if err := c.Refresh(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "refresh failed:", err)
+		os.Exit(1)
+	}
+	// Persist the rotated refresh token so daemons see it on next start.
+	_ = keys.Set("refresh_token", []byte(c.RefreshToken()))
+
+	// Walk + cost preview.
+	projects, err := backfill.Walk(*root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "walk:", err)
+		os.Exit(1)
+	}
+	sessionCount := 0
+	totalBytes := int64(0)
+	for _, p := range projects {
+		for _, s := range p.Sessions {
+			info, err := os.Stat(s.Path)
+			if err != nil {
+				continue
+			}
+			sessionCount++
+			totalBytes += info.Size()
+		}
+	}
+	fmt.Printf("Found %d sessions across %d projects (~%.1f MB).\n",
+		sessionCount, len(projects), float64(totalBytes)/(1024*1024))
+	if sessionCount == 0 {
+		fmt.Println("Nothing to do.")
+		return
+	}
+	if !*confirm {
+		fmt.Print("Proceed? [y/N]: ")
+		var resp string
+		_, _ = fmt.Scanln(&resp)
+		if !strings.EqualFold(resp, "y") {
+			fmt.Println("Aborted.")
+			return
+		}
+	}
+
+	cpPath := filepath.Join(filepath.Dir(cfg.CacheDBPath), "backfill-checkpoint.json")
+	cp := backfill.NewCheckpoint(cpPath)
+
+	client := backfill.NewHTTPClient(cfg.CloudURL, c.AccessToken())
+	report, err := backfill.Run(ctx, backfill.Options{
+		Root: *root, Client: client, Checkpoint: cp, MaxConcurrency: *maxParallel,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "backfill ended with %d errors:\n", len(report.Errors))
+		for _, e := range report.Errors[:min(len(report.Errors), 10)] {
+			fmt.Fprintln(os.Stderr, "  -", e)
+		}
+	}
+	fmt.Printf(
+		"Processed %d sessions, skipped %d (already done), failed %d.\n",
+		report.ProcessedSessions, report.SkippedSessions, report.FailedSessions,
+	)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: klio [version|daemon|status|init|uninstall|hook]")
+	fmt.Fprintln(os.Stderr, "usage: klio [version|daemon|status|init|uninstall|hook|backfill]")
 }
