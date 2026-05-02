@@ -21,6 +21,7 @@ from klio_engine.schemas.entries import (
 from klio_engine.services.acl import ACLDeniedError, check_permission
 from klio_engine.services.embeddings import EmbeddingService
 from klio_engine.services.entries import EntryService
+from klio_engine.services.publisher import RedisPublisher
 from klio_engine.services.recall import RecallService
 
 router = APIRouter(prefix="/v1/spaces/{space_id}/entries", tags=["entries"])
@@ -73,6 +74,31 @@ async def write_entry(
         confidence=body.confidence,
     )
     await session.commit()
+
+    # Publish for real-time fan-out. Best-effort; never block the write
+    # response on a Redis hiccup.
+    try:
+        publisher = RedisPublisher()
+        try:
+            await publisher.publish_entry_created(
+                space_id=space_id,
+                entry={
+                    "id": str(e.id),
+                    "space_id": str(e.space_id),
+                    "agent_id": str(e.agent_id),
+                    "kind": e.kind.value,
+                    "content": body.content,
+                    "confidence": e.confidence,
+                    "created_at": e.created_at.isoformat(),
+                },
+            )
+        finally:
+            await publisher.close()
+    except Exception:
+        import structlog
+
+        structlog.get_logger().warning("publish_entry_created.failed", entry_id=str(e.id))
+
     return EntryResponse(
         id=e.id,
         space_id=e.space_id,
