@@ -8,6 +8,7 @@ package cloud
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,17 +38,33 @@ type Client struct {
 	refreshToken string
 }
 
-// NewClient returns a Client configured for baseURL.
+// NewClient returns a Client for baseURL with no TLS cert pinning.
+// Use NewClientWithPinning for production deployments against api.klio.tech.
 func NewClient(baseURL string) *Client {
+	return NewClientWithPinning(baseURL, "")
+}
+
+// NewClientWithPinning returns a Client that requires the leaf TLS cert's
+// SHA-256 fingerprint to equal `pinnedCertSHA256` (hex, optional colons).
+// Empty string disables pinning. Pinning is *additive* to standard CA chain
+// verification, never a replacement.
+func NewClientWithPinning(baseURL, pinnedCertSHA256 string) *Client {
+	transport := &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 5,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	if v := pinnedTLSVerify(pinnedCertSHA256); v != nil {
+		transport.TLSClientConfig = &tls.Config{
+			MinVersion:       tls.VersionTLS12,
+			VerifyConnection: v,
+		}
+	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				MaxIdleConnsPerHost: 5,
-				IdleConnTimeout:     90 * time.Second,
-			},
+			Timeout:   30 * time.Second,
+			Transport: transport,
 		},
 	}
 }

@@ -45,7 +45,7 @@ func New(cfg *config.Config, keys keychain.Backend) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	cl := cloud.NewClient(cfg.CloudURL)
+	cl := cloud.NewClientWithPinning(cfg.CloudURL, cfg.PinnedCertSHA256)
 
 	d := &Daemon{
 		cfg:        cfg,
