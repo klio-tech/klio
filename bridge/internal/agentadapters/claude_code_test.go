@@ -2,11 +2,33 @@ package agentadapters
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// fakeClaude writes a stub `claude` shell script that records its
+// invocations to logFile and exits 0. Returns the absolute path of the
+// stub. Used by all Install tests to avoid invoking the real Claude
+// Code CLI.
+func fakeClaude(t *testing.T, logFile string) string {
+	t.Helper()
+	tmp := t.TempDir()
+	binPath := filepath.Join(tmp, "claude")
+	script := fmt.Sprintf(`#!/usr/bin/env bash
+{
+  echo "ARGS:"
+  for a in "$@"; do echo "  $a"; done
+} >> %q
+exit 0
+`, logFile)
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	return binPath
+}
 
 func defaultCfg() Config {
 	return Config{
@@ -32,53 +54,54 @@ func TestClaudeCodeDetectsViaSettings(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeInstallPatchesMcpAndHooks(t *testing.T) {
+func TestClaudeCodeInstallRegistersMcpAndPatchesHooks(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
 	dir := filepath.Join(tmp, ".claude")
 	_ = os.MkdirAll(dir, 0o755)
-	original := map[string]any{
-		"theme": "dark",
-		"mcpServers": map[string]any{
-			"existing": map[string]any{"command": "x"},
-		},
-	}
-	body, _ := json.Marshal(original)
-	_ = os.WriteFile(filepath.Join(dir, "settings.json"), body, 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"theme":"dark"}`), 0o644)
 
-	adapter := NewClaudeCodeAdapter()
+	logFile := filepath.Join(tmp, "claude-invocations.log")
+	adapter := &ClaudeCodeAdapter{claudeCLI: fakeClaude(t, logFile)}
+
 	if err := adapter.Install(defaultCfg()); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
+	// The fake claude must have been called twice: first to remove
+	// any prior klio entry (idempotency), then to add the fresh one.
+	// `claude mcp add-json` errors when the entry already exists, so
+	// the remove must come first on EVERY install.
+	logBody, _ := os.ReadFile(logFile)
+	log := string(logBody)
+	removeIdx := strings.Index(log, "remove")
+	addIdx := strings.Index(log, "add-json")
+	if removeIdx == -1 {
+		t.Errorf("expected `claude mcp remove` call; got log:\n%s", log)
+	}
+	if addIdx == -1 {
+		t.Errorf("expected `claude mcp add-json` call; got log:\n%s", log)
+	}
+	if removeIdx >= 0 && addIdx >= 0 && removeIdx >= addIdx {
+		t.Errorf("`mcp remove` must precede `mcp add-json`; got log:\n%s", log)
+	}
+	for _, want := range []string{"mcp", "add-json", "--scope", "user", "klio"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("expected claude CLI to be called with %q; got log:\n%s", want, log)
+		}
+	}
+	if !strings.Contains(log, "/tmp/klio-mcp") {
+		t.Errorf("expected MCP payload to mention klio-mcp binary; got:\n%s", log)
+	}
+
+	// Hooks must be patched into settings.json with absolute paths.
 	updated, _ := os.ReadFile(filepath.Join(dir, "settings.json"))
 	var got map[string]any
 	_ = json.Unmarshal(updated, &got)
-
 	if got["theme"] != "dark" {
 		t.Fatal("preserved theme key was lost")
 	}
-
-	mcp := got["mcpServers"].(map[string]any)
-	if _, ok := mcp["existing"]; !ok {
-		t.Fatal("preserved existing mcpServer entry was removed")
-	}
-	klio, ok := mcp["klio"].(map[string]any)
-	if !ok {
-		t.Fatal("klio entry not added")
-	}
-	if klio["command"] != "/tmp/klio-mcp" {
-		t.Fatalf("command: %v", klio["command"])
-	}
-	klioEnv, ok := klio["env"].(map[string]any)
-	if !ok {
-		t.Fatal("klio MCP entry missing env block")
-	}
-	if klioEnv["KLIO_SOCKET_PATH"] != "/home/u/.klio/bridge.sock" {
-		t.Fatalf("env.KLIO_SOCKET_PATH: %v", klioEnv["KLIO_SOCKET_PATH"])
-	}
-
 	hooks, ok := got["hooks"].(map[string]any)
 	if !ok {
 		t.Fatal("hooks block missing")
@@ -99,6 +122,51 @@ func TestClaudeCodeInstallPatchesMcpAndHooks(t *testing.T) {
 		if _, ok := hookEntry["env"].(map[string]any); !ok {
 			t.Errorf("hook %s missing env block", name)
 		}
+	}
+
+	// settings.json must NOT contain a stale mcpServers.klio entry —
+	// the MCP server lives in ~/.claude.json now (registered via the CLI).
+	if mcp, ok := got["mcpServers"].(map[string]any); ok {
+		if _, has := mcp["klio"]; has {
+			t.Error("mcpServers.klio should not be in settings.json after migration")
+		}
+	}
+}
+
+func TestClaudeCodeInstallStripsLegacyMcpServersEntry(t *testing.T) {
+	// Earlier Klio versions wrote an inert mcpServers.klio block into
+	// settings.json. Re-install must clean it up so we don't leave
+	// stale config around.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	dir := filepath.Join(tmp, ".claude")
+	_ = os.MkdirAll(dir, 0o755)
+	original := map[string]any{
+		"mcpServers": map[string]any{
+			"klio":  map[string]any{"command": "/old/path/klio-mcp"},
+			"other": map[string]any{"command": "/something/else"},
+		},
+		"hooks": map[string]any{},
+	}
+	body, _ := json.Marshal(original)
+	_ = os.WriteFile(filepath.Join(dir, "settings.json"), body, 0o644)
+
+	logFile := filepath.Join(tmp, "claude.log")
+	adapter := &ClaudeCodeAdapter{claudeCLI: fakeClaude(t, logFile)}
+	if err := adapter.Install(defaultCfg()); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	updated, _ := os.ReadFile(filepath.Join(dir, "settings.json"))
+	var got map[string]any
+	_ = json.Unmarshal(updated, &got)
+
+	mcp, _ := got["mcpServers"].(map[string]any)
+	if _, has := mcp["klio"]; has {
+		t.Error("legacy mcpServers.klio should have been removed")
+	}
+	if _, has := mcp["other"]; !has {
+		t.Error("unrelated mcpServers entries must be preserved")
 	}
 }
 
@@ -127,7 +195,8 @@ func TestClaudeCodeUninstallRestoresBackup(t *testing.T) {
 	original := []byte(`{"theme":"dark"}`)
 	_ = os.WriteFile(filepath.Join(dir, "settings.json"), original, 0o644)
 
-	adapter := NewClaudeCodeAdapter()
+	logFile := filepath.Join(tmp, "claude.log")
+	adapter := &ClaudeCodeAdapter{claudeCLI: fakeClaude(t, logFile)}
 	_ = adapter.Install(defaultCfg())
 	if err := adapter.Uninstall(); err != nil {
 		t.Fatalf("Uninstall: %v", err)
@@ -147,9 +216,14 @@ func TestClaudeCodeInstallIsIdempotent(t *testing.T) {
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(filepath.Join(dir, "settings.json"), []byte("{}"), 0o644)
 
-	adapter := NewClaudeCodeAdapter()
-	_ = adapter.Install(defaultCfg())
-	_ = adapter.Install(defaultCfg()) // second call should not duplicate
+	logFile := filepath.Join(tmp, "claude.log")
+	adapter := &ClaudeCodeAdapter{claudeCLI: fakeClaude(t, logFile)}
+	if err := adapter.Install(defaultCfg()); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	if err := adapter.Install(defaultCfg()); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
 
 	updated, _ := os.ReadFile(filepath.Join(dir, "settings.json"))
 	var got map[string]any
@@ -176,7 +250,9 @@ func TestClaudeCodeReinstallUpdatesEnv(t *testing.T) {
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(filepath.Join(dir, "settings.json"), []byte("{}"), 0o644)
 
-	adapter := NewClaudeCodeAdapter()
+	logFile := filepath.Join(tmp, "claude.log")
+	adapter := &ClaudeCodeAdapter{claudeCLI: fakeClaude(t, logFile)}
+
 	old := defaultCfg()
 	old.Env["KLIO_SOCKET_PATH"] = "/old/path/bridge.sock"
 	_ = adapter.Install(old)
@@ -195,6 +271,30 @@ func TestClaudeCodeReinstallUpdatesEnv(t *testing.T) {
 	hookEntry := hookList[0].(map[string]any)
 	env := hookEntry["env"].(map[string]any)
 	if env["KLIO_SOCKET_PATH"] != "/new/path/bridge.sock" {
-		t.Fatalf("re-install did not update env: %v", env)
+		t.Fatalf("re-install did not update hook env: %v", env)
+	}
+
+	// Also verify the MCP registration was called twice with the new env.
+	logBody, _ := os.ReadFile(logFile)
+	if !strings.Contains(string(logBody), "/new/path/bridge.sock") {
+		t.Errorf("re-install did not pass new env to claude CLI; log:\n%s", logBody)
+	}
+}
+
+func TestClaudeCodeInstallFailsWhenClaudeCLIMissing(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("PATH", tmp) // no `claude` here
+	dir := filepath.Join(tmp, ".claude")
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "settings.json"), []byte("{}"), 0o644)
+
+	adapter := NewClaudeCodeAdapter()
+	err := adapter.Install(defaultCfg())
+	if err == nil {
+		t.Fatal("expected Install to fail when claude CLI is missing")
+	}
+	if !strings.Contains(err.Error(), "claude") {
+		t.Errorf("error should mention `claude` CLI; got: %v", err)
 	}
 }

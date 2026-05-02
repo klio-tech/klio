@@ -1,24 +1,60 @@
 package agentadapters
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
-// ClaudeCodeAdapter detects Claude Code via ~/.claude/settings.json and
-// patches both the mcpServers map and the hooks block.
+// ClaudeCodeAdapter wires Klio into Claude Code by:
 //
-// Critical detail: Claude Code spawns hook commands via the OS process
-// API with a minimal PATH (typically /usr/bin:/bin), so any reference
-// to `klio` as a bare command name fails to resolve when the binary
-// lives in /tmp, /opt/klio/bin, or anywhere else not on the system PATH.
-// Both the MCP `command` and every hook `command` are therefore written
-// as absolute paths sourced from the `Config` passed by the caller.
-type ClaudeCodeAdapter struct{}
+//   1. Registering the Klio MCP server via the official `claude mcp
+//      add-json` CLI (which writes to ~/.claude.json — Claude Code's
+//      master config — through Claude's own schema-aware logic).
+//   2. Patching ~/.claude/settings.json with the six event hooks
+//      (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
+//      SubagentStop, Stop).
+//
+// Why two places: Claude Code reads MCP server configs from
+// ~/.claude.json (or via `claude mcp add`), while hooks are read from
+// ~/.claude/settings.json. The earlier shipped version of this adapter
+// wrote the MCP entry into settings.json — Claude Code silently
+// ignored it, so MCP tools never loaded for new sessions, even though
+// hooks worked.
+//
+// All hook commands and the MCP server `command` are written as
+// absolute paths because Claude Code spawns these with a minimal PATH
+// (typically /usr/bin:/bin), so any reference to `klio` or
+// `klio-mcp` as bare names fails to resolve when the binaries live
+// elsewhere.
+type ClaudeCodeAdapter struct {
+	// claudeCLI is the path to the Claude Code CLI used for MCP
+	// registration. Empty falls back to LookPath("claude").
+	// Tests override via WithClaudeCLI to inject a stub.
+	claudeCLI string
+}
 
-func NewClaudeCodeAdapter() *ClaudeCodeAdapter { return &ClaudeCodeAdapter{} }
+// AdapterOption is a functional option applied at construction.
+type AdapterOption func(*ClaudeCodeAdapter)
+
+// WithClaudeCLI overrides the path to the `claude` binary the
+// adapter uses for `claude mcp add-json` / `mcp remove`. Tests use
+// this to inject a stub script instead of running the real CLI.
+func WithClaudeCLI(path string) AdapterOption {
+	return func(a *ClaudeCodeAdapter) { a.claudeCLI = path }
+}
+
+func NewClaudeCodeAdapter(opts ...AdapterOption) *ClaudeCodeAdapter {
+	a := &ClaudeCodeAdapter{}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
+}
 
 func (a *ClaudeCodeAdapter) Name() string { return "claude-code" }
 
@@ -39,10 +75,11 @@ func (a *ClaudeCodeAdapter) Installed() bool {
 	return false
 }
 
-// Install patches Claude Code settings to add Klio's MCP server and the
-// six event hooks. Idempotent: re-running with identical Config makes
-// no further changes; running with a different binary path or env
-// updates the relevant entries in place.
+// Install registers the Klio MCP server via `claude mcp add-json` and
+// patches ~/.claude/settings.json with the six event hooks. Idempotent:
+// re-running with identical Config replaces the prior MCP entry and
+// strips stale hook entries (including legacy bare-command entries
+// from older Klio versions).
 func (a *ClaudeCodeAdapter) Install(cfg Config) error {
 	if cfg.KlioBinary == "" {
 		return errors.New("agentadapters: Config.KlioBinary is required")
@@ -51,6 +88,84 @@ func (a *ClaudeCodeAdapter) Install(cfg Config) error {
 		return errors.New("agentadapters: Config.KlioMcpBinary is required")
 	}
 
+	if err := a.registerMCP(cfg); err != nil {
+		return fmt.Errorf("register MCP server via claude CLI: %w", err)
+	}
+	if err := a.patchHooks(cfg); err != nil {
+		return fmt.Errorf("patch hooks in settings.json: %w", err)
+	}
+	return nil
+}
+
+// registerMCP shells out to `claude mcp add-json --scope user klio
+// <json>` to add the Klio MCP server to ~/.claude.json. We use the CLI
+// rather than directly editing ~/.claude.json for two reasons:
+//
+//  1. ~/.claude.json holds 100KB+ of unrelated state (project
+//     bookmarks, telemetry caches, onboarding flags). Touching it via
+//     hand-rolled JSON merge risks subtle corruption on schema
+//     changes between Claude Code versions.
+//  2. The CLI knows the canonical location, scope semantics, and
+//     idempotency rules for any future Claude Code version.
+//
+// If `claude` is not on PATH (rare, since the user obviously has
+// Claude Code installed if this adapter ran), Install returns an error
+// describing how to install/expose it.
+func (a *ClaudeCodeAdapter) registerMCP(cfg Config) error {
+	cli := a.claudeCLI
+	if cli == "" {
+		path, err := exec.LookPath("claude")
+		if err != nil {
+			return fmt.Errorf(
+				"`claude` CLI not found on PATH; install Claude Code or "+
+					"pass --claude-cli to klio init: %w", err,
+			)
+		}
+		cli = path
+	}
+
+	// Build the JSON payload that `claude mcp add-json` accepts. Shape
+	// matches Claude Code's MCP server schema: command + optional args
+	// + optional env.
+	payload := map[string]any{
+		"command": cfg.KlioMcpBinary,
+		"args":    []string{},
+	}
+	if env := envToMap(cfg.Env); env != nil {
+		payload["env"] = env
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal MCP payload: %w", err)
+	}
+
+	// `claude mcp add-json` is NOT idempotent — it errors with
+	// "MCP server klio already exists in user config" if a prior
+	// registration is present, regardless of whether the contents
+	// match. Remove first (best-effort, ignored if not present) then
+	// add. The remove+add pair is atomic from Klio's perspective:
+	// either both succeed (fresh registration) or the add fails and
+	// we surface the error.
+	removeCmd := exec.Command(cli, "mcp", "remove", "--scope", "user", "klio")
+	_, _ = removeCmd.CombinedOutput()
+
+	addCmd := exec.Command(
+		cli, "mcp", "add-json", "--scope", "user", "klio", string(body),
+	)
+	out, err := addCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf(
+			"claude mcp add-json failed: %w\n  output: %s",
+			err, strings.TrimSpace(string(out)),
+		)
+	}
+	return nil
+}
+
+// patchHooks updates ~/.claude/settings.json with the six event hooks.
+// Also strips any legacy mcpServers.klio entry written by earlier
+// versions (those entries were inert — Claude Code never read them).
+func (a *ClaudeCodeAdapter) patchHooks(cfg Config) error {
 	path := a.settingsPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -71,22 +186,17 @@ func (a *ClaudeCodeAdapter) Install(cfg Config) error {
 
 	envMap := envToMap(cfg.Env)
 
-	// mcpServers — the MCP shim spawned by Claude Code at session start.
-	mcp, _ := settings["mcpServers"].(map[string]any)
-	if mcp == nil {
-		mcp = map[string]any{}
+	// Cleanup: drop any legacy mcpServers.klio entry. The MCP server
+	// belongs in ~/.claude.json, registered via `claude mcp add-json`.
+	if mcp, ok := settings["mcpServers"].(map[string]any); ok {
+		delete(mcp, "klio")
+		if len(mcp) == 0 {
+			delete(settings, "mcpServers")
+		} else {
+			settings["mcpServers"] = mcp
+		}
 	}
-	klioServer := map[string]any{
-		"command": cfg.KlioMcpBinary,
-		"args":    []string{},
-	}
-	if envMap != nil {
-		klioServer["env"] = envMap
-	}
-	mcp["klio"] = klioServer
-	settings["mcpServers"] = mcp
 
-	// hooks — six events, each calling `<KlioBinary> hook <event>`.
 	hooks, _ := settings["hooks"].(map[string]any)
 	if hooks == nil {
 		hooks = map[string]any{}
@@ -116,11 +226,19 @@ func (a *ClaudeCodeAdapter) Install(cfg Config) error {
 	return writeJSON(path, settings)
 }
 
+// Uninstall restores ~/.claude/settings.json from the most recent
+// backup AND removes the klio MCP server via `claude mcp remove`.
 func (a *ClaudeCodeAdapter) Uninstall() error {
+	// Best-effort MCP removal first; if `claude` isn't on PATH we still
+	// want to attempt the settings.json restore.
+	if cli, err := exec.LookPath("claude"); err == nil {
+		cmd := exec.Command(cli, "mcp", "remove", "--scope", "user", "klio")
+		_, _ = cmd.CombinedOutput() // ignore error: server may already be gone
+	}
 	return restoreFromBackup(a.settingsPath())
 }
 
-// envToMap returns a defensive copy as map[string]any (the JSON encoder
+// envToMap returns a defensive copy as map[string]any (JSON encoder
 // expects any-valued maps). Returns nil when the input is empty so the
 // `env` field is omitted from the output entirely.
 func envToMap(env map[string]string) map[string]any {
@@ -137,12 +255,11 @@ func envToMap(env map[string]string) map[string]any {
 // setHook ensures the hook block at (event, matcher) has exactly one
 // klio-owned command for the given subcommand suffix.
 //
-// Strips ANY prior entry whose command ends with " hook <subcmd>" — even
-// if its binary prefix differs from the new one. This keeps re-installs
-// idempotent across binary moves (e.g. the user upgraded klio from
-// /tmp/klio to /usr/local/bin/klio) and across the legacy bare-command
-// format (`klio hook session-start`) we shipped before this fix. The
-// caller passes the full new command so we can derive the suffix.
+// Strips ANY prior entry whose command ends with " hook <subcmd>" —
+// even if its binary prefix differs from the new one. This keeps
+// re-installs idempotent across binary moves (e.g. the user upgraded
+// klio from /tmp/klio to /usr/local/bin/klio) and across the legacy
+// bare-command format (`klio hook session-start`) we shipped earlier.
 func setHook(hooks map[string]any, event, matcher, command string, env map[string]any) {
 	idx := strings.LastIndex(command, " hook ")
 	hookSuffix := ""
@@ -176,7 +293,6 @@ func setHook(hooks map[string]any, event, matcher, command string, env map[strin
 				continue
 			}
 			cmd, _ := hm["command"].(string)
-			// Strip any prior klio-owned entry for this hook subcommand.
 			if hookSuffix != "" && strings.HasSuffix(cmd, hookSuffix) {
 				continue
 			}
