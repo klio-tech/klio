@@ -2,6 +2,33 @@
   "name": "klio-trust-app",
   "version": "0.0.1",
   "private": true,
+  "description": "Klio's local-first dashboard for browsing memories, spaces, and access requests. Part of the Klio open-source project.",
+  "homepage": "https://klio.tech",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/klio-tech/klio.git",
+    "directory": "trust-app"
+  },
+  "bugs": {
+    "url": "https://github.com/klio-tech/klio/issues"
+  },
+  "author": {
+    "name": "Abhishek Singh",
+    "email": "asingh@oppla.ai",
+    "url": "https://klio.tech"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "klio",
+    "ai-agents",
+    "memory",
+    "mcp",
+    "next.js",
+    "dashboard"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",

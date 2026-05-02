@@ -1,0 +1,62 @@
+name: Feature request
+description: Propose a new capability for Klio (OSS, not Klio Cloud)
+title: "[feat]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest a feature. Klio is at v0
+        with a deliberate scope — read [LICENSING.md](https://github.com/klio-tech/klio/blob/main/LICENSING.md)
+        for the open-core boundary. Cloud-only features (multi-tenant,
+        team RBAC, premium connectors, billing) are explicitly not in
+        scope for this repo.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: Describe the user / developer pain. "I'm always frustrated when…"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        High-level shape of what you'd build. Code sketches welcome
+        but not required.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        Other approaches you ruled out, and why. Helps us avoid
+        re-litigating the same decision.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope check
+      description: |
+        Klio's open-core scope is in [LICENSING.md](https://github.com/klio-tech/klio/blob/main/LICENSING.md).
+      options:
+        - Local-first feature (fits OSS scope)
+        - Improves an existing OSS surface
+        - Cloud-only (please file in Klio Cloud feedback instead)
+        - Not sure — needs scoping discussion
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Would you contribute?
+      options:
+        - label: I'd be willing to send a PR for this
+        - label: I can help review someone else's PR for this
+        - label: I'm only proposing — please staff someone else

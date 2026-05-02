@@ -1,10 +1,15 @@
 {
   "name": "klio",
   "version": "0.0.1",
-  "description": "Klio agent-collaboration substrate. Memory and shared workspaces across agents.",
-  "author": "Klio Tech",
+  "description": "Klio — local-first, encrypted, MCP-native memory layer for AI agents. Adds shared cross-session memory to Claude Code via 7 MCP tools and 6 hook events.",
+  "author": {
+    "name": "Abhishek Singh",
+    "email": "asingh@oppla.ai",
+    "url": "https://klio.tech"
+  },
   "license": "Apache-2.0",
   "homepage": "https://klio.tech",
+  "repository": "https://github.com/klio-tech/klio",
   "skills": ["./skills"],
   "commands": ["./commands"]
 }

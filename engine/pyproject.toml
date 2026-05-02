@@ -1,10 +1,41 @@
 [project]
 name = "klio-engine"
 version = "0.0.1"
-description = "Klio substrate engine — the OSS reference implementation"
-authors = [{ name = "Klio Tech", email = "engineering@klio.tech" }]
+description = "Klio substrate engine — the local-first, encrypted, MCP-native memory layer for AI agents."
+readme = "../README.md"
+authors = [{ name = "Abhishek Singh", email = "asingh@oppla.ai" }]
+maintainers = [{ name = "Abhishek Singh", email = "asingh@oppla.ai" }]
 license = { text = "Apache-2.0" }
+keywords = [
+    "ai-agents",
+    "memory",
+    "mcp",
+    "model-context-protocol",
+    "claude-code",
+    "cursor",
+    "rag",
+    "vector-database",
+    "pgvector",
+    "self-hosted",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Database",
+]
 requires-python = ">=3.12"
+
+[project.urls]
+Homepage      = "https://klio.tech"
+Repository    = "https://github.com/klio-tech/klio"
+Documentation = "https://github.com/klio-tech/klio#readme"
+Issues        = "https://github.com/klio-tech/klio/issues"
+Changelog     = "https://github.com/klio-tech/klio/releases"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",

@@ -90,7 +90,7 @@ async def claim(
     structlog.get_logger().info(
         "magic_link_dev_mode",
         to_email=str(body.email),
-        link=f"https://app.klio.tech/verify?token={plaintext}&user_id={user_id}",
+        link=f"https://klio.tech/verify?token={plaintext}&user_id={user_id}",
         mode="claim",
     )
     return ClaimResponse(magic_link_sent=True)
@@ -187,7 +187,7 @@ async def login_link(
         structlog.get_logger().info(
             "login_link_dev_mode",
             to_email=str(body.email),
-            link=f"https://app.klio.tech/verify?token={plaintext}&user_id={user.id}",
+            link=f"https://klio.tech/verify?token={plaintext}&user_id={user.id}",
             mode="login",
         )
     return LoginLinkResponse(ok=True)

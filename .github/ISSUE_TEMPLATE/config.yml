@@ -1,0 +1,13 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/klio-tech/klio/blob/main/SECURITY.md
+    about: |
+      Do NOT use the public issue tracker for security bugs.
+      Email asingh@oppla.ai per SECURITY.md.
+  - name: Klio website + waitlist
+    url: https://klio.tech
+    about: Project home, docs, and Klio Cloud waitlist.
+  - name: GitHub Discussions
+    url: https://github.com/klio-tech/klio/discussions
+    about: Open-ended questions, ideas, show-and-tell.

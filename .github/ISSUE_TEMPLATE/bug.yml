@@ -1,0 +1,107 @@
+name: Bug report
+description: Something in Klio isn't working as documented
+title: "[bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Before submitting, please make sure
+        you're on the latest `main` (or a tagged release) and that the
+        issue is reproducible — flaky one-off failures are hard to act
+        on without repro steps.
+
+        For **security vulnerabilities**, do NOT use this form. Email
+        asingh@oppla.ai per [SECURITY.md](https://github.com/klio-tech/klio/blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: Klio version
+      description: Output of `/tmp/klio version` or the commit SHA you're on.
+      placeholder: "e.g. 0.0.1 or git SHA abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      multiple: true
+      options:
+        - Engine (FastAPI / Python)
+        - Bridge daemon (Go)
+        - MCP shim (klio-mcp)
+        - Trust-app (Next.js dashboard)
+        - klio init / setup flow
+        - Hooks (Claude Code integration)
+        - Embeddings / Ollama / recall
+        - Audit chain / notarization
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (arm64)
+        - Windows / WSL
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the bug.
+      placeholder: |
+        I ran `klio init` and it failed with…
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Numbered steps that we can paste into a terminal.
+      placeholder: |
+        1. git clone https://github.com/klio-tech/klio
+        2. cd klio && make first-run
+        3. /tmp/klio init
+        4. error appears with message: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Paste the engine, daemon, or trust-app log lines around the failure.
+        Wrap in triple backticks. Redact any secrets first.
+      render: text
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Pre-submit checklist
+      options:
+        - label: I am on the latest `main` or a tagged release
+          required: true
+        - label: I have searched existing issues for this bug
+          required: true
+        - label: This is not a security vulnerability (those go to asingh@oppla.ai)
+          required: true
