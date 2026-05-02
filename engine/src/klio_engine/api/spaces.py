@@ -10,18 +10,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from klio_engine.api.auth import RequestContext, require_auth
 from klio_engine.audit.writer import write_audit_event
-from klio_engine.dependencies import get_session
+from klio_engine.config import Settings
+from klio_engine.crypto.kms_client import KMSClient
+from klio_engine.dependencies import get_kms, get_session
 from klio_engine.models.agent import Agent
 from klio_engine.models.permission import Permission, PermissionScope
 from klio_engine.models.space import Space
 from klio_engine.schemas.spaces import (
     PermissionGrant,
     PermissionResponse,
+    ReembedRequest,
+    ReembedResponse,
     SpaceCreate,
     SpacePatch,
     SpaceResponse,
 )
 from klio_engine.services.acl import ACLDeniedError, check_permission
+from klio_engine.services.embedding_models import resolve as resolve_embed_model
+from klio_engine.services.embeddings import EmbeddingService
+from klio_engine.services.reembed import reembed_space
 
 router = APIRouter(prefix="/v1/spaces", tags=["spaces"])
 permissions_router = APIRouter(
@@ -58,7 +65,14 @@ async def list_spaces(
         )
     ).scalars().all()
     return [
-        SpaceResponse(id=s.id, name=s.name, slug=s.slug, created_at=s.created_at)
+        SpaceResponse(
+            id=s.id,
+            name=s.name,
+            slug=s.slug,
+            embedding_model=s.embedding_model,
+            embedding_dim=s.embedding_dim,
+            created_at=s.created_at,
+        )
         for s in rows
     ]
 
@@ -70,7 +84,21 @@ async def create_space(
     session: AsyncSession = Depends(get_session),
 ) -> SpaceResponse:
     slug = body.slug or _slugify(body.name)
-    s = Space(user_id=ctx.user_id, name=body.name, slug=slug)
+    try:
+        spec = resolve_embed_model(
+            body.embedding_model or Settings().embedding_model
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)
+        ) from e
+    s = Space(
+        user_id=ctx.user_id,
+        name=body.name,
+        slug=slug,
+        embedding_model=spec.name,
+        embedding_dim=spec.dim,
+    )
     session.add(s)
     try:
         await session.flush()
@@ -100,7 +128,14 @@ async def create_space(
         metadata={"name": s.name, "slug": s.slug},
     )
     await session.commit()
-    return SpaceResponse(id=s.id, name=s.name, slug=s.slug, created_at=s.created_at)
+    return SpaceResponse(
+        id=s.id,
+        name=s.name,
+        slug=s.slug,
+        embedding_model=s.embedding_model,
+        embedding_dim=s.embedding_dim,
+        created_at=s.created_at,
+    )
 
 
 @router.patch("/{space_id}", response_model=SpaceResponse)
@@ -124,7 +159,64 @@ async def rename_space(
         metadata={"name": s.name},
     )
     await session.commit()
-    return SpaceResponse(id=s.id, name=s.name, slug=s.slug, created_at=s.created_at)
+    return SpaceResponse(
+        id=s.id,
+        name=s.name,
+        slug=s.slug,
+        embedding_model=s.embedding_model,
+        embedding_dim=s.embedding_dim,
+        created_at=s.created_at,
+    )
+
+
+@router.post("/{space_id}/reembed", response_model=ReembedResponse)
+async def reembed_space_endpoint(
+    space_id: uuid.UUID,
+    body: ReembedRequest,
+    ctx: RequestContext = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+    kms: KMSClient = Depends(get_kms),
+) -> ReembedResponse:
+    """Re-embed every entry in `space_id` under `body.to_model`.
+
+    Requires admin scope on the space (model swap is operationally
+    significant — it can change recall behavior for all callers). The
+    endpoint blocks until done; for large spaces, prefer running this
+    via the CLI which prints progress.
+    """
+    try:
+        await check_permission(
+            session,
+            user_id=ctx.user_id,
+            agent_id=ctx.agent_id,
+            space_id=space_id,
+            scope="admin",
+        )
+    except ACLDeniedError as e:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "admin scope required"
+        ) from e
+
+    try:
+        result = await reembed_space(
+            session,
+            kms=kms,
+            embeddings=EmbeddingService(),
+            user_id=ctx.user_id,
+            actor_agent_id=ctx.agent_id,
+            space_id=space_id,
+            to_model=body.to_model,
+        )
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+    return ReembedResponse(
+        space_id=result.space_id,
+        from_model=result.from_model,
+        from_dim=result.from_dim,
+        to_model=result.to_model,
+        to_dim=result.to_dim,
+        entries_processed=result.entries_processed,
+    )
 
 
 @router.delete("/{space_id}", status_code=status.HTTP_204_NO_CONTENT)

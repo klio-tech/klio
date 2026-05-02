@@ -19,11 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from klio_engine.audit.writer import write_audit_event
 from klio_engine.auth.refresh import issue_refresh_token
+from klio_engine.config import Settings
 from klio_engine.crypto.kms_client import KMSClient
 from klio_engine.models.agent import Agent, AgentKind
 from klio_engine.models.permission import Permission, PermissionScope
 from klio_engine.models.space import Space
 from klio_engine.models.user import User
+from klio_engine.services.embedding_models import resolve as resolve_embed_model
 from klio_engine.services.user_keys import UserKeyService
 
 
@@ -68,8 +70,17 @@ async def provision_user(
     session.add(a)
     await session.flush()
 
-    # 4. Default Space
-    s = Space(user_id=u.id, name="Default", slug="default")
+    # 4. Default Space — pinned to the deployment's default embedding
+    # model. The pin is permanent for the life of the space; switching
+    # models requires `klio reembed --space <id> --to <model>`.
+    spec = resolve_embed_model(Settings().embedding_model)
+    s = Space(
+        user_id=u.id,
+        name="Default",
+        slug="default",
+        embedding_model=spec.name,
+        embedding_dim=spec.dim,
+    )
     session.add(s)
     await session.flush()
 

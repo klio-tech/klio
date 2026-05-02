@@ -1,21 +1,35 @@
-"""Fact extraction via LLM.
+"""Fact extraction with three-tier fallback.
 
-Two modes:
-  - 'stub': deterministic heuristic extraction. For tests and self-hosted
-    users without an LLM key. Looks for sentences that match a few simple
-    patterns (e.g., "I prefer", "decided to", explicit "remember that").
-  - 'litellm': calls Claude Haiku 4.5 via LiteLLM. For cloud production.
+Picks one backend per call, in priority order:
 
-The mode is determined by KLIO_EXTRACTION_MODEL env var ('stub' picks stub).
+  1. **Anthropic / cloud LLM** if `KLIO_EXTRACTION_MODEL` is set to a real
+     model name (e.g. 'claude-haiku-4-5', 'claude-sonnet-4-6',
+     'gpt-4o-mini') AND the relevant API key is present in the
+     environment. Best quality.
+  2. **Ollama** if `KLIO_EXTRACTION_MODEL` starts with 'ollama/'. Local,
+     no API key, decent quality. The container must be running and the
+     model must already be pulled. Default: 'ollama/qwen2.5:7b-instruct'.
+  3. **Regex stub** if `KLIO_EXTRACTION_MODEL` is 'stub' (or anything
+     that fails to dispatch). Deterministic, dependency-free, used in
+     tests and as a safety net when nothing else works.
+
+Each tier emits the same `list[ExtractedEntry]` shape so callers don't
+care which backend ran.
 """
+from __future__ import annotations
+
 import json
 import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 
 VALID_KINDS = {"memory", "observation", "plan", "decision", "note"}
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -27,7 +41,6 @@ class ExtractedEntry:
 
 
 _STUB_RULES: list[tuple[str, re.Pattern[str], float]] = [
-    # (kind, regex with `fact` group, confidence)
     (
         "memory",
         re.compile(
@@ -81,13 +94,42 @@ Conversation:
 
 
 class FactExtractor:
+    """Pick a backend at construct time, fall back to stub on errors."""
+
     def __init__(self, *, model: str | None = None) -> None:
-        self._model = model or os.getenv("KLIO_EXTRACTION_MODEL", "stub")
+        self._model = (model or os.getenv("KLIO_EXTRACTION_MODEL", "stub")).strip()
+
+    @property
+    def backend(self) -> str:
+        if self._model == "stub":
+            return "stub"
+        if self._model.startswith("ollama/"):
+            return "ollama"
+        return "cloud"
 
     async def extract(self, transcript: str) -> list[ExtractedEntry]:
-        if self._model == "stub":
+        backend = self.backend
+        if backend == "stub":
             return self._stub_extract(transcript)
-        return await self._llm_extract(transcript)
+        if backend == "ollama":
+            try:
+                return await self._ollama_extract(transcript)
+            except Exception as e:
+                logger.warning(
+                    "extractor.ollama_failed_falling_back",
+                    error=str(e),
+                    model=self._model,
+                )
+                return self._stub_extract(transcript)
+        try:
+            return await self._cloud_extract(transcript)
+        except Exception as e:
+            logger.warning(
+                "extractor.cloud_failed_falling_back",
+                error=str(e),
+                model=self._model,
+            )
+            return self._stub_extract(transcript)
 
     @staticmethod
     def _stub_extract(transcript: str) -> list[ExtractedEntry]:
@@ -104,35 +146,57 @@ class FactExtractor:
                 )
         return out
 
-    async def _llm_extract(self, transcript: str) -> list[ExtractedEntry]:
-        import structlog
+    async def _ollama_extract(self, transcript: str) -> list[ExtractedEntry]:
+        """Call Ollama's chat endpoint directly. Tested with qwen2.5:7b-instruct
+        and llama3.1:8b-instruct; both follow JSON-only output reliably at
+        temperature=0.1."""
+        import httpx
+
+        from klio_engine.config import Settings
+
+        base = os.getenv(
+            "KLIO_OLLAMA_API_BASE", Settings().ollama_api_base
+        ).rstrip("/")
+        model = self._model.split("/", 1)[1]
+        prompt = EXTRACT_PROMPT.format(transcript=transcript[:50_000])
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            r = await client.post(
+                f"{base}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "options": {"temperature": 0.1, "num_predict": 2000},
+                    "format": "json",
+                },
+            )
+            r.raise_for_status()
+            content = r.json()["message"]["content"]
+        return self._parse_llm_json(content)
+
+    async def _cloud_extract(self, transcript: str) -> list[ExtractedEntry]:
+        """Call a hosted LLM via LiteLLM (Anthropic, OpenAI, etc.)."""
         from litellm import acompletion
 
         prompt = EXTRACT_PROMPT.format(transcript=transcript[:50_000])
-        log = structlog.get_logger()
-        try:
-            response = await acompletion(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=2_000,
-            )
-            content = response["choices"][0]["message"]["content"]
-        except Exception as e:
-            log.warning("extractor.llm_call_failed", error=str(e))
-            return []
-
-        return self._parse_llm_json(content, log)
+        response = await acompletion(
+            model=self._model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=2_000,
+        )
+        content = response["choices"][0]["message"]["content"]
+        return self._parse_llm_json(content)
 
     @staticmethod
-    def _parse_llm_json(raw: str, log) -> list[ExtractedEntry]:
+    def _parse_llm_json(raw: str) -> list[ExtractedEntry]:
         match = re.search(r"\{[\s\S]*\}", raw)
         if match is None:
             return []
         try:
             payload = json.loads(match.group(0))
         except json.JSONDecodeError:
-            log.warning("extractor.json_decode_failed", raw_head=raw[:200])
+            logger.warning("extractor.json_decode_failed", raw_head=raw[:200])
             return []
         out: list[ExtractedEntry] = []
         for item in payload.get("entries", []):
