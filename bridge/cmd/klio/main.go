@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/google/uuid"
+
 	"github.com/klio-tech/bridge/internal/backfill"
 	"github.com/klio-tech/bridge/internal/bootstrap"
 	"github.com/klio-tech/bridge/internal/cloud"
@@ -47,6 +49,8 @@ func main() {
 		runHook(os.Args[2:])
 	case "backfill":
 		runBackfill(os.Args[2:])
+	case "reembed":
+		runReembed(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
 		printUsage()
@@ -208,6 +212,114 @@ func runHook(args []string) {
 	os.Exit(exit)
 }
 
+func runReembed(args []string) {
+	flags := flag.NewFlagSet("reembed", flag.ExitOnError)
+	spaceArg := flags.String("space", "",
+		"space to re-embed (UUID, or 'default' to pick the only/default space)")
+	toModel := flags.String("to", "",
+		"target embedding model name (e.g. ollama/snowflake-arctic-embed2)")
+	confirm := flags.Bool("confirm", false, "skip the interactive 'proceed?' prompt")
+	_ = flags.Parse(args)
+
+	if *toModel == "" {
+		fmt.Fprintln(os.Stderr, "usage: klio reembed --space <id|default> --to <model>")
+		os.Exit(2)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		os.Exit(1)
+	}
+	keys := buildKeychain()
+	rt, err := keys.Get("refresh_token")
+	if err != nil || len(rt) == 0 {
+		fmt.Fprintln(os.Stderr, "no Klio credentials found — run `klio init` first")
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+	c := cloud.NewClient(cfg.CloudURL)
+	c.SetRefreshToken(string(rt))
+	if err := c.Refresh(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "refresh failed:", err)
+		os.Exit(1)
+	}
+	_ = keys.Set("refresh_token", []byte(c.RefreshToken()))
+
+	spaceID, err := resolveSpace(ctx, c, *spaceArg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "resolve space:", err)
+		os.Exit(1)
+	}
+
+	if !*confirm {
+		fmt.Printf(
+			"About to re-embed every entry in space %s under %q.\n"+
+				"This is irreversible — the previous embeddings are dropped.\n"+
+				"Proceed? [y/N]: ", spaceID, *toModel,
+		)
+		var resp string
+		_, _ = fmt.Scanln(&resp)
+		if !strings.EqualFold(resp, "y") {
+			fmt.Println("Aborted.")
+			return
+		}
+	}
+
+	resp, err := c.ReembedSpace(ctx, spaceID, *toModel)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "reembed failed:", err)
+		os.Exit(1)
+	}
+	fmt.Printf(
+		"Re-embedded space %s\n  from: %s (dim=%d)\n  to:   %s (dim=%d)\n  entries processed: %d\n",
+		resp.SpaceID, resp.FromModel, resp.FromDim, resp.ToModel, resp.ToDim, resp.EntriesProcessed,
+	)
+}
+
+// resolveSpace converts a user-provided space arg into a UUID. Accepts
+// either a literal UUID or the keyword "default" (returns the user's
+// only space, or fails clearly if there are multiple).
+func resolveSpace(ctx context.Context, c *cloud.Client, arg string) (uuid.UUID, error) {
+	if arg == "" || arg == "default" {
+		spaces, err := c.ListSpaces(ctx)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("list spaces: %w", err)
+		}
+		if len(spaces) == 0 {
+			return uuid.Nil, fmt.Errorf("no spaces found for this account")
+		}
+		if arg == "default" {
+			for _, s := range spaces {
+				if s.Slug == "default" {
+					return s.ID, nil
+				}
+			}
+		}
+		if len(spaces) == 1 {
+			return spaces[0].ID, nil
+		}
+		return uuid.Nil, fmt.Errorf(
+			"multiple spaces exist; pass --space <uuid> explicitly. Found: %v",
+			spaceSlugs(spaces),
+		)
+	}
+	id, err := uuid.Parse(arg)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("--space must be UUID or 'default': %w", err)
+	}
+	return id, nil
+}
+
+func spaceSlugs(spaces []cloud.Space) []string {
+	out := make([]string, len(spaces))
+	for i, s := range spaces {
+		out[i] = fmt.Sprintf("%s (%s)", s.Slug, s.ID)
+	}
+	return out
+}
+
 func runBackfill(args []string) {
 	flags := flag.NewFlagSet("backfill", flag.ExitOnError)
 	defaultRoot := func() string {
@@ -305,5 +417,6 @@ func min(a, b int) int {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: klio [version|daemon|status|init|uninstall|hook|backfill]")
+	fmt.Fprintln(os.Stderr,
+		"usage: klio [version|daemon|status|init|uninstall|hook|backfill|reembed]")
 }

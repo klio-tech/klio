@@ -28,10 +28,21 @@ type RefreshResponse struct {
 }
 
 type Space struct {
-	ID        uuid.UUID `json:"id"`
-	Name      string    `json:"name"`
-	Slug      string    `json:"slug"`
-	CreatedAt time.Time `json:"created_at"`
+	ID             uuid.UUID `json:"id"`
+	Name           string    `json:"name"`
+	Slug           string    `json:"slug"`
+	EmbeddingModel string    `json:"embedding_model"`
+	EmbeddingDim   int       `json:"embedding_dim"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type ReembedResponse struct {
+	SpaceID          uuid.UUID `json:"space_id"`
+	FromModel        string    `json:"from_model"`
+	FromDim          int       `json:"from_dim"`
+	ToModel          string    `json:"to_model"`
+	ToDim            int       `json:"to_dim"`
+	EntriesProcessed int       `json:"entries_processed"`
 }
 
 type Entry struct {

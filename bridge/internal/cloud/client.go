@@ -146,6 +146,23 @@ func (c *Client) IngestTranscript(
 	return resp, nil
 }
 
+// ReembedSpace calls POST /v1/spaces/{space_id}/reembed.
+//
+// Re-embeds every entry in the space under the supplied target model.
+// Blocks until the engine returns; for large spaces, the call may take
+// minutes. Caller should display the returned counts on success.
+func (c *Client) ReembedSpace(
+	ctx context.Context, spaceID uuid.UUID, toModel string,
+) (*ReembedResponse, error) {
+	body := map[string]any{"to_model": toModel}
+	var resp ReembedResponse
+	path := fmt.Sprintf("/v1/spaces/%s/reembed", spaceID)
+	if err := c.do(ctx, "POST", path, body, &resp, true); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // RequestAccess calls POST /v1/agents/{agent_id}/request-access.
 //
 // agentID is typically the daemon's own agent_id (the one minted at
