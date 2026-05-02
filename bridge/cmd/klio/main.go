@@ -17,6 +17,7 @@ import (
 	"github.com/klio-tech/bridge/internal/bootstrap"
 	"github.com/klio-tech/bridge/internal/config"
 	"github.com/klio-tech/bridge/internal/daemon"
+	"github.com/klio-tech/bridge/internal/hooks"
 	"github.com/klio-tech/bridge/internal/keychain"
 	"github.com/klio-tech/bridge/internal/version"
 )
@@ -39,6 +40,8 @@ func main() {
 		runInit(os.Args[2:])
 	case "uninstall":
 		runUninstall(os.Args[2:])
+	case "hook":
+		runHook(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
 		printUsage()
@@ -190,6 +193,16 @@ func runUninstall(args []string) {
 	fmt.Println("Klio uninstalled. Agent configs restored from .klio-backup files.")
 }
 
+func runHook(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: klio hook <event>")
+		os.Exit(2)
+	}
+	backend := hooks.NewSocketBackend()
+	exit := hooks.Run(args[0], backend, os.Stdin, os.Stdout, os.Stderr)
+	os.Exit(exit)
+}
+
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: klio [version|daemon|status|init|uninstall]")
+	fmt.Fprintln(os.Stderr, "usage: klio [version|daemon|status|init|uninstall|hook]")
 }

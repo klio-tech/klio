@@ -65,8 +65,13 @@ func (d *Daemon) WriteEntry(
 	// Distinguish kind. The MCP dispatcher uses tool-name as kind; map it
 	// to the engine's entry kind.
 	engineKind := kind
-	if kind == "remember" {
+	switch kind {
+	case "remember":
 		engineKind = "memory"
+	case "observe":
+		engineKind = "observation"
+	case "decide":
+		engineKind = "decision"
 	}
 	e, err := d.cloud.WriteEntry(ctx, spaceID, cloud.EntryWrite{
 		Kind: engineKind, Content: content, Metadata: metadata, Confidence: 1.0,

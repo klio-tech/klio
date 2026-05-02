@@ -1,0 +1,10 @@
+{
+  "name": "klio",
+  "version": "0.0.1",
+  "description": "Klio agent-collaboration substrate. Memory and shared workspaces across agents.",
+  "author": "Klio Tech",
+  "license": "Apache-2.0",
+  "homepage": "https://klio.tech",
+  "skills": ["./skills"],
+  "commands": ["./commands"]
+}
