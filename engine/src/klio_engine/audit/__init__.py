@@ -1,4 +1,11 @@
 """Audit log subsystem."""
-from klio_engine.audit.chain import AuditEvent, compute_hash, verify_chain
+from klio_engine.audit.chain import GENESIS_HASH, AuditEvent, compute_hash, verify_chain
+from klio_engine.audit.writer import write_audit_event
 
-__all__ = ["AuditEvent", "compute_hash", "verify_chain"]
+__all__ = [
+    "GENESIS_HASH",
+    "AuditEvent",
+    "compute_hash",
+    "verify_chain",
+    "write_audit_event",
+]
