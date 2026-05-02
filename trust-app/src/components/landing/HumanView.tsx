@@ -1,7 +1,8 @@
+import { AnatomyOfMemory } from "./AnatomyOfMemory";
 import { BuiltFor } from "./BuiltFor";
 import { Compare } from "./Compare";
 import { FAQ } from "./FAQ";
-import { Features } from "./Features";
+import { Flow } from "./Flow";
 import { Footer } from "./Footer";
 import { Hero } from "./Hero";
 import { LandingHeader } from "./LandingHeader";
@@ -16,10 +17,11 @@ export function HumanView() {
       <main>
         <Hero />
         <TrustBar />
-        <Features />
+        <AnatomyOfMemory />
+        <Flow />
+        <BuiltFor />
         <QuickStart />
         <Compare />
-        <BuiltFor />
         <Pricing />
         <FAQ />
       </main>
