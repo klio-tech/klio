@@ -138,6 +138,10 @@ func runInit(args []string) {
 	mcpBin := flags.String(
 		"mcp-bin", "", "absolute path to klio-mcp binary (defaults to sibling of klio)",
 	)
+	skipEnvFile := flags.Bool(
+		"no-env-file", false,
+		"do not write the local-dev env file (~/.klio/local-dev.env + ./.env)",
+	)
 	_ = flags.Parse(args)
 
 	cfg, err := config.Load()
@@ -232,8 +236,34 @@ func runInit(args []string) {
 	if len(report.AgentsErrored) > 0 {
 		fmt.Printf("  agents with errors: %v\n", report.AgentsErrored)
 	}
+
+	// Write the local-dev env file(s) so the trust-app docker service
+	// (and any other consumer of these creds) can auto-login without
+	// manual setup. Always writes ~/.klio/local-dev.env, plus a
+	// project-root .env when run from inside the klio repo.
+	if !*skipEnvFile {
+		cwd, _ := os.Getwd()
+		envPaths, err := bootstrap.WriteLocalDevEnv(bootstrap.LocalDevEnvOptions{
+			UserID:        report.UserID.String(),
+			AgentID:       report.AgentID.String(),
+			JWTSigningKey: os.Getenv("KLIO_JWT_SIGNING_KEY"),
+			ProjectRoot:   bootstrap.FindKlioProjectRoot(cwd),
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr,
+				"  warning: could not write local-dev env file:", err)
+		} else {
+			for _, p := range envPaths {
+				fmt.Printf("  wrote: %s\n", p)
+			}
+		}
+	}
+
 	fmt.Println()
 	fmt.Println("Start the daemon: klio daemon")
+	if !*skipEnvFile {
+		fmt.Println("Browse memories:  docker compose up -d trust-app && open http://127.0.0.1:3000")
+	}
 }
 
 func runUninstall(args []string) {

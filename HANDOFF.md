@@ -85,6 +85,21 @@ cd /Users/thakurg/Me/klio
 make first-run     # docker compose up + ollama (native on macOS) + migrate + build binaries
 ```
 
+`klio init` is fully automated end-to-end — running it from inside the
+repo root also writes:
+
+- `~/.klio/local-dev.env` (mode 0600) — per-user dotenv with the JWT
+  signing key, user_id, and agent_id needed by the trust-app docker
+  service to auto-login as you. Survives across machines via your
+  home-dir backup.
+- `<repo-root>/.env` (mode 0600) — the same content, mirrored into
+  the project root so `docker compose up -d trust-app` picks it up
+  automatically (Compose's default env-file pickup).
+
+Skip with `klio init --no-env-file` if you manage env vars elsewhere.
+The CLI prints both paths on success and a one-line copy-paste hint:
+`Browse memories: docker compose up -d trust-app && open http://127.0.0.1:3000`.
+
 After running `klio init` (step 5), Claude Code's `~/.claude/settings.json`
 gains three things automatically:
 
