@@ -1,45 +1,99 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   Klio design system — refined editorial minimalism
+   ───────────────────────────────────────────────────────────────────────── */
+
 :root {
-  --background: #ffffff;
-  --foreground: #0a0a0a;
-  --muted: #f5f5f5;
-  --muted-foreground: #6b7280;
-  --border: #e5e7eb;
-  --primary: #0a0a0a;
-  --primary-foreground: #ffffff;
+  /* Typography (set via next/font CSS variables in layout.tsx) */
+  --font-sans-stack: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-serif-stack: var(--font-serif), "Iowan Old Style", Georgia, serif;
+  --font-mono-stack: var(--font-mono), "SF Mono", Menlo, Consolas, monospace;
+
+  /* Klio palette — paper white, near-black, single flame accent */
+  --klio-background: #fafaf7;
+  --klio-paper: #f5f3ec;
+  --klio-foreground: #0a0a0a;
+  --klio-muted: #6f6b62;
+  --klio-faint: #a8a395;
+  --klio-border: #e8e6e0;
+  --klio-border-strong: #c8c5bc;
+  --klio-accent: #ff4500;
+  --klio-accent-soft: #fff4ee;
+
+  /* Layout */
+  --klio-container: 1240px;
+  --klio-gutter: 2rem;
+  --klio-section: 7.5rem;
+
+  /* Legacy aliases so the existing /memories /spaces /access-requests
+     pages (which read --background, --foreground, --muted, --border)
+     keep rendering correctly without modification. */
+  --background: var(--klio-background);
+  --foreground: var(--klio-foreground);
+  --muted: var(--klio-paper);
+  --muted-foreground: var(--klio-muted);
+  --border: var(--klio-border);
+  --primary: var(--klio-foreground);
+  --primary-foreground: var(--klio-background);
 }
 
-@media (prefers-color-scheme: dark) {
+@media (max-width: 768px) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-    --muted: #171717;
-    --muted-foreground: #a3a3a3;
-    --border: #262626;
-    --primary: #ededed;
-    --primary-foreground: #0a0a0a;
+    --klio-gutter: 1.25rem;
+    --klio-section: 5rem;
   }
 }
 
-* {
+/* ─── Reset ───────────────────────────────────────────────────────── */
+
+*, *::before, *::after {
   box-sizing: border-box;
-  padding: 0;
   margin: 0;
+  padding: 0;
 }
 
-html, body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+html {
+  font-family: var(--font-sans-stack);
+  background: var(--klio-background);
+  color: var(--klio-foreground);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "ss01", "ss03", "cv11";
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100dvh;
+  position: relative;
+  line-height: 1.5;
+  font-size: 16px;
+  letter-spacing: -0.005em;
+}
+
+/* Subtle paper-grain overlay — atmospheric, not decorative.
+   Only active on the public landing (added via .landing class). */
+.landing::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.035;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 400'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
 }
 
 a { color: inherit; text-decoration: none; }
 
+::selection {
+  background: var(--klio-accent);
+  color: #fff;
+}
+
+/* ─── Existing legacy classes — kept for /memories /spaces /access-requests ── */
+
 main {
   min-height: 100vh;
-  padding: 3rem 1.5rem;
-  max-width: 56rem;
-  margin: 0 auto;
 }
 
 h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem; }
@@ -77,11 +131,288 @@ button.secondary { background: transparent; color: var(--foreground); border: 1p
 .error { color: #dc2626; font-size: 0.875rem; }
 .success { color: #16a34a; font-size: 0.875rem; }
 
-.card {
-  border: 1px solid var(--border);
-  border-radius: 0.5rem;
-  padding: 1.5rem;
-}
+.card { border: 1px solid var(--border); border-radius: 0.5rem; padding: 1.5rem; }
 
 .field { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.75rem; }
 .field label { font-size: 0.875rem; font-weight: 500; }
+
+/* ─── Landing-specific classes ────────────────────────────────────── */
+
+.landing {
+  font-family: var(--font-sans-stack);
+  background: var(--klio-background);
+  color: var(--klio-foreground);
+}
+
+.k-container {
+  max-width: var(--klio-container);
+  margin-inline: auto;
+  padding-inline: var(--klio-gutter);
+  position: relative;
+  z-index: 2;
+}
+
+.k-section {
+  padding-block: var(--klio-section);
+  border-top: 1px solid var(--klio-border);
+}
+.k-section:first-of-type { border-top: 0; }
+
+.k-eyebrow {
+  font-family: var(--font-mono-stack);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--klio-muted);
+}
+
+.k-display {
+  font-family: var(--font-serif-stack);
+  font-weight: 400;
+  font-size: clamp(2.6rem, 6.4vw, 5.4rem);
+  line-height: 0.98;
+  letter-spacing: -0.025em;
+  color: var(--klio-foreground);
+}
+.k-display em {
+  font-style: italic;
+  font-weight: 400;
+}
+
+.k-h2 {
+  font-family: var(--font-serif-stack);
+  font-weight: 400;
+  font-size: clamp(1.9rem, 3.6vw, 3rem);
+  line-height: 1.04;
+  letter-spacing: -0.02em;
+  color: var(--klio-foreground);
+}
+.k-h3 {
+  font-family: var(--font-sans-stack);
+  font-weight: 500;
+  font-size: 1.06rem;
+  letter-spacing: -0.005em;
+  color: var(--klio-foreground);
+}
+
+.k-lede {
+  font-family: var(--font-sans-stack);
+  font-weight: 400;
+  font-size: 1.125rem;
+  line-height: 1.55;
+  color: var(--klio-muted);
+  max-width: 60ch;
+}
+
+.k-mono {
+  font-family: var(--font-mono-stack);
+  font-feature-settings: "calt" 0;
+}
+
+.k-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.05rem;
+  font-family: var(--font-sans-stack);
+  font-size: 0.92rem;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: transform 200ms ease, background 200ms ease, border-color 200ms ease, color 200ms ease;
+  border: 1px solid var(--klio-foreground);
+}
+.k-btn--primary {
+  background: var(--klio-accent);
+  color: #fff;
+  border-color: var(--klio-accent);
+}
+.k-btn--primary:hover {
+  background: #e63d00;
+  border-color: #e63d00;
+}
+.k-btn--ghost {
+  background: transparent;
+  color: var(--klio-foreground);
+}
+.k-btn--ghost:hover {
+  background: var(--klio-foreground);
+  color: var(--klio-background);
+}
+
+.k-link {
+  position: relative;
+  color: var(--klio-foreground);
+  font-weight: 500;
+  display: inline-block;
+}
+.k-link::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 220ms ease;
+}
+.k-link:hover::after { transform: scaleX(1); }
+
+.k-divider {
+  height: 1px;
+  background: var(--klio-border);
+  border: 0;
+  margin-block: 2rem;
+}
+
+/* hero load animation — staggered, restrained */
+@keyframes k-rise {
+  from { opacity: 0; transform: translateY(0.6rem); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.k-rise {
+  animation: k-rise 0.7s ease-out both;
+}
+.k-rise[data-stagger="1"] { animation-delay: 0.05s; }
+.k-rise[data-stagger="2"] { animation-delay: 0.15s; }
+.k-rise[data-stagger="3"] { animation-delay: 0.28s; }
+.k-rise[data-stagger="4"] { animation-delay: 0.42s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .k-rise { animation: none; }
+}
+
+/* ─── ViewToggle — fixed bottom-right ─────────────────────────────── */
+
+.k-toggle {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  z-index: 50;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  padding: 0.25rem;
+  background: rgba(250, 250, 247, 0.86);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--klio-border-strong);
+  border-radius: 999px;
+  font-family: var(--font-mono-stack);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  box-shadow: 0 4px 24px -8px rgba(10, 10, 10, 0.12);
+}
+.k-toggle__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.85rem;
+  border: 0;
+  background: transparent;
+  color: var(--klio-muted);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 240ms ease, background 240ms ease;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+}
+.k-toggle__btn--active {
+  background: var(--klio-foreground);
+  color: var(--klio-background);
+}
+.k-toggle__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.6;
+}
+.k-toggle__btn--active .k-toggle__dot {
+  background: var(--klio-accent);
+  opacity: 1;
+}
+.k-toggle--pending { opacity: 0.6; }
+
+/* ─── Code blocks ─────────────────────────────────────────────────── */
+
+.k-code {
+  font-family: var(--font-mono-stack);
+  background: var(--klio-foreground);
+  color: #f4f1ec;
+  padding: 1.5rem 1.75rem;
+  border-radius: 0.5rem;
+  font-size: 0.84rem;
+  line-height: 1.7;
+  overflow-x: auto;
+  border: 1px solid var(--klio-foreground);
+}
+.k-code .tk-comment { color: #8a8275; }
+.k-code .tk-cmd { color: #ff8a55; }
+.k-code .tk-flag { color: #f7d774; }
+.k-code .tk-arg { color: #cdebd1; }
+.k-code .tk-prompt { color: #6f6b62; user-select: none; padding-right: 0.5em; }
+
+/* ─── Machine view ────────────────────────────────────────────────── */
+
+.k-machine {
+  font-family: var(--font-mono-stack);
+  font-size: 0.86rem;
+  line-height: 1.65;
+  color: var(--klio-foreground);
+  max-width: 80ch;
+  margin-inline: auto;
+  padding: 4rem var(--klio-gutter) 8rem;
+}
+.k-machine h1, .k-machine h2, .k-machine h3 {
+  font-family: var(--font-mono-stack);
+  font-weight: 700;
+  margin-block: 2rem 0.6rem;
+  letter-spacing: 0;
+}
+.k-machine h1 {
+  font-size: 1.4rem;
+  border-bottom: 1px solid var(--klio-border);
+  padding-bottom: 0.4rem;
+  margin-top: 0;
+}
+.k-machine h2 { font-size: 1.05rem; margin-top: 2.4rem; }
+.k-machine h3 { font-size: 0.92rem; }
+.k-machine p { color: var(--klio-foreground); margin-block: 0.7rem; }
+.k-machine ul { padding-left: 1.5em; }
+.k-machine li { margin-block: 0.25rem; }
+.k-machine pre {
+  background: var(--klio-paper);
+  padding: 1rem 1.25rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--klio-border);
+  overflow-x: auto;
+  margin-block: 0.8rem;
+}
+.k-machine table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-block: 1rem;
+  font-size: 0.84rem;
+}
+.k-machine th, .k-machine td {
+  border-bottom: 1px solid var(--klio-border);
+  padding: 0.45rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+}
+.k-machine th { font-weight: 700; }
+.k-machine .k-machine__kv {
+  display: grid;
+  grid-template-columns: 14ch 1fr;
+  column-gap: 1.5rem;
+  row-gap: 0.2rem;
+  margin-block: 0.4rem;
+}
+.k-machine a { color: var(--klio-accent); text-decoration: underline; text-underline-offset: 2px; }
