@@ -5,13 +5,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
+	"github.com/klio-tech/bridge/internal/bootstrap"
 	"github.com/klio-tech/bridge/internal/config"
 	"github.com/klio-tech/bridge/internal/daemon"
 	"github.com/klio-tech/bridge/internal/keychain"
@@ -32,6 +35,10 @@ func main() {
 		runDaemon()
 	case "status":
 		runStatus()
+	case "init":
+		runInit(os.Args[2:])
+	case "uninstall":
+		runUninstall(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
 		printUsage()
@@ -109,6 +116,80 @@ func buildKeychain() keychain.Backend {
 	)
 }
 
+func runInit(args []string) {
+	flags := flag.NewFlagSet("init", flag.ExitOnError)
+	cloudURL := flags.String("cloud", os.Getenv("KLIO_API_URL"), "Klio cloud URL")
+	email := flags.String("email", "", "optional email for eager claim")
+	mcpBin := flags.String(
+		"mcp-bin", "", "absolute path to klio-mcp binary (defaults to lookup on PATH)",
+	)
+	_ = flags.Parse(args)
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config error:", err)
+		os.Exit(1)
+	}
+	if *cloudURL == "" {
+		*cloudURL = cfg.CloudURL
+	}
+	if *mcpBin == "" {
+		if path, _ := exec.LookPath("klio-mcp"); path != "" {
+			*mcpBin = path
+		} else {
+			// Fall back to sibling of the running klio binary.
+			exe, _ := os.Executable()
+			*mcpBin = filepath.Join(filepath.Dir(exe), "klio-mcp")
+		}
+	}
+	if _, err := config.EnsureKlioDir(); err != nil {
+		fmt.Fprintln(os.Stderr, "ensure ~/.klio:", err)
+		os.Exit(1)
+	}
+
+	keys := buildKeychain()
+	report, err := bootstrap.Run(context.Background(), bootstrap.Options{
+		CloudURL:      *cloudURL,
+		KlioMcpBinary: *mcpBin,
+		Keychain:      keys,
+		Email:         *email,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "klio init failed:", err)
+		os.Exit(1)
+	}
+	fmt.Println("Klio is set up.")
+	fmt.Printf("  user_id:           %s\n", report.UserID)
+	fmt.Printf("  agent_id:          %s\n", report.AgentID)
+	fmt.Printf("  default_space_id:  %s\n", report.DefaultSpaceID)
+	if len(report.AgentsConfigured) > 0 {
+		fmt.Printf("  configured agents: %v\n", report.AgentsConfigured)
+	} else {
+		fmt.Println("  no agents detected (you can install Claude Code or Cursor first, then re-run klio init)")
+	}
+	if len(report.AgentsErrored) > 0 {
+		fmt.Printf("  agents with errors: %v\n", report.AgentsErrored)
+	}
+	fmt.Println()
+	fmt.Println("Start the daemon: klio daemon")
+}
+
+func runUninstall(args []string) {
+	flags := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	purge := flags.Bool("purge", false, "also delete the cloud account (irreversible)")
+	_ = flags.Parse(args)
+
+	if *purge {
+		fmt.Fprintln(os.Stderr, "(--purge not yet implemented; this will only revert local config + creds)")
+	}
+	keys := buildKeychain()
+	if err := bootstrap.Uninstall(context.Background(), keys); err != nil {
+		fmt.Fprintln(os.Stderr, "uninstall failed:", err)
+		os.Exit(1)
+	}
+	fmt.Println("Klio uninstalled. Agent configs restored from .klio-backup files.")
+}
+
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: klio [version|daemon|status]")
+	fmt.Fprintln(os.Stderr, "usage: klio [version|daemon|status|init|uninstall]")
 }
