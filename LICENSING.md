@@ -1,108 +1,116 @@
-# Licensing — open core, transparently
+# Licensing — split, transparent, deliberate
 
-Klio is **open core**: the engine, daemon, MCP shim, CLI, trust-app
-dashboard, and reference adapters are all licensed under the
-[Apache License 2.0](LICENSE) and live in this public repository.
+Klio is a **split-licensed open-source project** with a **proprietary
+cloud sibling**. Three things that look like licensing complexity but
+are actually a clean three-tier model.
 
-A separate **Klio Cloud** product — hosted, multi-tenant, with
-team-scoped spaces, premium connectors, cross-agent intelligence, and
-managed multi-region storage — is proprietary and lives in a private
-repository. Klio Cloud builds on top of the same open engine; it does
-not modify it under a different license.
+## Tier 1 — Apache 2.0 (within this repo, permissively licensed)
 
-This document explains the boundary so contributors, redistributors,
-and forkers know exactly what they can do.
+Two specific subdirectories are licensed under
+[Apache License 2.0](LICENSE-APACHE-2.0):
 
-## What's Apache 2.0 (this repo)
+| Subdirectory | Why permissive | What it is |
+|---|---|---|
+| [`bridge/cmd/klio-mcp/`](bridge/cmd/klio-mcp/) | This is the MCP server binary. Closed-source agents (Cursor, Codex, Claude Code itself) need to be able to spawn it as a subprocess and ship it inside their installers without copyleft entanglement. Apache 2.0 makes that legally clean. | A ~400-line stdio JSON-RPC shim. No business logic; routes MCP tool calls to the daemon. |
+| [`claude-plugin/`](claude-plugin/) | Distributed inside Claude Code's own plugin registry, where the surrounding distribution is permissive. | Plugin manifest + skills + slash-command templates. |
 
-Everything you can see in [github.com/klio-tech/klio](https://github.com/klio-tech/klio):
+Each of these subdirectories carries its own `LICENSE` file containing
+the verbatim Apache 2.0 text. SPDX identifier: `Apache-2.0`.
 
-| Component | Path | Apache 2.0? |
-|-----------|------|-------------|
-| Engine (FastAPI + Postgres + pgvector) | `engine/` | ✅ |
-| Bridge daemon (Go) | `bridge/cmd/klio` | ✅ |
-| MCP shim (Go) | `bridge/cmd/klio-mcp` | ✅ |
-| Agent adapters (Claude Code, Cursor, Codex) | `bridge/internal/agentadapters` | ✅ |
-| Trust-app dashboard (Next.js) | `trust-app/` | ✅ |
-| Claude Code plugin (skills + slash commands) | `claude-plugin/` | ✅ |
-| Local file KMS, audit chain, embeddings registry | various | ✅ |
-| Documentation, design plans, threat model | `docs/` | ✅ |
-| Migrations | `engine/alembic/` | ✅ |
+The `klio-mcp` binary is also **fully self-contained** (verified by
+`go list -deps`): it imports nothing from `bridge/internal/*`. So the
+Apache 2.0 boundary holds at the link layer too — the compiled
+`klio-mcp` binary contains zero AGPL code.
 
-You can:
+## Tier 2 — AGPL v3 (everything else in this repo)
 
-- Self-host Klio for personal use, your team, your company.
-- Fork Klio and ship your own derivative product.
-- Bundle Klio inside a closed-source product (the engine binary, for
-  example, can be embedded in a commercial app).
-- Charge money for Klio-derived products and services.
+Everything in this repo *outside* the two subdirectories above is
+licensed under
+[GNU Affero General Public License v3](LICENSE):
 
-You must:
+| Path | What it is |
+|---|---|
+| `engine/` | The actual memory engine. Postgres + pgvector schema, encryption, audit chain, ACL, recall, embeddings, reembed. ~6K LOC. |
+| `trust-app/` | The Next.js dashboard you run locally to browse memories. |
+| `bridge/cmd/klio/` + all `bridge/internal/*` | The daemon, CLI, hooks, keychain, agent adapters, cache, cloud client, realtime subscriber. |
+| `docs/` + `infra/` + root files (README, etc.) | Documentation and infra glue. |
 
-- Preserve the `LICENSE` file and copyright notice.
-- Note any modifications you've made to Apache 2.0–licensed files.
-- Not use the "Klio" trademark or "klio.tech" domain to name a fork
-  in a way that implies endorsement (Section 6 of the Apache license).
+SPDX identifier: `AGPL-3.0-or-later`.
 
-You don't have to:
+### What AGPL v3 means for you
 
-- Open-source your own modifications (Apache 2.0 is permissive, not
-  copyleft like AGPL or GPL).
-- Notify the project of your fork or use.
+- **Use it personally / inside your team / inside your company —
+  no obligations.** AGPL only triggers when you *distribute* or
+  *operate as a service for others*.
+- **Modify it.** Run a fork on your laptop, your VPN, your
+  airgapped cluster. Still no obligations.
+- **Distribute a modified version OR offer your modified version
+  as a service to other people**: you must release your modified
+  source under AGPL v3 too. This is the SaaS protection clause —
+  it's the entire reason AGPL was written.
+- **Embed AGPL Klio (engine, daemon, trust-app) inside a
+  closed-source product**: not allowed without a commercial
+  license. Email asingh@oppla.ai to discuss one if you need
+  embedding rights.
 
-## What's proprietary (Klio Cloud, separate repo)
+### Why AGPL v3 instead of GPL v3 or Apache?
 
-The future Klio Cloud — the hosted SaaS at `cloud.klio.tech` —
-includes:
+- **GPL v3** has a SaaS loophole — you can host modified GPL
+  software as a service without releasing the source. AGPL v3
+  closes it. We picked the version that actually protects against
+  rent-seeking cloud hosters.
+- **Apache 2.0 alone** would let any megacorp host Klio's engine
+  as a competing managed service. We wanted to keep that path
+  closed without blocking the embeddability of the MCP shim
+  itself — hence the split.
+- **AGPL v3 alone** would block embedding the MCP shim in
+  Cursor / Codex, killing the cross-agent collaboration story.
+  Hence the split.
 
-- **Per-project space auto-routing** (cwd / git-remote → space)
-- **Cross-agent intelligence** (Claude + Cursor sharing context with
+## Tier 3 — Proprietary (Klio Cloud, separate private repo)
+
+The future hosted **Klio Cloud** at `cloud.klio.tech` lives in a
+private repository (not yet created) and is licensed under a
+proprietary commercial license. It includes:
+
+- Per-project space auto-routing (cwd / git-remote → space)
+- Cross-agent intelligence (Claude + Cursor sharing context with
   conflict resolution)
-- **Premium connectors**: Salesforce, Notion, Linear, Slack, Gmail,
-  Google Drive ingest with fan-out
-- **Team RBAC** beyond the single-user ACL the OSS shipping with
-- **Hosted SSO** (Google, Microsoft, Okta)
-- **Managed multi-region Postgres + KMS** with SOC2 attestation
-- **Hosted observability** (latency dashboards, anomaly detection)
-- **Billing + metering** (per-user, per-space, per-MB-stored)
+- Premium connectors (Salesforce, Notion, Linear, Slack, Gmail,
+  Google Drive)
+- Team RBAC beyond the single-user ACL of the OSS
+- Hosted SSO (Google, Microsoft, Okta)
+- Managed multi-region Postgres + AWS KMS with SOC2 attestation
+- Hosted observability + billing + metering
 
-Klio Cloud lives in a private repository and is licensed under a
-proprietary commercial license. It does NOT modify or
-re-license the open core; it's an entirely separate product that
-imports the open engine as a dependency.
+Klio Cloud builds *on top of* the AGPL engine but is licensed
+separately because the operator (Abhishek Singh / Klio) holds the
+copyright to both, which under AGPL §7 allows additional/different
+licensing terms by the rights-holder. Klio Cloud is NOT a
+derivative work distributed under AGPL; it's a separate product.
 
-## What's the boundary rule?
+If you're a **third-party operator** (anyone other than Klio) and
+you want to host the AGPL Klio engine as a service for others,
+your hosted version must release its modified source under AGPL.
+That's the protection.
 
-Anything that fundamentally needs cloud infrastructure goes in Klio
-Cloud:
+## TL;DR — what you can do
 
-- multi-tenant orchestration
-- billing / usage metering
-- centrally-managed connectors (each maintained by the Klio team)
-- managed-in-the-cloud-only auth integrations (SSO providers)
-- abuse / fraud / spam detection at scale
-
-Anything a self-hoster can run on their own laptop or VPS stays in
-the open core.
-
-## I want to use Klio for my company / fork it / package it
-
-You don't need permission. The Apache 2.0 license already grants you
-that right. If you want to:
-
-- **Use Klio internally at your company**: just self-host. No
-  attribution needed beyond preserving the LICENSE file.
-- **Resell Klio as part of your product**: also fine. Trademark rule
-  applies — don't call it "Klio" if it's not actually Klio.
-- **Contribute back**: PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
-- **Talk to us about a paid Klio Cloud plan**: email
-  asingh@oppla.ai.
+| You want to… | License you operate under | Allowed? |
+|---|---|---|
+| Run Klio on your laptop / your team's server | (none required — personal use) | ✅ |
+| Fork the engine and run it for yourself | AGPL v3 | ✅ |
+| Embed the MCP shim in a closed-source agent | Apache 2.0 (shim is permissive) | ✅ |
+| Host Klio's engine as a SaaS for paying customers | AGPL v3 | ✅ but you must publish your modified source |
+| Embed the AGPL engine in a closed-source product | none compatible | ❌ — get a commercial license |
+| Use Klio Cloud as a paid customer | proprietary EULA | ✅ — sign up |
+| Compete with Klio Cloud by hosting our engine | AGPL v3 | ✅ but your fork's source is public, and we'll watch |
 
 ## Trademarks
 
 "Klio", the Klio logo, and "klio.tech" are trademarks of Abhishek
-Singh, the project author. The Apache 2.0 license does NOT grant
-trademark rights — see Section 6.
+Singh, the project author. License grants do NOT extend to
+trademarks (Apache 2.0 §6 and AGPL §7 both make this explicit).
 
 You can:
 - Reference Klio by name when describing your fork or downstream
@@ -111,17 +119,49 @@ You can:
   talks.
 
 You can't:
-- Call your fork "Klio" without the author's written permission.
-- Use the klio.tech domain or "klio" namespaces (npm `@klio`, PyPI
-  `klio`, the GitHub `klio-tech` org) for your own software.
+- Call your fork "Klio" or any confusingly similar name.
+- Use the klio.tech domain or `klio-tech` GitHub org for your
+  own software.
+- Use Klio's logo as your product's logo.
 
 ## Contributor License Agreement
 
-We do not currently require a CLA. By submitting a PR, you certify
-that your contribution is licensable under Apache 2.0 (the
+We do not require a CLA. By submitting a PR, you certify that
+your contribution is licensable under the same license that
+applies to the file(s) you're modifying — Apache 2.0 if you're
+touching the shim or plugin, AGPL v3 if you're touching anything
+else. The
 [Developer Certificate of Origin](https://developercertificate.org)
-is the implicit standard).
+is the implicit standard.
 
-If we adopt a formal CLA in the future (e.g., for the Klio Cloud
-codebase to use), we'll switch to a Sign-Off-style affirmation
-(`git commit -s`) and grandfather all existing contributors.
+If your PR adds a new file, it inherits the license of the
+directory it's in.
+
+## Practical: what license header should I add to a new file?
+
+For any file under the two Apache directories:
+
+```
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Abhishek Singh
+```
+
+For any other file:
+
+```
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright 2026 Abhishek Singh
+```
+
+(Adjust the comment syntax for the language: `#` for Python /
+shell / yaml, `--` for SQL, `<!-- -->` for Markdown, etc.)
+
+License headers are not strictly required (the directory-level
+LICENSE files are sufficient under both Apache and AGPL), but
+adding them helps automated tooling like
+[reuse-tool](https://reuse.software) and makes the boundary
+explicit when files get copied around.
+
+## Questions / commercial license inquiries
+
+asingh@oppla.ai · [klio.tech](https://klio.tech)

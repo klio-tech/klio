@@ -5,7 +5,7 @@ description = "Klio substrate engine — the local-first, encrypted, MCP-native 
 readme = "../README.md"
 authors = [{ name = "Abhishek Singh", email = "asingh@oppla.ai" }]
 maintainers = [{ name = "Abhishek Singh", email = "asingh@oppla.ai" }]
-license = { text = "Apache-2.0" }
+license = { text = "AGPL-3.0-or-later" }
 keywords = [
     "ai-agents",
     "memory",
@@ -21,7 +21,7 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3.12",

@@ -17,7 +17,7 @@
     "email": "asingh@oppla.ai",
     "url": "https://klio.tech"
   },
-  "license": "Apache-2.0",
+  "license": "AGPL-3.0-or-later",
   "keywords": [
     "klio",
     "ai-agents",

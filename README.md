@@ -14,7 +14,8 @@ you've decided, learned, and chosen, across every window and every project.
 [Roadmap](#roadmap) ·
 [Cloud (waitlist)](https://klio.tech/cloud)
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/Engine-AGPL--3.0-blue.svg)](LICENSE)
+[![MCP Shim: Apache-2.0](https://img.shields.io/badge/MCP%20Shim-Apache--2.0-green.svg)](LICENSE-APACHE-2.0)
 [![Engine tests](https://img.shields.io/badge/engine%20tests-103%20passing-brightgreen)](engine/tests)
 [![Bridge tests](https://img.shields.io/badge/bridge%20tests-13%20packages%20passing-brightgreen)](bridge)
 [![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-native-purple)](https://modelcontextprotocol.io)
@@ -363,14 +364,29 @@ enterprise SaaS.
 
 ## License
 
-Klio is licensed under the [Apache License 2.0](LICENSE) — permissive,
-patent-covered, no copyleft. You can use Klio commercially, modify it,
-and ship it inside a closed-source product, as long as you preserve
-the license + attribution.
+Klio is **split-licensed** by component:
 
-The future Klio Cloud (hosted, multi-tenant) is a separate proprietary
-product on top of the same engine — see [LICENSING.md](LICENSING.md)
-for the open-core boundary.
+- **The MCP shim** (`bridge/cmd/klio-mcp/`) and the **Claude Code plugin**
+  (`claude-plugin/`) are [Apache 2.0](LICENSE-APACHE-2.0). These pieces are
+  meant to be embedded inside agent tools (Claude Code, Cursor, Codex, etc.),
+  so they're permissive — you can ship them inside a closed-source product
+  without copyleft entanglement.
+- **Everything else** (the engine, the daemon, the trust-app dashboard,
+  internal packages, docs) is [AGPL v3](LICENSE). You can self-host, fork,
+  and modify freely. **If you offer a modified version as a hosted service
+  to other people, you must release your modified source under AGPL too** —
+  this is the SaaS protection clause.
+
+This split lets the protocol layer be embedded everywhere while protecting
+the engine from rent-seeking cloud forks.
+
+For commercial licensing of the AGPL components (e.g., to embed Klio's
+engine in a closed-source product), email asingh@oppla.ai.
+
+The future **Klio Cloud** (hosted, multi-tenant) is a separate proprietary
+product on top of the same AGPL engine — see [LICENSING.md](LICENSING.md)
+for the full breakdown of all three tiers (Apache shim, AGPL engine,
+proprietary Cloud).
 
 ## Contributing
 
