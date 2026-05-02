@@ -129,6 +129,29 @@ func (c *Client) IngestTranscript(
 	return resp, nil
 }
 
+// RequestAccess calls POST /v1/agents/{agent_id}/request-access.
+//
+// agentID is typically the daemon's own agent_id (the one minted at
+// klio init); the engine will reject any mismatch with the token's
+// agent claim.
+func (c *Client) RequestAccess(
+	ctx context.Context, agentID uuid.UUID, spaceSlug, scope, reason string,
+) (map[string]any, error) {
+	body := map[string]any{
+		"space_slug":      spaceSlug,
+		"requested_scope": scope,
+	}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	var resp map[string]any
+	path := fmt.Sprintf("/v1/agents/%s/request-access", agentID)
+	if err := c.do(ctx, "POST", path, body, &resp, true); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 // do executes a request, optionally retrying once on 401 after a token refresh.
 func (c *Client) do(
 	ctx context.Context, method, path string, body any, out any, withAuth bool,

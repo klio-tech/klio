@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -120,9 +121,28 @@ func (d *Daemon) SwitchSpace(ctx context.Context, slug string) error {
 	return nil
 }
 
-func (d *Daemon) RequestAccess(_ context.Context, _, _ string) error {
-	// Phase J implements the auto-prompt notification path.
-	return errors.New("request_access: not yet implemented in v0")
+// RequestAccess submits a request to the engine for the daemon's own agent
+// to gain `scope` access to space identified by `slug`. The user sees the
+// pending request in the trust app and approves/denies there.
+func (d *Daemon) RequestAccess(ctx context.Context, slug, scope string) error {
+	if slug == "" {
+		return errors.New("request_access: space slug required")
+	}
+	if scope == "" {
+		scope = "read"
+	}
+	agentBytes, err := d.keys.Get("agent_id")
+	if err != nil || len(agentBytes) == 0 {
+		return errors.New("request_access: daemon has no agent_id; run klio init first")
+	}
+	agentID, perr := uuid.Parse(string(agentBytes))
+	if perr != nil {
+		return fmt.Errorf("request_access: invalid agent_id in keychain: %w", perr)
+	}
+	if _, err := d.cloud.RequestAccess(ctx, agentID, slug, scope, ""); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (d *Daemon) ActiveSpaceInfo(ctx context.Context) (map[string]any, error) {

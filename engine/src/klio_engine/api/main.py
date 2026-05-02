@@ -8,6 +8,8 @@ hold cross-state.
 from fastapi import FastAPI
 
 from klio_engine import __version__
+from klio_engine.api.access_requests import create_router as access_create_router
+from klio_engine.api.access_requests import list_router as access_list_router
 from klio_engine.api.agents import agents_router, audit_router
 from klio_engine.api.entries import entry_delete_router
 from klio_engine.api.entries import recall_router
@@ -40,6 +42,8 @@ def build_app() -> FastAPI:
     app.include_router(agents_router)
     app.include_router(audit_router)
     app.include_router(ingest_router)
+    app.include_router(access_create_router)
+    app.include_router(access_list_router)
     return app
 
 

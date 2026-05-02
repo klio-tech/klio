@@ -1,4 +1,5 @@
 """ORM models."""
+from klio_engine.models.access_request import AccessRequest, AccessRequestStatus
 from klio_engine.models.agent import Agent, AgentKind
 from klio_engine.models.audit import AuditLogEntry
 from klio_engine.models.base import Base
@@ -10,6 +11,8 @@ from klio_engine.models.space import Space
 from klio_engine.models.user import User
 
 __all__ = [
+    "AccessRequest",
+    "AccessRequestStatus",
     "Agent",
     "AgentKind",
     "AuditLogEntry",
