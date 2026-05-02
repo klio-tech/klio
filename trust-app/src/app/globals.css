@@ -352,18 +352,6 @@ button.secondary { background: transparent; color: var(--foreground); border: 1p
 }
 .k-toggle--pending { opacity: 0.6; }
 
-/* Anatomy + QuickStart — editorial chapters / numbered steps.
-   Layout lives inline in the components; the small responsive
-   collapse below stacks the numeral above the body on narrow
-   screens so it never gets squeezed. */
-@media (max-width: 720px) {
-  .anatomy-chapter,
-  .quick-step {
-    grid-template-columns: 1fr !important;
-    row-gap: 1rem !important;
-  }
-}
-
 /* Flow / architecture diagram caption */
 .k-flow__caption {
   font-family: var(--font-mono-stack);
@@ -371,6 +359,113 @@ button.secondary { background: transparent; color: var(--foreground); border: 1p
   letter-spacing: 0.1em;
   color: var(--klio-faint);
   text-transform: uppercase;
+}
+
+/* ─── Mobile responsiveness ───────────────────────────────────────────
+   Most components use inline `gridTemplateColumns` for their layout;
+   we override them by class name with `!important` rather than
+   refactoring every component to read CSS classes for layout. The
+   target breakpoint is 720px — below that, multi-column structures
+   collapse to single column with the visual hierarchy preserved
+   (numerals and labels stay above their content blocks).
+   ────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 720px) {
+  /* Hero — stack copy + recall specimen */
+  .hero-grid {
+    grid-template-columns: 1fr !important;
+    gap: 2.5rem !important;
+  }
+
+  /* AnatomyOfMemory chapters — numeral on top, body below */
+  .anatomy-chapter {
+    grid-template-columns: 1fr !important;
+    row-gap: 1.2rem !important;
+    padding-block: 2.4rem !important;
+  }
+
+  /* QuickStart outer grid (intro + steps) and step rows */
+  .quick-grid {
+    grid-template-columns: 1fr !important;
+    gap: 2.5rem !important;
+  }
+  .quick-step {
+    grid-template-columns: 1fr !important;
+    row-gap: 1rem !important;
+  }
+
+  /* BuiltFor — operation/output rows stack */
+  .builtfor-row {
+    grid-template-columns: 1fr !important;
+    row-gap: 1rem !important;
+  }
+
+  /* Compare matrix — convert each row from 5-col grid to a
+     stacked card with the feature label on top and the four
+     vendor cells underneath */
+  .compare-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .compare-grid > [role="row"] > [role="cell"],
+  .compare-grid > [role="row"] > [role="rowheader"] {
+    border-bottom: 0 !important;
+  }
+  .compare-grid > [role="row"] > [role="rowheader"] {
+    padding-top: 1.4rem !important;
+    border-top: 1px solid var(--klio-border) !important;
+  }
+  .compare-grid > [role="row"] > [role="cell"]::before {
+    content: attr(data-col) " ·  ";
+    color: var(--klio-faint);
+    font-family: var(--font-mono-stack);
+    font-size: 0.66rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    margin-right: 0.5rem;
+  }
+  .compare-grid > [role="row"] > [role="columnheader"] {
+    display: none !important;
+  }
+
+  /* Footer — link columns stack */
+  .footer-grid {
+    grid-template-columns: 1fr !important;
+    gap: 2rem !important;
+  }
+
+  /* Display headlines settle a touch on narrow screens so they
+     don't blow past the viewport */
+  .k-display { font-size: clamp(2.2rem, 9vw, 3rem) !important; }
+  .k-h2      { font-size: clamp(1.6rem, 7vw, 2.2rem) !important; }
+
+  /* ViewToggle — move further from the edge so it doesn't sit on
+     content + provide a small body bottom margin so the toggle
+     doesn't overlap the FAQ accordion in the last entry */
+  .k-toggle {
+    bottom: 1rem !important;
+    right: 1rem !important;
+    font-size: 0.62rem !important;
+  }
+  .k-toggle__btn {
+    padding: 0.4rem 0.65rem !important;
+  }
+  .landing main {
+    padding-bottom: 4rem;  /* room for the floating toggle */
+  }
+
+  /* Flow diagram — let the SVG horizontally scroll if it overflows */
+  .k-flow-wrap {
+    overflow-x: auto;
+  }
+}
+
+/* Tighter mobile (<= 420px): edge gutter, tighter hero copy */
+@media (max-width: 420px) {
+  :root {
+    --klio-gutter: 1rem;
+    --klio-section: 4rem;
+  }
+  .k-display { font-size: clamp(2rem, 11vw, 2.6rem) !important; }
 }
 
 /* ─── Machine view ────────────────────────────────────────────────── */

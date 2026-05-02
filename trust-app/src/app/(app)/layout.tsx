@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { getSession } from "@/lib/session";
+import { KlioMark } from "@/components/landing/KlioMark";
 
 export default async function AppLayout({
   children,
@@ -25,15 +26,23 @@ export default async function AppLayout({
         <Link
           href="/"
           style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: "1rem",
-            fontWeight: 500,
-            letterSpacing: "-0.01em",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "0.55rem",
             textDecoration: "none",
             color: "var(--klio-foreground)",
           }}
         >
-          klio<span style={{ color: "var(--klio-accent)" }}>.</span>
+          <KlioMark size={20} />
+          <span
+            style={{
+              fontFamily: "var(--font-mono-stack)",
+              fontSize: "1rem",
+              fontWeight: 500,
+            }}
+          >
+            klio
+          </span>
         </Link>
         <nav style={{ display: "flex", gap: "1.25rem", flexWrap: "wrap", fontSize: "0.9rem" }}>
           {session ? (

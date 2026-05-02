@@ -1,3 +1,5 @@
+import { KlioMark } from "./KlioMark";
+
 const COL_LINKS = {
   Project: [
     { label: "Repository", href: "https://github.com/klio-tech/klio" },
@@ -51,14 +53,22 @@ export function Footer() {
             <a
               href="/"
               style={{
-                fontFamily: "var(--font-mono-stack)",
-                fontSize: "1.05rem",
-                fontWeight: 500,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.55rem",
                 color: "var(--klio-foreground)",
-                display: "inline-block",
               }}
             >
-              klio<span style={{ color: "var(--klio-accent)" }}>.</span>
+              <KlioMark size={24} />
+              <span
+                style={{
+                  fontFamily: "var(--font-mono-stack)",
+                  fontSize: "1.05rem",
+                  fontWeight: 500,
+                }}
+              >
+                klio
+              </span>
             </a>
             <p
               style={{

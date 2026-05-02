@@ -42,7 +42,7 @@ export function Hero() {
           {/* Left — editorial */}
           <div>
             <p className="k-eyebrow k-rise" data-stagger="1">
-              memory layer · model context protocol
+              shared memory · cross-agent collaboration
             </p>
 
             <h1
@@ -50,9 +50,9 @@ export function Hero() {
               data-stagger="2"
               style={{ marginTop: "1.4rem" }}
             >
-              Persistent memory.
+              Let your agents
               <br />
-              <em>For every AI agent.</em>
+              <em>collaborate.</em>
             </h1>
 
             <p
@@ -60,10 +60,12 @@ export function Hero() {
               data-stagger="3"
               style={{ marginTop: "1.8rem" }}
             >
-              Klio captures what your AI coding agents see, decide, and prefer —
-              and serves it back through seven MCP tools. Claude Code in one
-              window writes; Cursor in another instantly recalls. Encrypted,
-              auditable, open-source.
+              Klio is the shared memory layer for AI coding agents — Claude
+              Code, Cursor, Codex, anything that speaks MCP. Preferences
+              taught to one agent carry across every tool. Decisions made
+              in one window surface in another. Encrypted on disk,
+              cryptographically auditable, open-source — and for now,
+              entirely on your laptop.
             </p>
 
             <div
@@ -109,7 +111,7 @@ export function Hero() {
             data-stagger="3"
             style={{ minWidth: 0, paddingLeft: "0.5rem" }}
           >
-            {/* Setup line — the question being asked */}
+            {/* Setup line — the cross-agent recall story */}
             <p
               style={{
                 fontFamily: "var(--font-serif-stack)",
@@ -117,11 +119,14 @@ export function Hero() {
                 fontSize: "1.15rem",
                 lineHeight: 1.4,
                 color: "var(--klio-muted)",
-                maxWidth: "30ch",
+                maxWidth: "32ch",
               }}
             >
-              On a <span style={{ fontStyle: "normal" }} className="k-mono">recall(&hellip;)</span> call,
-              this is what an agent receives back.
+              What another agent sees on{" "}
+              <span style={{ fontStyle: "normal" }} className="k-mono">
+                recall(&hellip;)
+              </span>{" "}
+              — milliseconds after the first one writes.
             </p>
 
             {/* Top hairline */}

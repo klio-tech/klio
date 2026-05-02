@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { KlioMark } from "./KlioMark";
+
 const LINKS = [
   { label: "Docs", href: "https://github.com/klio-tech/klio#readme" },
   { label: "GitHub", href: "https://github.com/klio-tech/klio" },
@@ -12,7 +14,7 @@ export function LandingHeader() {
       style={{
         position: "relative",
         zIndex: 4,
-        paddingBlock: "1.6rem",
+        paddingBlock: "1.4rem",
         borderBottom: "1px solid var(--klio-border)",
       }}
     >
@@ -30,23 +32,32 @@ export function LandingHeader() {
           href="/"
           aria-label="Klio home"
           style={{
-            fontFamily: "var(--font-mono-stack)",
-            fontSize: "1.05rem",
-            fontWeight: 500,
-            letterSpacing: "-0.005em",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "0.55rem",
             color: "var(--klio-foreground)",
           }}
         >
-          klio<span style={{ color: "var(--klio-accent)" }}>.</span>
+          <KlioMark size={22} />
+          <span
+            style={{
+              fontFamily: "var(--font-mono-stack)",
+              fontSize: "1.02rem",
+              fontWeight: 500,
+              letterSpacing: "-0.005em",
+            }}
+          >
+            klio
+          </span>
         </Link>
 
         <nav
           style={{
             display: "flex",
             alignItems: "center",
-            gap: "1.6rem",
-            fontFamily: "var(--font-sans-stack)",
-            fontSize: "0.92rem",
+            gap: "1.4rem",
+            fontFamily: "var(--font-mono-stack)",
+            fontSize: "0.88rem",
           }}
         >
           {LINKS.map((l) => {

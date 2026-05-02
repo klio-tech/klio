@@ -71,6 +71,7 @@ export function Compare() {
           <div
             role="table"
             aria-label="Klio vs alternatives"
+            className="compare-grid"
             style={{
               display: "grid",
               gridTemplateColumns: "minmax(180px, 1.6fr) repeat(4, minmax(0, 1fr))",
@@ -111,6 +112,7 @@ export function Compare() {
                   <div
                     key={ci}
                     role="cell"
+                    data-col={COLUMNS[ci]}
                     style={rowCell(ri, ROWS.length)}
                   >
                     {renderCell(c, ci === 0)}
