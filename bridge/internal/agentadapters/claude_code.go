@@ -162,9 +162,33 @@ func (a *ClaudeCodeAdapter) registerMCP(cfg Config) error {
 	return nil
 }
 
-// patchHooks updates ~/.claude/settings.json with the six event hooks.
-// Also strips any legacy mcpServers.klio entry written by earlier
-// versions (those entries were inert — Claude Code never read them).
+// klioMcpTools is the canonical list of MCP tool names Claude Code
+// emits for klio (`mcp__<server>__<tool>`). Used by patchSettings to
+// auto-allowlist them in `permissions.allow` so first-time users
+// don't get hit with a permission prompt for every klio tool. Keep
+// this list in sync with bridge/internal/mcp/dispatcher.go.
+var klioMcpTools = []string{
+	"mcp__klio__recall",
+	"mcp__klio__remember",
+	"mcp__klio__observe",
+	"mcp__klio__plan",
+	"mcp__klio__decide",
+	"mcp__klio__note",
+	"mcp__klio__space",
+}
+
+// patchSettings updates ~/.claude/settings.json with:
+//   - the six event hooks pointing at the absolute klio binary;
+//   - permissions.allow entries for the 7 klio MCP tools (so users
+//     don't see "Do you want to proceed?" prompts on every first
+//     tool use);
+//   - cleanup of any legacy mcpServers.klio entry written by earlier
+//     versions (those entries were inert — Claude Code never read
+//     mcpServers from settings.json).
+//
+// All operations are idempotent: re-running with identical Config
+// preserves the file byte-for-byte (the legacy backup mechanism
+// produces a fresh `.klio-backup-<ts>` regardless).
 func (a *ClaudeCodeAdapter) patchHooks(cfg Config) error {
 	path := a.settingsPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -223,7 +247,45 @@ func (a *ClaudeCodeAdapter) patchHooks(cfg Config) error {
 	}
 	settings["hooks"] = hooks
 
+	settings["permissions"] = mergeKlioAllowList(settings["permissions"])
+
 	return writeJSON(path, settings)
+}
+
+// mergeKlioAllowList returns a `permissions` block (in Claude Code's
+// schema) that contains every klio MCP tool name in `permissions.allow`,
+// while preserving any pre-existing `allow`, `deny`, and `ask` lists
+// (and any other keys the user added). Tolerant of:
+//
+//   - missing `permissions` block (returns a fresh one)
+//   - existing `permissions.allow` as nil, []string, or []any
+//   - non-string entries (preserved as-is)
+//   - duplicates already present (no-op)
+//
+// The output `allow` list keeps the user's prior order, with klio
+// entries appended only if absent.
+func mergeKlioAllowList(prev any) map[string]any {
+	out, _ := prev.(map[string]any)
+	if out == nil {
+		out = map[string]any{}
+	}
+
+	existing, _ := out["allow"].([]any)
+	have := make(map[string]bool, len(existing))
+	for _, e := range existing {
+		if s, ok := e.(string); ok {
+			have[s] = true
+		}
+	}
+	for _, name := range klioMcpTools {
+		if have[name] {
+			continue
+		}
+		existing = append(existing, name)
+		have[name] = true
+	}
+	out["allow"] = existing
+	return out
 }
 
 // Uninstall restores ~/.claude/settings.json from the most recent

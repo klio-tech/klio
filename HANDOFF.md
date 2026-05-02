@@ -82,8 +82,21 @@ so it doesn't care which backend is serving.
 
 ```bash
 cd /Users/thakurg/Me/klio
-make first-run     # docker compose up + ollama-pull + migrate + build binaries
+make first-run     # docker compose up + ollama (native on macOS) + migrate + build binaries
 ```
+
+After running `klio init` (step 5), Claude Code's `~/.claude/settings.json`
+gains three things automatically:
+
+| Block | What it does | Why we patch it |
+|---|---|---|
+| `mcpServers.klio` *(removed by post-fix init)* | Legacy slot — Claude Code never read it | Cleaned up automatically during migration |
+| `hooks` (6 events) | Auto-capture every prompt + tool call into Klio | This is what makes memory passive |
+| `permissions.allow` (7 `mcp__klio__*` tools) | Pre-approves each Klio MCP tool so users don't see "Do you want to proceed?" prompts | First-run UX |
+
+The MCP server registration itself lives in `~/.claude.json` (Claude Code's
+master config), written via the official `claude mcp add-json` CLI. We do
+not edit `~/.claude.json` directly.
 
 ### 1. Bring up dependencies
 
