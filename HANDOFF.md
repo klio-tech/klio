@@ -8,12 +8,26 @@ documented in [docs/embedding-models.md](docs/embedding-models.md).
 
 ## What's running
 
+Postgres + Redis live in Docker. Ollama is **platform-aware**:
+
+- **macOS** → native install via `brew install ollama` (uses Metal — much faster than Docker on Apple Silicon, where the Docker VM cannot reach Metal)
+- **Linux** → Docker'd Ollama via `docker compose --profile docker-ollama up -d ollama` (CPU-only by default; opt-in profile)
+
 ```
+# Postgres + Redis
 docker compose ps
   klio-postgres  pgvector/pgvector:pg16  127.0.0.1:5433  (healthy)
   klio-redis     redis:7-alpine          127.0.0.1:6380  (healthy)
-  klio-ollama    ollama/ollama:latest    127.0.0.1:11434 (healthy)
+
+# Ollama: native on macOS (this machine)
+brew services list | grep ollama
+  ollama  started thakurg
+curl 127.0.0.1:11434/api/tags          # responds with installed models
 ```
+
+`make ollama` picks the right backend automatically based on `uname -s`.
+The engine always reads `KLIO_OLLAMA_API_BASE` (default `127.0.0.1:11434`),
+so it doesn't care which backend is serving.
 
 ## Test status (last run)
 
@@ -72,12 +86,17 @@ make first-run     # docker compose up + ollama-pull + migrate + build binaries
 ```
 
 ### 1. Bring up dependencies
+
 ```bash
 cd /Users/thakurg/Me/klio
-docker compose up -d
-docker exec klio-ollama ollama pull nomic-embed-text       # 274 MB
-docker exec klio-ollama ollama pull qwen2.5:7b-instruct    # 4.7 GB (extraction)
+docker compose up -d postgres redis
+make ollama          # macOS: brew install + start; Linux: docker compose profile
+make models-pull     # nomic-embed-text (274 MB) + qwen2.5:7b-instruct (4.7 GB)
 ```
+
+Note: `docker compose up -d` no longer starts Ollama by default — the
+service is gated behind the `docker-ollama` profile because on macOS,
+running Ollama in Docker forfeits Metal acceleration.
 
 ### 2. Run the engine
 

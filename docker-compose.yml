@@ -31,12 +31,26 @@ services:
       timeout: 3s
       retries: 10
 
-  # Local embedding + extraction model server. Speaks the OpenAI-compatible
-  # API on :11434, which LiteLLM routes to via the `ollama/<model>` prefix.
-  # Pull models with `make ollama-pull` after the container is up.
+  # Local embedding + extraction model server.
+  #
+  # IMPORTANT: this service is opt-in via the `docker-ollama` profile.
+  # `docker compose up -d` does NOT start it. Two reasons:
+  #
+  #   1. On macOS, Docker runs in a Linux VM that cannot reach Metal,
+  #      so the container falls back to CPU and is 5-10× slower than a
+  #      native `brew install ollama`. The Makefile targets prefer the
+  #      native install on Darwin and fall back to this profile on Linux.
+  #   2. On Linux without an NVIDIA GPU passthrough config, Docker
+  #      Ollama is also CPU-only, so it offers no speed advantage over
+  #      a native `apt install` / direct binary either. The container
+  #      is here for portability (CI, WSL, headless boxes) — explicit
+  #      opt-in only.
+  #
+  # To use anyway: `docker compose --profile docker-ollama up -d ollama`
   ollama:
     image: ollama/ollama:latest
     container_name: klio-ollama
+    profiles: [docker-ollama]
     ports:
       - "127.0.0.1:11434:11434"
     volumes:
