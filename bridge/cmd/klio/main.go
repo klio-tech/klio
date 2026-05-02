@@ -132,8 +132,11 @@ func runInit(args []string) {
 	flags := flag.NewFlagSet("init", flag.ExitOnError)
 	cloudURL := flags.String("cloud", os.Getenv("KLIO_API_URL"), "Klio cloud URL")
 	email := flags.String("email", "", "optional email for eager claim")
+	klioBin := flags.String(
+		"klio-bin", "", "absolute path to klio binary (defaults to the running binary)",
+	)
 	mcpBin := flags.String(
-		"mcp-bin", "", "absolute path to klio-mcp binary (defaults to lookup on PATH)",
+		"mcp-bin", "", "absolute path to klio-mcp binary (defaults to sibling of klio)",
 	)
 	_ = flags.Parse(args)
 
@@ -145,24 +148,67 @@ func runInit(args []string) {
 	if *cloudURL == "" {
 		*cloudURL = cfg.CloudURL
 	}
+
+	// Resolve klio binary path. Prefer the explicit flag, then the
+	// running binary's own path (so `/tmp/klio init` writes
+	// `/tmp/klio hook ...` into settings.json correctly).
+	if *klioBin == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cannot resolve klio binary path:", err)
+			os.Exit(1)
+		}
+		// EvalSymlinks gives us the real path; settings.json shouldn't
+		// embed `/usr/local/bin/klio` if that's a symlink to a real
+		// install location that may move.
+		if real, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			*klioBin = real
+		} else {
+			*klioBin = exe
+		}
+	}
+	if !filepath.IsAbs(*klioBin) {
+		fmt.Fprintln(os.Stderr, "--klio-bin must be an absolute path:", *klioBin)
+		os.Exit(1)
+	}
+
 	if *mcpBin == "" {
 		if path, _ := exec.LookPath("klio-mcp"); path != "" {
 			*mcpBin = path
 		} else {
-			// Fall back to sibling of the running klio binary.
-			exe, _ := os.Executable()
-			*mcpBin = filepath.Join(filepath.Dir(exe), "klio-mcp")
+			*mcpBin = filepath.Join(filepath.Dir(*klioBin), "klio-mcp")
 		}
 	}
+	if !filepath.IsAbs(*mcpBin) {
+		fmt.Fprintln(os.Stderr, "--mcp-bin must be an absolute path:", *mcpBin)
+		os.Exit(1)
+	}
+
 	if _, err := config.EnsureKlioDir(); err != nil {
 		fmt.Fprintln(os.Stderr, "ensure ~/.klio:", err)
 		os.Exit(1)
 	}
 
+	// Build the env block that ends up in BOTH the MCP server entry
+	// and every hook command in settings.json. The MCP shim and the
+	// hook subcommand both need to find the daemon socket; the
+	// keychain hint prevents macOS unsigned-binary prompts.
+	env := map[string]string{
+		"KLIO_SOCKET_PATH": cfg.SocketPath,
+	}
+	if os.Getenv("KLIO_USE_FILE_KEYCHAIN") != "" {
+		env["KLIO_USE_FILE_KEYCHAIN"] = "1"
+	}
+	if v := os.Getenv("KLIO_API_URL"); v != "" {
+		env["KLIO_API_URL"] = v
+	}
+
 	keys := buildKeychain()
 	report, err := bootstrap.Run(context.Background(), bootstrap.Options{
 		CloudURL:      *cloudURL,
+		KlioBinary:    *klioBin,
 		KlioMcpBinary: *mcpBin,
+		Env:           env,
 		Keychain:      keys,
 		Email:         *email,
 	})
@@ -170,7 +216,11 @@ func runInit(args []string) {
 		fmt.Fprintln(os.Stderr, "klio init failed:", err)
 		os.Exit(1)
 	}
-	fmt.Println("Klio is set up.")
+	if report.Reused {
+		fmt.Println("Klio settings refreshed for existing account.")
+	} else {
+		fmt.Println("Klio is set up.")
+	}
 	fmt.Printf("  user_id:           %s\n", report.UserID)
 	fmt.Printf("  agent_id:          %s\n", report.AgentID)
 	fmt.Printf("  default_space_id:  %s\n", report.DefaultSpaceID)

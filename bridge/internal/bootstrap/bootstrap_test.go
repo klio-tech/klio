@@ -40,7 +40,9 @@ func TestRunProvisionsAndPatches(t *testing.T) {
 
 	report, err := Run(context.Background(), Options{
 		CloudURL:      srv.URL,
+		KlioBinary:    "/tmp/klio",
 		KlioMcpBinary: "/tmp/klio-mcp",
+		Env:           map[string]string{"KLIO_SOCKET_PATH": "/tmp/bridge.sock"},
 		Keychain:      kc,
 		Adapters:      []agentadapters.Adapter{agentadapters.NewClaudeCodeAdapter()},
 	})
@@ -97,7 +99,9 @@ func TestUninstallReverses(t *testing.T) {
 
 	_, err := Run(context.Background(), Options{
 		CloudURL:      srv.URL,
+		KlioBinary:    "/tmp/klio",
 		KlioMcpBinary: "/tmp/klio-mcp",
+		Env:           map[string]string{"KLIO_SOCKET_PATH": "/tmp/bridge.sock"},
 		Keychain:      kc,
 	})
 	if err != nil {
