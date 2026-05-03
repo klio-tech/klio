@@ -62,12 +62,61 @@ services:
       retries: 6
       start_period: 30s
 
+  # Klio engine — FastAPI app exposing the REST API consumed by the
+  # MCP shim, the Go bridge daemon, and the trust-app. Boots after
+  # postgres + redis are healthy. Migrations run inside the container
+  # via `alembic upgrade head` in /entrypoint.sh.
+  #
+  # Why we mount a named volume at /var/lib/klio:
+  # the dev KMS master key (used to wrap each user's envelope key)
+  # is persisted there. Restarting the container without persistence
+  # would invalidate every wrapped key in the database — every
+  # encrypted entry would become unrecoverable. Production deployments
+  # replace this with a real KMS (AWS, GCP) by setting kms_key_arn.
+  #
+  # Ollama: the engine reaches the host's native Ollama via
+  # `host.docker.internal`. On macOS Docker Desktop wires that name
+  # automatically; on Linux we need the `extra_hosts` entry below to
+  # make it resolve to the host gateway.
+  engine:
+    build:
+      context: ./engine
+      dockerfile: Dockerfile
+    container_name: klio-engine
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      KLIO_DATABASE_URL: postgresql+asyncpg://klio:klio_dev_password@postgres:5432/klio
+      KLIO_REDIS_URL: redis://redis:6379/0
+      KLIO_JWT_SIGNING_KEY: ${KLIO_JWT_SIGNING_KEY:-dev-only-secret-replace-me}
+      KLIO_EMBEDDING_MODEL: ${KLIO_EMBEDDING_MODEL:-ollama/nomic-embed-text}
+      KLIO_OLLAMA_API_BASE: ${KLIO_OLLAMA_API_BASE:-http://host.docker.internal:11434}
+      KLIO_DEV_KMS_PATH: /var/lib/klio/dev-kms.key
+      KLIO_LOG_LEVEL: ${KLIO_LOG_LEVEL:-INFO}
+    volumes:
+      - klio-engine-data:/var/lib/klio
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
   # Trust app — Next.js dashboard for browsing your memories, spaces,
-  # and access requests. Connects to the engine running on the host
-  # (not in compose) via `host.docker.internal`. Auto-authenticates
-  # in local-dev mode using KLIO_LOCAL_USER_ID / KLIO_LOCAL_AGENT_ID
-  # from a project-level `.env` file (populated by `klio init`; can
-  # also be filled in by hand from `klio status` output).
+  # and access requests. Talks to the engine on the compose network
+  # (service name `engine`), which is also reachable on the host at
+  # http://127.0.0.1:8000 for the MCP shim + bridge daemon.
+  #
+  # Auto-authenticates in local-dev mode using KLIO_LOCAL_USER_ID /
+  # KLIO_LOCAL_AGENT_ID from a project-level `.env` file (populated by
+  # `klio init`; can also be filled in by hand from `klio status`).
   #
   # Reach it at http://127.0.0.1:3000 once the engine is up.
   trust-app:
@@ -75,11 +124,14 @@ services:
       context: ./trust-app
       dockerfile: Dockerfile
     container_name: klio-trust-app
+    depends_on:
+      engine:
+        condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000"
     environment:
-      KLIO_ENGINE_URL: http://host.docker.internal:8000
-      KLIO_JWT_SIGNING_KEY: ${KLIO_JWT_SIGNING_KEY:-dev-secret}
+      KLIO_ENGINE_URL: http://engine:8000
+      KLIO_JWT_SIGNING_KEY: ${KLIO_JWT_SIGNING_KEY:-dev-only-secret-replace-me}
       KLIO_LOCAL_DEV: "1"
       KLIO_LOCAL_USER_ID: ${KLIO_LOCAL_USER_ID}
       KLIO_LOCAL_AGENT_ID: ${KLIO_LOCAL_AGENT_ID}
@@ -90,3 +142,4 @@ volumes:
   klio-postgres-data:
   klio-redis-data:
   klio-ollama-data:
+  klio-engine-data:
