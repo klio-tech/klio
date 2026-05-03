@@ -20,6 +20,12 @@ build/
 
 # Go
 bin/
+# But the npm package's bin/ holds the published CLI entry point —
+# keep it tracked. Without this exception the gitignore rule above
+# silently strips bin/klio.mjs from `npm publish`, and `npx
+# @klio-tech/klio init` errors with "klio: command not found"
+# because the published tarball has no executable.
+!npm/bin/
 *.test
 *.out
 vendor/
