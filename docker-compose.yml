@@ -109,6 +109,47 @@ services:
       retries: 12
       start_period: 30s
 
+  # Bridge — Go daemon + MCP shim, packaged as a container so the
+  # npm-launched onboarding flow doesn't have to ship platform-specific
+  # binaries. Hooks fired by Claude Code/Cursor reach this container
+  # via `docker exec klio-bridge klio hook <event>`; the MCP shim is
+  # invoked the same way (`docker exec -i klio-bridge klio-mcp`).
+  #
+  # The unix socket lives inside the container at /data/bridge.sock,
+  # backed by a named volume. We DO NOT bind-mount it to the host
+  # because:
+  #   - the agent adapters configure Claude Code/Cursor to invoke
+  #     `docker exec`, which runs inside the container — the daemon
+  #     and the hook subcommand share the socket through normal
+  #     intra-container IPC, no host plumbing needed
+  #   - bind-mounting unix sockets across Docker Desktop's Linux VM
+  #     barrier is fragile (the socket inode lives in two filesystems
+  #     simultaneously and notify+accept semantics differ between
+  #     host and VM)
+  #
+  # ~/.claude is bind-mounted read-only at /host/.claude so `klio
+  # backfill` can walk session JSONL files without copying them in.
+  bridge:
+    build:
+      context: ./bridge
+      dockerfile: Dockerfile
+    container_name: klio-bridge
+    depends_on:
+      engine:
+        condition: service_healthy
+    environment:
+      KLIO_API_URL: http://engine:8000
+      KLIO_REDIS_URL: redis://redis:6379/0
+      KLIO_LOG_LEVEL: ${KLIO_LOG_LEVEL:-INFO}
+    volumes:
+      - klio-bridge-data:/data
+      - ${HOME}/.claude:/host/.claude:ro
+    # Keep the daemon alive for `docker exec` invocations even when
+    # no agent is currently connected. `restart: unless-stopped`
+    # means user-issued `docker compose stop` is honored but a
+    # daemon panic auto-recovers.
+    restart: unless-stopped
+
   # Trust app — Next.js dashboard for browsing your memories, spaces,
   # and access requests. Talks to the engine on the compose network
   # (service name `engine`), which is also reachable on the host at
@@ -143,3 +184,4 @@ volumes:
   klio-redis-data:
   klio-ollama-data:
   klio-engine-data:
+  klio-bridge-data:

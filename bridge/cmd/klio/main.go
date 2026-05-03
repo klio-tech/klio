@@ -45,6 +45,8 @@ func main() {
 		runStatus()
 	case "init":
 		runInit(os.Args[2:])
+	case "configure":
+		runConfigure(os.Args[2:])
 	case "uninstall":
 		runUninstall(os.Args[2:])
 	case "hook":
@@ -350,6 +352,62 @@ func runInit(args []string) {
 	fmt.Println("  Inspect status:                       klio status")
 }
 
+// runConfigure persists a credential set into the bridge's keychain
+// backend without going through cloud provisioning. Used by the
+// `npx @klio-tech/klio init` flow: the npm launcher provisions the
+// account itself (a single HTTP call against the local engine), then
+// invokes `docker exec klio-bridge klio configure ...` to seed the
+// container's keychain so the daemon authenticates correctly on its
+// next boot.
+//
+// Why a separate subcommand instead of `klio init --no-provision`:
+// the init flow has many side effects (orchestrator, agent adapters,
+// env file). Configure is a pure write to the keychain — keeping
+// them separate makes the npm path's failure modes obvious and lets
+// the bridge image stay agnostic to host-side concerns.
+func runConfigure(args []string) {
+	flags := flag.NewFlagSet("configure", flag.ExitOnError)
+	refreshToken := flags.String("refresh-token", "", "refresh token returned by /v1/users/provision")
+	userID := flags.String("user-id", "", "user UUID")
+	agentID := flags.String("agent-id", "", "agent UUID")
+	defaultSpaceID := flags.String("default-space-id", "", "default space UUID")
+	_ = flags.Parse(args)
+
+	if *refreshToken == "" || *userID == "" || *agentID == "" || *defaultSpaceID == "" {
+		fmt.Fprintln(os.Stderr,
+			"usage: klio configure --refresh-token X --user-id Y --agent-id Z --default-space-id W")
+		os.Exit(2)
+	}
+	for _, raw := range []string{*userID, *agentID, *defaultSpaceID} {
+		if _, err := uuid.Parse(raw); err != nil {
+			fmt.Fprintf(os.Stderr, "configure: %q is not a valid UUID: %v\n", raw, err)
+			os.Exit(1)
+		}
+	}
+
+	if _, err := config.EnsureKlioDir(); err != nil {
+		fmt.Fprintln(os.Stderr, "ensure ~/.klio:", err)
+		os.Exit(1)
+	}
+	keys := buildKeychain()
+
+	// Write all four atomically (best-effort): if any fail, exit
+	// non-zero so the npm launcher surfaces the error instead of
+	// continuing with a half-configured keychain.
+	for k, v := range map[string]string{
+		"refresh_token":    *refreshToken,
+		"user_id":          *userID,
+		"agent_id":         *agentID,
+		"default_space_id": *defaultSpaceID,
+	} {
+		if err := keys.Set(k, []byte(v)); err != nil {
+			fmt.Fprintf(os.Stderr, "configure: keychain set %s: %v\n", k, err)
+			os.Exit(1)
+		}
+	}
+	fmt.Println("klio: credentials persisted")
+}
+
 func runUninstall(args []string) {
 	flags := flag.NewFlagSet("uninstall", flag.ExitOnError)
 	purge := flags.Bool("purge", false, "also delete the cloud account (irreversible)")
@@ -582,5 +640,5 @@ func min(a, b int) int {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr,
-		"usage: klio [version|daemon|status|init|uninstall|hook|backfill|reembed]")
+		"usage: klio [version|daemon|status|init|configure|uninstall|hook|backfill|reembed]")
 }
