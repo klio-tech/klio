@@ -27,11 +27,18 @@ on:
     tags: ['v*']
     # Skip the run when only docs / non-build files change. Keeps the
     # CI bill predictable and avoids spurious image churn.
+    #
+    # `npm/package.json` is included because the version field there
+    # drives the image tag we publish (see the metadata-action step
+    # below). A version bump in package.json must re-tag the images
+    # even if no engine/bridge/trust-app source changed, otherwise
+    # `npx @klio-tech/klio@<new-version>` would 404 on its image pull.
     paths:
       - 'engine/**'
       - 'bridge/**'
       - 'trust-app/**'
       - 'docker-compose.yml'
+      - 'npm/package.json'
       - '.github/workflows/release-images.yml'
   workflow_dispatch:
 
@@ -94,12 +101,41 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Read the version from npm/package.json so the same value that
+      # the npm launcher uses to pin its image tag (compose template
+      # writes `image: ghcr.io/klio-tech/klio-engine:${version}`) is
+      # also what every main-branch image push gets tagged with.
+      #
+      # That way bumping `npm/package.json` from 0.1.0 → 0.1.1 is the
+      # ONE action a release needs: the npm publish workflow ships
+      # @klio-tech/klio@0.1.1 to npm, this workflow re-tags every image
+      # as :0.1.1 on GHCR, and `npx @klio-tech/klio@0.1.1 init` pulls a
+      # matched set without any manual `git tag v0.1.1 && git push`.
+      - name: Read npm package version
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./npm/package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved npm/package.json version: $VERSION"
+
       # metadata-action computes the tag list automatically from the
       # event:
-      #   branch=main  → :main, :sha-<short>
-      #   tag=v0.1.0   → :0.1.0, :0.1, :0, :latest
-      # Passing those into build-push-action via the `tags` output
-      # avoids per-job conditionals and keeps the matrix lean.
+      #   branch=main  → :main, :sha-<short>, :<npm-version>, :latest
+      #   tag=v0.1.0   → :v0.1.0, :0.1.0, :0.1, :sha-<short>, :latest
+      #
+      # Why include :<npm-version> + :latest on main pushes (not only
+      # on tag pushes): the npm package's compose template references
+      # the version tag directly, so every npm-package version bump
+      # MUST have a matching image tag on GHCR. Cutting a separate git
+      # tag per release works but is extra friction; auto-tagging
+      # from package.json keeps the release surface to one file change.
+      #
+      # Caveat: pushing two commits with the same package.json version
+      # will overwrite each other's :<version> tag. That's intentional
+      # — semver expects one tag per published version, and we want
+      # `npx @klio-tech/klio@0.1.0` to always pull whatever shipped
+      # under that version label. Bumping the version is the trigger
+      # for "this is a real release, freeze the tag."
       - name: Compute image metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -111,7 +147,8 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-,format=short
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ steps.pkg.outputs.version }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push ${{ matrix.name }}
         uses: docker/build-push-action@v6
