@@ -39,7 +39,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test --import tsx tests/",
+    "test": "node --test --import tsx 'tests/**/*.test.ts'",
     "lint": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build"
   },
