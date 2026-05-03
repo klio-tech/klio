@@ -143,7 +143,7 @@ export function Footer() {
           }}
         >
           <span>
-            © {new Date().getFullYear()} Abhishek Singh ·{" "}
+            © {new Date().getFullYear()} Klio ·{" "}
             <a
               className="k-link"
               href="mailto:contact@klio.tech"
