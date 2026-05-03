@@ -1,8 +1,12 @@
 // Shared shape for agent adapters. Mirrors the Go agentadapters.Adapter
 // interface so the two implementations stay in lockstep — if we add a
-// third agent (Codex CLI, Continue, etc.) we should add the adapter
+// new agent (Codex CLI, Continue, etc.) we should add the adapter
 // in BOTH languages so users get the same coverage regardless of which
 // `klio init` entry point they used.
+
+import { ClaudeCodeAdapter } from "./claudeCode.js";
+import { CodexAdapter } from "./codex.js";
+import { CursorAdapter } from "./cursor.js";
 
 export type AdapterConfig = {
   /**
@@ -35,6 +39,20 @@ export interface Adapter {
 
   /** Restore the agent's config from the most recent backup. */
   uninstall(): Promise<void>;
+}
+
+/**
+ * The canonical list of agent adapters Klio knows how to wire. Both
+ * `klio init` and `klio uninstall` iterate this list and skip any
+ * adapter whose `installed()` returns false. Adding a new agent is
+ * therefore a one-liner here, not a multi-file edit across commands.
+ *
+ * Order matters only for status output (we list them top-to-bottom
+ * in this order); the install/uninstall side effects of each adapter
+ * are independent.
+ */
+export function allAdapters(): Adapter[] {
+  return [new ClaudeCodeAdapter(), new CursorAdapter(), new CodexAdapter()];
 }
 
 /**

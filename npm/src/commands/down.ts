@@ -11,8 +11,7 @@
 import { banner, ok, runSteps } from "../ui.js";
 import { composeDown, resolveComposeBin } from "../docker.js";
 import { runtimeDir } from "../compose.js";
-import { ClaudeCodeAdapter } from "../adapters/claudeCode.js";
-import { CursorAdapter } from "../adapters/cursor.js";
+import { allAdapters } from "../adapters/types.js";
 
 export async function down(): Promise<void> {
   banner("Stopping Klio");
@@ -25,6 +24,21 @@ export async function down(): Promise<void> {
 export async function uninstall(): Promise<void> {
   banner("Uninstalling Klio");
 
+  // One step per adapter, generated from the canonical registry.
+  // Adding a new agent in `allAdapters()` extends uninstall coverage
+  // automatically — no edit here required.
+  const adapterSteps = allAdapters().map((adapter) => ({
+    title: `Restore ${adapter.name()} config from backup`,
+    optional: true,
+    run: async () => {
+      if (!adapter.installed()) {
+        return { kind: "skip" as const, reason: "not installed" };
+      }
+      await adapter.uninstall();
+      return { kind: "ok" as const, status: "restored" };
+    },
+  }));
+
   await runSteps([
     {
       title: "Stop containers and remove volumes",
@@ -34,26 +48,7 @@ export async function uninstall(): Promise<void> {
         return { kind: "ok", status: "removed" };
       },
     },
-    {
-      title: "Restore Claude Code config from backup",
-      optional: true,
-      run: async () => {
-        const a = new ClaudeCodeAdapter();
-        if (!a.installed()) return { kind: "skip", reason: "not installed" };
-        await a.uninstall();
-        return { kind: "ok", status: "restored" };
-      },
-    },
-    {
-      title: "Restore Cursor config from backup",
-      optional: true,
-      run: async () => {
-        const a = new CursorAdapter();
-        if (!a.installed()) return { kind: "skip", reason: "not installed" };
-        await a.uninstall();
-        return { kind: "ok", status: "restored" };
-      },
-    },
+    ...adapterSteps,
   ]);
 
   process.stdout.write(

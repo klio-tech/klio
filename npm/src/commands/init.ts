@@ -37,9 +37,7 @@ import {
 } from "../compose.js";
 import { provision, waitForEngineHealth } from "../engine.js";
 import { generateSigningKey, getOrCreateInstallId } from "../installId.js";
-import { ClaudeCodeAdapter } from "../adapters/claudeCode.js";
-import { CursorAdapter } from "../adapters/cursor.js";
-import type { Adapter } from "../adapters/types.js";
+import { allAdapters } from "../adapters/types.js";
 
 const ENGINE_URL = "http://127.0.0.1:8000";
 const TRUST_APP_URL = "http://127.0.0.1:3000";
@@ -181,12 +179,9 @@ export async function init(opts: InitOptions): Promise<void> {
       },
     },
     {
-      title: "Wire Claude Code and Cursor",
+      title: "Wire Claude Code, Cursor, and Codex",
       run: async () => {
-        const adapters: Adapter[] = [
-          new ClaudeCodeAdapter(),
-          new CursorAdapter(),
-        ];
+        const adapters = allAdapters();
         for (const adapter of adapters) {
           if (!adapter.installed()) continue;
           try {
