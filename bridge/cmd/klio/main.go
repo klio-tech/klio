@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/klio-tech/bridge/internal/daemon"
 	"github.com/klio-tech/bridge/internal/hooks"
 	"github.com/klio-tech/bridge/internal/keychain"
+	"github.com/klio-tech/bridge/internal/orchestrator"
 	"github.com/klio-tech/bridge/internal/version"
 )
 
@@ -142,6 +144,22 @@ func runInit(args []string) {
 		"no-env-file", false,
 		"do not write the local-dev env file (~/.klio/local-dev.env + ./.env)",
 	)
+	skipStack := flags.Bool(
+		"no-stack", false,
+		"skip docker preflight + compose up + ollama + engine wait (provision + agent wiring only)",
+	)
+	engineURL := flags.String(
+		"engine-url", "http://127.0.0.1:8000",
+		"engine URL to wait for after `docker compose up`",
+	)
+	embedModel := flags.String(
+		"embedding-model", "nomic-embed-text",
+		"Ollama embedding model to ensure is pulled (set empty to skip)",
+	)
+	engineTimeout := flags.Duration(
+		"engine-timeout", 90*time.Second,
+		"how long to wait for the engine /health endpoint after compose up",
+	)
 	_ = flags.Parse(args)
 
 	cfg, err := config.Load()
@@ -193,6 +211,39 @@ func runInit(args []string) {
 		os.Exit(1)
 	}
 
+	// Phase 1 — bring the local stack online (docker preflight, docker
+	// compose up, optional ollama model pull, wait for engine /health).
+	// Skipped via --no-stack for users who already manage the stack
+	// themselves (e.g. CI environments) or are pointed at a remote
+	// engine via --cloud / --engine-url.
+	if !*skipStack {
+		ui := orchestrator.NewUI()
+		ui.Banner("Setting up Klio")
+
+		cwd, _ := os.Getwd()
+		steps := []orchestrator.Step{
+			orchestrator.StepDockerPreflight(),
+			orchestrator.StepComposeUp(
+				cwd,
+				[]string{"postgres", "redis", "engine"},
+				bootstrap.FindKlioProjectRoot,
+			),
+		}
+		if *embedModel != "" {
+			steps = append(steps, orchestrator.StepOllamaModel(*embedModel))
+		}
+		steps = append(steps, orchestrator.StepWaitEngine(*engineURL, *engineTimeout))
+
+		if _, err := orchestrator.Run(context.Background(), ui, steps); err != nil {
+			// The orchestrator already printed a red ✗ line; the
+			// returned error is what aborted the run. We exit 1 with
+			// no extra message to keep the CLI output focused on the
+			// remediation hint already shown above.
+			os.Exit(1)
+		}
+		fmt.Fprintln(ui.Out)
+	}
+
 	// Build the env block that ends up in BOTH the MCP server entry
 	// and every hook command in settings.json. The MCP shim and the
 	// hook subcommand both need to find the daemon socket; the
@@ -221,26 +272,30 @@ func runInit(args []string) {
 		os.Exit(1)
 	}
 	if report.Reused {
-		fmt.Println("Klio settings refreshed for existing account.")
+		fmt.Println("✓ Account ready (existing credentials reused)")
 	} else {
-		fmt.Println("Klio is set up.")
+		fmt.Println("✓ Account provisioned")
 	}
-	fmt.Printf("  user_id:           %s\n", report.UserID)
-	fmt.Printf("  agent_id:          %s\n", report.AgentID)
-	fmt.Printf("  default_space_id:  %s\n", report.DefaultSpaceID)
+	fmt.Printf("    user_id           %s\n", report.UserID)
+	fmt.Printf("    agent_id          %s\n", report.AgentID)
+	fmt.Printf("    default_space_id  %s\n", report.DefaultSpaceID)
+
 	if len(report.AgentsConfigured) > 0 {
-		fmt.Printf("  configured agents: %v\n", report.AgentsConfigured)
+		fmt.Printf("✓ Agents wired: %s\n", strings.Join(report.AgentsConfigured, ", "))
 	} else {
-		fmt.Println("  no agents detected (you can install Claude Code or Cursor first, then re-run klio init)")
+		fmt.Println("! No coding agents detected on this machine.")
+		fmt.Println("    Install Claude Code, Cursor, or another MCP-capable agent,")
+		fmt.Println("    then re-run klio init to wire them up.")
 	}
-	if len(report.AgentsErrored) > 0 {
-		fmt.Printf("  agents with errors: %v\n", report.AgentsErrored)
+	for _, e := range report.AgentsErrored {
+		fmt.Printf("  ! %s\n", e)
 	}
 
 	// Write the local-dev env file(s) so the trust-app docker service
 	// (and any other consumer of these creds) can auto-login without
 	// manual setup. Always writes ~/.klio/local-dev.env, plus a
 	// project-root .env when run from inside the klio repo.
+	envFileWritten := false
 	if !*skipEnvFile {
 		cwd, _ := os.Getwd()
 		envPaths, err := bootstrap.WriteLocalDevEnv(bootstrap.LocalDevEnvOptions{
@@ -251,19 +306,48 @@ func runInit(args []string) {
 		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr,
-				"  warning: could not write local-dev env file:", err)
+				"! could not write local-dev env file:", err)
 		} else {
+			envFileWritten = true
 			for _, p := range envPaths {
-				fmt.Printf("  wrote: %s\n", p)
+				fmt.Printf("    wrote: %s\n", p)
 			}
 		}
 	}
 
-	fmt.Println()
-	fmt.Println("Start the daemon: klio daemon")
-	if !*skipEnvFile {
-		fmt.Println("Browse memories:  docker compose up -d trust-app && open http://127.0.0.1:3000")
+	// Phase 2 — bring up the trust-app dashboard now that the env file
+	// is in place. trust-app's compose entry depends on engine being
+	// healthy, so it'll wait for the engine container we already
+	// brought up. Skipped when --no-stack or env-file write failed
+	// (trust-app would 401 without the local-dev creds).
+	if !*skipStack && envFileWritten {
+		ui := orchestrator.NewUI()
+		fmt.Fprintln(ui.Out)
+		cwd, _ := os.Getwd()
+		trustAppSteps := []orchestrator.Step{
+			orchestrator.StepComposeUp(
+				cwd,
+				[]string{"trust-app"},
+				bootstrap.FindKlioProjectRoot,
+			),
+		}
+		if _, err := orchestrator.Run(context.Background(), ui, trustAppSteps); err != nil {
+			// Non-fatal: a failed trust-app start doesn't break the
+			// engine + agent integrations the user actually came for.
+			// We surface a hint and keep going.
+			fmt.Fprintln(os.Stderr,
+				"  ! trust-app did not start; bring it up later with `docker compose up -d trust-app`")
+		}
 	}
+
+	fmt.Println()
+	fmt.Println("Klio is ready.")
+	fmt.Println()
+	fmt.Println("  Start the daemon (in another shell):  klio daemon")
+	if !*skipStack && envFileWritten {
+		fmt.Println("  Open the dashboard:                   http://127.0.0.1:3000")
+	}
+	fmt.Println("  Inspect status:                       klio status")
 }
 
 func runUninstall(args []string) {

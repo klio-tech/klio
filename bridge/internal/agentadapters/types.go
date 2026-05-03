@@ -34,8 +34,12 @@ type Adapter interface {
 }
 
 // All returns the adapter list. Call Installed() to filter.
+//
+// Order is significant only for the human-facing report ("configured
+// agents: [...]"). Detection + install are independent per adapter.
 func All() []Adapter {
 	return []Adapter{
 		NewClaudeCodeAdapter(),
+		NewCursorAdapter(),
 	}
 }
