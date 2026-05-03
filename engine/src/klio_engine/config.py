@@ -31,3 +31,7 @@ class Settings(BaseSettings):
     ollama_api_base: str = "http://127.0.0.1:11434"
     dedup_cosine_threshold: float = 0.92
     jwt_signing_key: str = "dev-only-secret-replace-me"
+    # When set, embedding/extraction LLM calls can be routed through OpenRouter
+    # instead of local Ollama. Wired via the npm onboarding flow into the
+    # engine container's environment as KLIO_OPENROUTER_API_KEY.
+    openrouter_api_key: str | None = None
