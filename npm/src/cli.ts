@@ -72,9 +72,16 @@ function parseInitArgs(rest: string[]): Parameters<typeof init>[0] {
       opts.imageTag = expectValue(rest, ++i, "--image-tag");
     } else if (a === "--engine-url") {
       opts.engineURL = expectValue(rest, ++i, "--engine-url");
+    } else if (a === "--skip-provider") {
+      opts.skipProvider = true;
+    } else if (a === "--skip-wow") {
+      opts.skipWow = true;
+    } else if (a === "--skip-community") {
+      opts.skipCommunity = true;
     } else if (a === "-h" || a === "--help") {
       process.stdout.write(
-        "usage: klio init [--email <addr>] [--image-tag <tag>] [--engine-url <url>]\n",
+        "usage: klio init [--email <addr>] [--image-tag <tag>] [--engine-url <url>]\n" +
+          "                 [--skip-provider] [--skip-wow] [--skip-community]\n",
       );
       process.exit(0);
     } else {
