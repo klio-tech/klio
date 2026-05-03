@@ -7,6 +7,7 @@ toolchain go1.24.6
 require (
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.24
+	github.com/pelletier/go-toml/v2 v2.3.1
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/zalando/go-keyring v0.2.6
 )
