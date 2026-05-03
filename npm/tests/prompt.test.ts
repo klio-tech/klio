@@ -55,3 +55,31 @@ test("prompt with mask=true does not echo characters", async () => {
   // The literal value should never appear in output
   assert.doesNotMatch(chunks.join(""), /secret/);
 });
+
+test("prompt with multiline accumulates until empty line", async () => {
+  const { stdin, stdout } = streams("first line\nsecond line\nthird\n\n");
+  const result = await prompt({
+    message: "Memory",
+    multiline: true,
+    stdin,
+    stdout,
+  });
+  assert.equal(result, "first line\nsecond line\nthird");
+});
+
+test("prompt collapses CRLF to a single line terminator", async () => {
+  const { stdin, stdout } = streams("hello\r\n");
+  const result = await prompt({ message: "x", stdin, stdout });
+  assert.equal(result, "hello");
+});
+
+test("prompt with multiline survives CRLF terminator", async () => {
+  const { stdin, stdout } = streams("a\r\nb\r\n\r\n");
+  const result = await prompt({
+    message: "x",
+    multiline: true,
+    stdin,
+    stdout,
+  });
+  assert.equal(result, "a\nb");
+});
