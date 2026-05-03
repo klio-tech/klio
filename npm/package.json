@@ -1,0 +1,51 @@
+{
+  "name": "@klio-tech/klio",
+  "version": "0.1.0",
+  "description": "Persistent memory for your AI coding agents — local-first, encrypted, MCP-native. One-command onboarding via Docker.",
+  "keywords": [
+    "klio",
+    "memory",
+    "mcp",
+    "claude-code",
+    "cursor",
+    "ai-agents",
+    "local-first",
+    "embeddings"
+  ],
+  "homepage": "https://klio.tech",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/klio-tech/klio.git",
+    "directory": "npm"
+  },
+  "bugs": {
+    "url": "https://github.com/klio-tech/klio/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "Klio (https://klio.tech)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "klio": "./bin/klio.mjs"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "compose/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test --import tsx tests/",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

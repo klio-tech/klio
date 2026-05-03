@@ -1,0 +1,97 @@
+# Publish @klio-tech/klio to npm whenever main has a new version.
+#
+# Trigger model: every push to main runs this workflow, but the
+# publish step is gated on `npm view <pkg> version` differing from
+# the version in npm/package.json. That means routine commits to
+# npm/src/*.ts don't double-publish; bumping `version` in
+# npm/package.json (in any merged PR) triggers a release.
+#
+# Why we don't use semantic-release / changesets: that adds
+# automation surface (commit-message parsing, version-bump PRs)
+# beyond what's needed for a small package. A manual `npm version
+# patch && git commit && git push` workflow is fine until we
+# outgrow it.
+#
+# npm provenance: enabled via `npm publish --provenance` plus
+# `id-token: write` permission. Provenance attaches a Sigstore
+# signature linking the published tarball to this exact GHA run +
+# git commit, so users can run `npm view @klio-tech/klio --json`
+# and verify the supply chain.
+#
+# Required repo secret: NPM_TOKEN — an automation token created
+# at https://www.npmjs.com/settings/<user>/tokens (type: Automation
+# OR Granular with publish access to @klio-tech).
+
+name: Publish @klio-tech/klio to npm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'npm/**'
+      - '.github/workflows/publish-npm.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write    # for npm provenance attestations
+    defaults:
+      run:
+        working-directory: npm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          # The cache key includes the lockfile hash; without it
+          # every run re-downloads ~30MB of devDependencies.
+          cache: 'npm'
+          cache-dependency-path: npm/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check + build
+        run: |
+          npm run lint
+          npm run build
+
+      - name: Skip if version already on npm
+        id: check
+        run: |
+          PUBLISHED=$(npm view "@klio-tech/klio" version 2>/dev/null || echo "")
+          LOCAL=$(node -p "require('./package.json').version")
+          echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
+          echo "local=$LOCAL" >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISHED" = "$LOCAL" ]; then
+            echo "Version $LOCAL already published — skipping."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.check.outputs.should_publish == 'true'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.check.outputs.should_publish }}" = "true" ]; then
+            echo "::notice::Published @klio-tech/klio@${{ steps.check.outputs.local }} to npm"
+          else
+            echo "::notice::No publish — version ${{ steps.check.outputs.local }} already on npm"
+          fi
