@@ -41,5 +41,6 @@ func All() []Adapter {
 	return []Adapter{
 		NewClaudeCodeAdapter(),
 		NewCursorAdapter(),
+		NewCodexAdapter(),
 	}
 }
