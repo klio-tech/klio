@@ -8,6 +8,8 @@ import { ClaudeCodeAdapter } from "./claudeCode.js";
 import { ClaudeDesktopAdapter } from "./claudeDesktop.js";
 import { CodexAdapter } from "./codex.js";
 import { CursorAdapter } from "./cursor.js";
+import { OpenClawAdapter } from "./openClaw.js";
+import { OpenCodeAdapter } from "./openCode.js";
 
 export type AdapterConfig = {
   /**
@@ -58,6 +60,8 @@ export function allAdapters(): Adapter[] {
     new ClaudeDesktopAdapter(),
     new CursorAdapter(),
     new CodexAdapter(),
+    new OpenCodeAdapter(),
+    new OpenClawAdapter(),
   ];
 }
 

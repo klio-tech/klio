@@ -605,7 +605,7 @@ async function runAdapterStep(state: {
   process.stdout.write("\n");
   process.stdout.write("▸ Detecting your AI tools…\n");
   narrate(
-    "Klio supports Claude Code, Claude Desktop (Chat + Cowork), Cursor, and Codex — we patch each one's config to add the MCP server.",
+    "Klio supports Claude Code, Claude Desktop (Chat + Cowork), Cursor, Codex, OpenCode, and OpenClaw — we patch each one's config to add the MCP server.",
   );
   const detected = allAdapters().filter((a) => a.installed());
   state.detectedAdapters = detected;
