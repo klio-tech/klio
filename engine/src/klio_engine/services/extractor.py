@@ -1,20 +1,28 @@
-"""Fact extraction with three-tier fallback.
+"""Fact extraction with prefix-routed backends and stub fallback.
 
-Picks one backend per call, in priority order:
+Picks one backend per call, by `KLIO_EXTRACTION_MODEL` prefix:
 
-  1. **Anthropic / cloud LLM** if `KLIO_EXTRACTION_MODEL` is set to a real
-     model name (e.g. 'claude-haiku-4-5', 'claude-sonnet-4-6',
-     'gpt-4o-mini') AND the relevant API key is present in the
-     environment. Best quality.
-  2. **Ollama** if `KLIO_EXTRACTION_MODEL` starts with 'ollama/'. Local,
-     no API key, decent quality. The container must be running and the
-     model must already be pulled. Default: 'ollama/qwen2.5:7b-instruct'.
-  3. **Regex stub** if `KLIO_EXTRACTION_MODEL` is 'stub' (or anything
-     that fails to dispatch). Deterministic, dependency-free, used in
-     tests and as a safety net when nothing else works.
+  1. **stub** — regex-only deterministic extraction. Used in tests and
+     as a safety net when transient backend failures happen.
+  2. **ollama/<model>** — local, no API key, decent quality. The
+     container must be running and the model must already be pulled.
+     Default: 'ollama/qwen2.5:7b-instruct'.
+  3. **openrouter/<vendor>/<model>** — direct httpx POST to
+     https://openrouter.ai/api/v1/chat/completions with attribution
+     headers. Requires KLIO_OPENROUTER_API_KEY.
+  4. **custom/<model>** — direct httpx POST to KLIO_CUSTOM_BASE_URL/
+     chat/completions. Used by self-hosted LiteLLM proxies, Azure
+     OpenAI, vLLM endpoints, etc. Authorization header is sent only
+     when KLIO_CUSTOM_API_KEY is set.
+
+Anything else raises ValueError to fail fast — that's a configuration
+error, not a transient failure, and silently falling back to stub
+would mask the misconfiguration.
 
 Each tier emits the same `list[ExtractedEntry]` shape so callers don't
-care which backend ran.
+care which backend ran. Transient errors at runtime (network blips,
+LLM JSON malformed, etc.) fall back to the regex stub so the write
+path never 500s on extraction noise.
 """
 from __future__ import annotations
 
@@ -30,6 +38,13 @@ import structlog
 VALID_KINDS = {"memory", "observation", "plan", "decision", "note"}
 
 logger = structlog.get_logger(__name__)
+
+
+_OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+_ATTRIBUTION_HEADERS = {
+    "HTTP-Referer": "https://klio.tech",
+    "X-Title": "Klio",
+}
 
 
 @dataclass
@@ -67,11 +82,16 @@ _STUB_RULES: list[tuple[str, re.Pattern[str], float]] = [
     ),
 ]
 
+# `str.format` placeholders use `{name}` syntax, so JSON literal braces
+# in the prompt body must be doubled. This used to silently raise
+# `KeyError('"entries"')` inside the cloud-tier try/except and fall
+# back to stub on every cloud call — which is why bare-OpenAI-cloud
+# extraction never seemed to work in 0.2.x.
 EXTRACT_PROMPT = """\
 You extract structured facts from agent-user conversations.
 
 Output ONLY valid JSON in this shape:
-{"entries": [{"kind": ..., "content": ..., "confidence": ...}, ...]}
+{{"entries": [{{"kind": ..., "content": ..., "confidence": ...}}, ...]}}
 
 Allowed kinds (NOTHING ELSE):
 - memory: a stable fact about the user, project, or context
@@ -84,7 +104,7 @@ Rules:
 - Confidence is 0.0-1.0. Use 0.9+ only when explicitly stated by the user.
 - Do NOT include speculative or low-information items.
 - Keep each content under 500 characters.
-- If nothing is extractable, return {"entries": []}.
+- If nothing is extractable, return {{"entries": []}}.
 
 Conversation:
 ---
@@ -94,42 +114,58 @@ Conversation:
 
 
 class FactExtractor:
-    """Pick a backend at construct time, fall back to stub on errors."""
+    """Pick a backend by prefix, fall back to stub on transient errors.
+
+    Configuration errors (unknown prefix, missing required env var)
+    raise ValueError so the operator sees the problem instead of
+    silently extracting nothing useful via the regex stub."""
 
     def __init__(self, *, model: str | None = None) -> None:
         self._model = (model or os.getenv("KLIO_EXTRACTION_MODEL", "stub")).strip()
 
     @property
     def backend(self) -> str:
+        """Map the configured model name to a backend tag.
+
+        Raises ValueError when the prefix isn't supported — that's a
+        config error, not a runtime fault."""
         if self._model == "stub":
             return "stub"
         if self._model.startswith("ollama/"):
             return "ollama"
-        return "cloud"
+        if self._model.startswith("openrouter/"):
+            return "openrouter"
+        if self._model.startswith("custom/"):
+            return "custom"
+        raise ValueError(
+            f"unsupported model {self._model!r}: name must start with "
+            f"ollama/, openrouter/, custom/, or be 'stub'"
+        )
 
     async def extract(self, transcript: str) -> list[ExtractedEntry]:
+        # `backend` raises ValueError on unsupported prefixes so the
+        # operator sees a config error before we enter the try/except
+        # below — otherwise the fallback would silently swallow it.
         backend = self.backend
         if backend == "stub":
             return self._stub_extract(transcript)
-        if backend == "ollama":
-            try:
-                return await self._ollama_extract(transcript)
-            except Exception as e:
-                logger.warning(
-                    "extractor.ollama_failed_falling_back",
-                    error=str(e),
-                    model=self._model,
-                )
-                return self._stub_extract(transcript)
         try:
-            return await self._cloud_extract(transcript)
+            if backend == "ollama":
+                return await self._ollama_extract(transcript)
+            if backend == "openrouter":
+                return await self._openrouter_extract(transcript)
+            if backend == "custom":
+                return await self._custom_extract(transcript)
         except Exception as e:
             logger.warning(
-                "extractor.cloud_failed_falling_back",
+                "extractor.backend_failed_falling_back",
                 error=str(e),
+                backend=backend,
                 model=self._model,
             )
             return self._stub_extract(transcript)
+        # Defence-in-depth: backend validated above, this is unreachable.
+        return self._stub_extract(transcript)
 
     @staticmethod
     def _stub_extract(transcript: str) -> list[ExtractedEntry]:
@@ -174,18 +210,90 @@ class FactExtractor:
             content = r.json()["message"]["content"]
         return self._parse_llm_json(content)
 
-    async def _cloud_extract(self, transcript: str) -> list[ExtractedEntry]:
-        """Call a hosted LLM via LiteLLM (Anthropic, OpenAI, etc.)."""
-        from litellm import acompletion
+    async def _openrouter_extract(
+        self, transcript: str
+    ) -> list[ExtractedEntry]:
+        """Call OpenRouter's OpenAI-compatible /chat/completions endpoint.
 
+        Strips the `openrouter/` prefix (OpenRouter expects the bare
+        `<vendor>/<model>` form) and sends Klio's attribution headers
+        so usage shows up correctly on the OpenRouter dashboard."""
+        import httpx
+
+        from klio_engine.config import Settings
+
+        s = Settings()
+        api_key = s.openrouter_api_key
+        if not api_key:
+            raise ValueError(
+                "openrouter/* model requested but KLIO_OPENROUTER_API_KEY "
+                "is not set."
+            )
+        model = self._model.split("/", 1)[1]
         prompt = EXTRACT_PROMPT.format(transcript=transcript[:50_000])
-        response = await acompletion(
-            model=self._model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=2_000,
-        )
-        content = response["choices"][0]["message"]["content"]
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            **_ATTRIBUTION_HEADERS,
+        }
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            r = await client.post(
+                _OPENROUTER_CHAT_URL,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 2_000,
+                },
+                headers=headers,
+            )
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"]["content"]
+        return self._parse_llm_json(content)
+
+    async def _custom_extract(
+        self, transcript: str
+    ) -> list[ExtractedEntry]:
+        """Call a user-supplied OpenAI-compatible /chat/completions endpoint.
+
+        Strips the `custom/` prefix so the wire body carries the model
+        name the proxy expects. The Authorization header is sent only
+        when KLIO_CUSTOM_API_KEY is set — empty key means no header at
+        all (some local proxies reject `Authorization: Bearer ` with an
+        empty token)."""
+        import httpx
+
+        from klio_engine.config import Settings
+
+        s = Settings()
+        base = s.custom_base_url
+        if not base:
+            raise ValueError(
+                "custom/* model requested but KLIO_CUSTOM_BASE_URL is "
+                "not set."
+            )
+        model = self._model.split("/", 1)[1]
+        prompt = EXTRACT_PROMPT.format(transcript=transcript[:50_000])
+        headers = {
+            "Content-Type": "application/json",
+            **_ATTRIBUTION_HEADERS,
+        }
+        if s.custom_api_key:
+            headers["Authorization"] = f"Bearer {s.custom_api_key}"
+        url = f"{base.rstrip('/')}/chat/completions"
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            r = await client.post(
+                url,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 2_000,
+                },
+                headers=headers,
+            )
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"]["content"]
         return self._parse_llm_json(content)
 
     @staticmethod
