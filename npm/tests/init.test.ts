@@ -53,3 +53,22 @@ test("InitOptions accepts a quiet flag", () => {
   };
   assert.equal(opts.quiet, true);
 });
+
+test("InitOptions accepts the new 0.3.0 fields together", () => {
+  // Compile-time check: the 5-phase init refactor relies on every
+  // skip-* flag and the quiet flag composing freely. If any of them
+  // becomes mutually exclusive (e.g. quiet implying skipCommunity at
+  // the type level by mistake) the type system will fail this build
+  // before the test runs.
+  const opts: InitOptions = {
+    imageTag: "0.3.0",
+    quiet: true,
+    skipProvider: true,
+    skipWow: true,
+    skipCommunity: true,
+  };
+  assert.equal(opts.quiet, true);
+  assert.equal(opts.skipProvider, true);
+  assert.equal(opts.skipWow, true);
+  assert.equal(opts.skipCommunity, true);
+});

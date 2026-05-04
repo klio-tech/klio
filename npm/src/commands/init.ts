@@ -1,42 +1,60 @@
-// `klio init` — the user-facing onboarding flow.
+// `klio init` — the immersive 5-phase onboarding flow.
 //
-// Sequence (left-to-right is strict; each step depends on the
+// Phases (left-to-right is strict; each phase depends on the
 // artifacts of the one before):
 //
-//   1. Banner
-//   2. Preflight Docker (installed + daemon reachable)
-//   3. Provider setup (OpenRouter key + embedding/extraction models)
-//      — happens BEFORE compose/pull/up so the engine boots once,
-//      already pointed at the right LLM stack. The alternative —
-//      generate placeholder env, pull, prompt mid-flow, rewrite env,
-//      restart — would force the engine to restart between steps and
-//      stall the long compose-pull behind an interactive prompt the
-//      user can't see coming.
-//   4. Write ~/.klio/runtime/{docker-compose.yml, .env}
-//   5. docker compose pull   (so subsequent `up` is fast)
-//   6. docker compose up -d  (postgres, redis, engine, bridge)
-//   7. Wait for engine /health
-//   8. Provision an account against the local engine (HTTP)
-//   9. Persist credentials inside the bridge container
-//      (`docker exec klio-bridge klio configure ...`)
-//  10. Tool detection — show what we found, confirm before patching
-//  11. Patch Claude Code + Cursor + Codex configs (if confirmed)
-//  12. Refresh env file with the user/agent IDs (so trust-app's
-//      auto-login works on first boot)
-//  13. Bring up the trust-app dashboard
-//  14. Wow moment — write a memory + recall it back to prove the loop
-//  15. Community asks — star + Discord
-//  16. Print final reference block
+//   Phase 1 / 5  ·  Preflight
+//     - Check Docker is installed and running.
 //
-// Whole flow is idempotent: re-running reuses the install_id, gets
+//   Phase 2 / 5  ·  Connect a model
+//     - Provider menu (OpenRouter / Ollama / Custom).
+//     - Provider-specific setup loop (key + model picks + probes).
+//     - The Ollama branch may fall back to OpenRouter on detection
+//       failure; the fallback is a control-flow signal, not an error.
+//
+//   Phase 3 / 5  ·  Bring up your stack
+//     - Generate ~/.klio/runtime/{docker-compose.yml, .env}.
+//     - Pull container images.
+//     - Start postgres + redis + engine + bridge.
+//     - Wait for engine /health.
+//     - Provision an account against the local engine (HTTP).
+//     - Persist credentials inside the bridge container.
+//
+//   Phase 4 / 5  ·  Wire your AI agents
+//     - Detect installed agents; explicit [Y/n] confirm.
+//     - Patch Claude Code + Cursor + Codex configs (if confirmed).
+//     - Refresh env file with the user/agent IDs (so trust-app's
+//       auto-login works on first boot).
+//     - Bring up the trust-app dashboard.
+//
+//   Phase 5 / 5  ·  Prove it works
+//     - Wow moment — write a memory + recall it back to prove the loop.
+//
+//   (post) Community asks — star + Discord.
+//   (post) Final reference block — dashboard URL, status, down command.
+//
+// The whole flow is idempotent: re-running reuses the install_id, gets
 // the same user_id back, and re-applies agent configs — useful for
-// repairing a broken install.
+// repairing a broken install. Provider setup happens BEFORE compose/
+// pull/up so the engine boots once already pointed at the right LLM
+// stack — the alternative (placeholder env, pull, prompt mid-flow,
+// rewrite env, restart) would force the engine to restart between
+// steps and stall the long compose-pull behind an interactive prompt
+// the user can't see coming.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { renderBanner } from "../banner.js";
-import { info, runSteps, setQuiet, type Step } from "../ui.js";
+import {
+  info,
+  narrate,
+  phaseHeader,
+  phaseRecap,
+  runSteps,
+  setQuiet,
+  type Step,
+} from "../ui.js";
 import {
   composePull,
   composeUp,
@@ -53,15 +71,31 @@ import { provision, waitForEngineHealth } from "../engine.js";
 import { generateSigningKey, getOrCreateInstallId } from "../installId.js";
 import { allAdapters, type Adapter } from "../adapters/types.js";
 import { prompt } from "../prompt.js";
-import { setupProvider, type ProviderConfig } from "../providerSetup.js";
+import {
+  setupProvider,
+  setupOllama,
+  setupCustom,
+  type ProviderConfig,
+  type OllamaConfig,
+  type CustomConfig,
+} from "../providerSetup.js";
+import { selectProvider, type ProviderKind } from "../providerMenu.js";
 import {
   probeKey,
   probeEmbeddingModel,
   probeChatModel,
 } from "../openrouter.js";
+import {
+  isOllamaRunning,
+  listInstalledModels,
+  pullOllamaModel,
+  getEmbedDim,
+  filterToSupportedEmbed,
+} from "../ollama.js";
 import { runWowMoment } from "../wow.js";
 import { runCommunityAsks } from "../community.js";
 import { openUrl } from "../openUrl.js";
+import { spawn } from "node:child_process";
 
 const ENGINE_URL = "http://127.0.0.1:8000";
 const TRUST_APP_URL = "http://127.0.0.1:3000";
@@ -86,10 +120,10 @@ export type InitOptions = {
   /** Override engine URL (rarely needed). */
   engineURL?: string;
   /**
-   * Skip the OpenRouter provider step. For tests + repair flows on a
-   * machine that already has a valid `.env` from a prior install. The
-   * default flow always runs the provider step so a brand-new user
-   * cannot end up with an engine that boots without an LLM key.
+   * Skip the provider-setup phase entirely. For tests + repair flows
+   * on a machine that already has a valid `.env` from a prior install.
+   * The default flow always runs the provider step so a brand-new
+   * user cannot end up with an engine that boots without an LLM key.
    */
   skipProvider?: boolean;
   /**
@@ -114,6 +148,21 @@ export type InitOptions = {
   quiet?: boolean;
 };
 
+/**
+ * Tagged union threading the picked provider's config through Phase 3.
+ * The `kind` discriminator drives compose-env-var assembly + model-name
+ * prefixing. Each variant carries the shape produced by its own setup
+ * helper:
+ *
+ *   - openrouter: validated API key + chosen embed/extract models.
+ *   - ollama:     local-only; no key, just model names + dim.
+ *   - custom:     user-supplied base URL + key + model names.
+ */
+export type ProviderResult =
+  | { kind: "openrouter"; config: ProviderConfig }
+  | { kind: "ollama"; config: OllamaConfig }
+  | { kind: "custom"; config: CustomConfig };
+
 export async function init(opts: InitOptions): Promise<void> {
   process.stdout.write(renderBanner("init") + "\n");
 
@@ -121,7 +170,10 @@ export async function init(opts: InitOptions): Promise<void> {
   // phaseRecap call from this point on respects the user's choice.
   // Default false preserves the standard verbose flow when the flag
   // is omitted.
-  setQuiet(opts.quiet ?? false);
+  const quiet = opts.quiet ?? false;
+  setQuiet(quiet);
+
+  if (!quiet) writeWelcomePreview();
 
   const engineURL = opts.engineURL ?? ENGINE_URL;
   const composeFile = join(runtimeDir(), "docker-compose.yml");
@@ -133,7 +185,7 @@ export async function init(opts: InitOptions): Promise<void> {
   const state: {
     composeBin?: Awaited<ReturnType<typeof resolveComposeBin>>;
     signingKey: string;
-    provider?: ProviderConfig;
+    provider?: ProviderResult;
     userID?: string;
     agentID?: string;
     defaultSpaceID?: string;
@@ -152,170 +204,69 @@ export async function init(opts: InitOptions): Promise<void> {
 
   const installID = getOrCreateInstallId();
 
-  const preProviderSteps: Step[] = [
+  // -----------------------------------------------------------------
+  // Phase 1 / 5 · Preflight
+  // -----------------------------------------------------------------
+  phaseHeader(1, 5, "Preflight");
+  await runSteps([
     {
-      title: "Check Docker is installed and running",
+      title: "Checking Docker is installed and running",
       run: async () => {
+        narrate(
+          "Docker runs your local memory stack — we don't touch your host system, everything lives in containers.",
+        );
         const status = await preflightDocker();
         state.composeBin = await resolveComposeBin();
         return { kind: "ok", status };
       },
     },
-  ];
+  ]);
+  phaseRecap("Phase 1 done.");
 
-  const postProviderSteps: Step[] = [
-    {
-      title: "Generate compose file at ~/.klio/runtime/",
-      run: async () => {
-        writeComposeFile({
-          imageTag: opts.imageTag,
-          jwtSigningKey: state.signingKey,
-          embeddingModel: prefixOpenRouter(state.provider?.embeddingModel),
-          extractionModel: prefixOpenRouter(state.provider?.extractionModel),
-        });
-        // Minimum env needed for compose's variable interpolation.
-        // user/agent IDs are filled in after provisioning (below).
-        writeEnvFile({
-          KLIO_JWT_SIGNING_KEY: state.signingKey,
-          KLIO_OPENROUTER_API_KEY: state.provider?.openrouterKey ?? "",
-          KLIO_LOCAL_USER_ID: "",
-          KLIO_LOCAL_AGENT_ID: "",
-          KLIO_LOG_LEVEL: "INFO",
-        });
-        return { kind: "ok", status: composeFile };
-      },
-    },
-    {
-      title: "Pull container images",
-      run: async () => {
-        return composePull(state.composeBin!, {
-          cwd: runtimeDir(),
-          services: ["postgres", "redis", "engine", "bridge", "trust-app"],
-        });
-      },
-    },
-    {
-      title: "Start services (postgres, redis, engine, bridge)",
-      run: async () => {
-        return composeUp(state.composeBin!, {
-          cwd: runtimeDir(),
-          services: ["postgres", "redis", "engine", "bridge"],
-        });
-      },
-    },
-    {
-      title: `Wait for engine to be ready at ${engineURL}`,
-      run: async () => {
-        await waitForEngineHealth(engineURL);
-        return { kind: "ok", status: engineURL };
-      },
-    },
-    {
-      title: "Set up your account",
-      run: async () => {
-        const r = await provision(engineURL, {
-          agentKind: PROVISION_AGENT_KIND,
-          installID,
-          email: opts.email,
-        });
-        state.userID = r.user_id;
-        state.agentID = r.agent_id;
-        state.defaultSpaceID = r.default_space_id;
-        state.refreshToken = r.api_key;
-        info(`user_id        ${r.user_id}`);
-        info(`agent_id       ${r.agent_id}`);
-        info(`default space  ${r.default_space_id}`);
-        return { kind: "ok", status: "account ready" };
-      },
-    },
-    {
-      title: "Persist credentials inside the bridge container",
-      run: async () => {
-        await dockerExec(BRIDGE_CONTAINER, [
-          "klio",
-          "configure",
-          "--refresh-token",
-          state.refreshToken!,
-          "--user-id",
-          state.userID!,
-          "--agent-id",
-          state.agentID!,
-          "--default-space-id",
-          state.defaultSpaceID!,
-        ]);
-        return { kind: "ok", status: "stored in keychain volume" };
-      },
-    },
-  ];
-
-  const postWireSteps: Step[] = [
-    {
-      title: "Refresh local-dev env file with your IDs",
-      run: async () => {
-        writeEnvFile({
-          KLIO_JWT_SIGNING_KEY: state.signingKey,
-          KLIO_OPENROUTER_API_KEY: state.provider?.openrouterKey ?? "",
-          KLIO_LOCAL_USER_ID: state.userID!,
-          KLIO_LOCAL_AGENT_ID: state.agentID!,
-          KLIO_LOG_LEVEL: "INFO",
-        });
-        return { kind: "ok", status: envFile };
-      },
-    },
-    {
-      title: "Start the dashboard (trust-app)",
-      run: async () => {
-        return composeUp(state.composeBin!, {
-          cwd: runtimeDir(),
-          services: ["trust-app"],
-        });
-      },
-    },
-  ];
-
-  // 1. Docker preflight first so the user gets a fast "install
-  //    Docker" error before we ask them for an API key.
-  await runSteps(preProviderSteps);
-
-  // 2. Provider setup — interactive, runs outside the runSteps UI
-  //    because the prompts need to drive their own readline cycle
-  //    and the spinner-style step UI would conflict with line input.
+  // -----------------------------------------------------------------
+  // Phase 2 / 5 · Connect a model
+  // -----------------------------------------------------------------
+  phaseHeader(2, 5, "Connect a model");
   if (!opts.skipProvider) {
-    state.provider = await runProviderSetup();
+    state.provider = await runProviderPhase();
   }
+  phaseRecap("Phase 2 done.");
 
-  // 3. Compose + pull + up + provision + keychain configure.
-  await runSteps(postProviderSteps);
+  // -----------------------------------------------------------------
+  // Phase 3 / 5 · Bring up your stack
+  // -----------------------------------------------------------------
+  phaseHeader(3, 5, "Bring up your stack");
+  await runSteps(buildStackSteps(opts, state, engineURL, composeFile, installID));
+  phaseRecap(
+    "Phase 3 done — engine, bridge, postgres, redis all running.",
+  );
 
-  // 4. Adapter detection + interactive confirm. Lives outside
-  //    runSteps for the same reason as the provider step — the
-  //    [Y/n] prompt drives its own readline.
+  // -----------------------------------------------------------------
+  // Phase 4 / 5 · Wire your AI agents
+  // -----------------------------------------------------------------
+  phaseHeader(4, 5, "Wire your AI agents");
   await runAdapterStep(state);
-
-  // 5. Refresh env + start trust-app.
-  await runSteps(postWireSteps);
-
+  await runSteps(buildPostWireSteps(state, envFile));
   for (const e of state.adaptersErrored) {
     process.stderr.write(`! ${e}\n`);
   }
+  phaseRecap("Phase 4 done — your agents are now talking to Klio.");
 
-  // 6. Wow moment — only meaningful once trust-app is up and the
-  //    engine has the user's refresh token in hand. Skipped on
-  //    --skip-wow (tests / CI).
-  if (
-    !opts.skipWow &&
-    state.refreshToken &&
-    state.defaultSpaceID
-  ) {
+  // -----------------------------------------------------------------
+  // Phase 5 / 5 · Prove it works
+  // -----------------------------------------------------------------
+  phaseHeader(5, 5, "Prove it works");
+  if (!opts.skipWow && state.refreshToken && state.defaultSpaceID) {
     await runWowStep({
       engineURL,
       refreshToken: state.refreshToken,
       spaceID: state.defaultSpaceID,
     });
   }
+  phaseRecap("Phase 5 done.");
 
-  // 7. Community asks — runs after the wow moment, when the user
-  //    has just experienced the value, so a Yes is meaningful.
+  // Community asks — runs after the wow moment, when the user has
+  // just experienced the value, so a Yes is meaningful.
   if (!opts.skipCommunity) {
     await runCommunityAsks({
       promptFn: (o) => prompt({ message: o.message, default: o.default }),
@@ -332,12 +283,77 @@ export async function init(opts: InitOptions): Promise<void> {
 }
 
 /**
- * Drive the OpenRouter provider setup. Prints a section header so
- * the user knows we've left the docker-preflight phase and entered
- * the interactive part. The actual prompt loop lives in
- * `providerSetup.ts`.
+ * One-off welcome preview rendered between the banner and Phase 1.
+ * Suppressed under --quiet (the caller gates the call). Direct stdout
+ * writes are fine here — this is a static block, not a step body, so
+ * it doesn't need narrate/runSteps semantics.
  */
-async function runProviderSetup(): Promise<ProviderConfig> {
+function writeWelcomePreview(): void {
+  process.stdout.write("\n");
+  process.stdout.write("  Welcome — here's the path ahead:\n");
+  process.stdout.write("    1) Preflight            — check Docker is reachable\n");
+  process.stdout.write("    2) Connect a model      — pick OpenRouter / Ollama / Custom\n");
+  process.stdout.write("    3) Bring up your stack  — pull images, start services\n");
+  process.stdout.write("    4) Wire your AI agents  — Claude Code / Cursor / Codex\n");
+  process.stdout.write("    5) Prove it works       — write a memory, recall it back\n");
+  process.stdout.write("\n");
+}
+
+/**
+ * Drive Phase 2's provider menu + the matching setup branch. Returns
+ * a fully-formed `ProviderResult`. Lives outside `runSteps` because
+ * every branch issues interactive prompts that drive their own
+ * readline cycle; the spinner-style step UI would conflict with line
+ * input.
+ *
+ * The Ollama branch may return a `fallback` sentinel, in which case
+ * we re-enter the OpenRouter setup automatically — the user already
+ * told the inner prompt they want to fall back, so we don't ask again.
+ */
+async function runProviderPhase(): Promise<ProviderResult> {
+  const kind = await selectProvider({
+    promptFn: (o) => prompt({ message: o.message, default: o.default }),
+    log: writeLine,
+  });
+
+  if (kind === "openrouter") {
+    return { kind: "openrouter", config: await runOpenRouterSetup() };
+  }
+
+  if (kind === "ollama") {
+    const result = await setupOllama({
+      promptFn: (o) => prompt({ message: o.message, default: o.default }),
+      log: writeLine,
+      isRunning: isOllamaRunning,
+      hasOllamaCli: hasOllamaCli,
+      listModels: listInstalledModels,
+      pullModel: pullOllamaModel,
+      getEmbedDim: getEmbedDim,
+      filterEmbed: filterToSupportedEmbed,
+    });
+    if (result.kind === "ollama") {
+      return { kind: "ollama", config: result };
+    }
+    // Fallback — user opted into OpenRouter inside setupOllama.
+    writeLine(`      · ${result.reason} Falling back to OpenRouter.`);
+    return { kind: "openrouter", config: await runOpenRouterSetup() };
+  }
+
+  // kind === "custom"
+  const config = await setupCustom({
+    promptFn: (o) =>
+      prompt({ message: o.message, default: o.default, mask: o.mask }),
+    log: writeLine,
+  });
+  return { kind: "custom", config };
+}
+
+/**
+ * Drive the OpenRouter provider setup. Prints a section header so
+ * the user knows we've left the menu and entered the interactive
+ * key + model loop. The actual prompt loop lives in `providerSetup.ts`.
+ */
+async function runOpenRouterSetup(): Promise<ProviderConfig> {
   process.stdout.write("\n");
   process.stdout.write("▸ Connect your LLM provider (OpenRouter)\n");
   process.stdout.write(
@@ -358,9 +374,175 @@ async function runProviderSetup(): Promise<ProviderConfig> {
 }
 
 /**
- * Detect installed agent adapters, print the list, and confirm
- * before patching their configs. Mutates `state` with results so
- * the caller can surface errors after `runSteps` finishes.
+ * Build Phase 3's step array — compose generation, image pull, stack
+ * start, engine wait, account provision, and bridge keychain configure.
+ * All steps run inside `runSteps` so the user gets the standard
+ * ▸/✓/✗ progress UI.
+ */
+function buildStackSteps(
+  opts: InitOptions,
+  state: {
+    composeBin?: Awaited<ReturnType<typeof resolveComposeBin>>;
+    signingKey: string;
+    provider?: ProviderResult;
+    userID?: string;
+    agentID?: string;
+    defaultSpaceID?: string;
+    refreshToken?: string;
+  },
+  engineURL: string,
+  composeFile: string,
+  installID: string,
+): Step[] {
+  return [
+    {
+      title: "Generate compose file at ~/.klio/runtime/",
+      run: async () => {
+        narrate("Writing your local stack config to ~/.klio/runtime/.");
+        const provider = state.provider;
+        const kind = provider?.kind ?? "openrouter";
+        writeComposeFile({
+          imageTag: opts.imageTag,
+          jwtSigningKey: state.signingKey,
+          embeddingModel: prefixModel(kind, providerEmbedModel(provider)),
+          extractionModel: prefixModel(kind, providerExtractModel(provider)),
+        });
+        // Minimum env needed for compose's variable interpolation.
+        // user/agent IDs are filled in after provisioning (Phase 4).
+        writeEnvFile(buildEnvVars(provider, state.signingKey, "", ""));
+        return { kind: "ok", status: composeFile };
+      },
+    },
+    {
+      title: "Pull container images",
+      run: async () => {
+        narrate(
+          "Klio's three images come from GitHub Container Registry — engine, bridge, trust-app.",
+        );
+        return composePull(state.composeBin!, {
+          cwd: runtimeDir(),
+          services: ["postgres", "redis", "engine", "bridge", "trust-app"],
+        });
+      },
+    },
+    {
+      title: "Start services (postgres, redis, engine, bridge)",
+      run: async () => {
+        narrate(
+          "Postgres + pgvector for memory storage, Redis for cross-agent realtime, the engine API, the bridge daemon.",
+        );
+        return composeUp(state.composeBin!, {
+          cwd: runtimeDir(),
+          services: ["postgres", "redis", "engine", "bridge"],
+        });
+      },
+    },
+    {
+      title: `Wait for engine to be ready at ${engineURL}`,
+      run: async () => {
+        narrate("Waiting for the engine's /health endpoint to respond 200.");
+        await waitForEngineHealth(engineURL);
+        return { kind: "ok", status: engineURL };
+      },
+    },
+    {
+      title: "Set up your account",
+      run: async () => {
+        narrate(
+          "Your refresh token is stored encrypted inside the bridge — never written to ~/.klio/runtime/.env.",
+        );
+        const r = await provision(engineURL, {
+          agentKind: PROVISION_AGENT_KIND,
+          installID,
+          email: opts.email,
+        });
+        state.userID = r.user_id;
+        state.agentID = r.agent_id;
+        state.defaultSpaceID = r.default_space_id;
+        state.refreshToken = r.api_key;
+        info(`user_id        ${r.user_id}`);
+        info(`agent_id       ${r.agent_id}`);
+        info(`default space  ${r.default_space_id}`);
+        return { kind: "ok", status: "account ready" };
+      },
+    },
+    {
+      title: "Persist credentials inside the bridge container",
+      run: async () => {
+        narrate(
+          "Handing your credentials to the bridge daemon so it can authenticate to the engine on every call.",
+        );
+        await dockerExec(BRIDGE_CONTAINER, [
+          "klio",
+          "configure",
+          "--refresh-token",
+          state.refreshToken!,
+          "--user-id",
+          state.userID!,
+          "--agent-id",
+          state.agentID!,
+          "--default-space-id",
+          state.defaultSpaceID!,
+        ]);
+        return { kind: "ok", status: "stored in keychain volume" };
+      },
+    },
+  ];
+}
+
+/**
+ * Phase 4's tail steps — refresh env file with provisioned IDs, then
+ * start the trust-app dashboard. The adapter detection + confirm step
+ * runs separately (outside `runSteps`) because it needs an interactive
+ * [Y/n] prompt.
+ */
+function buildPostWireSteps(
+  state: {
+    composeBin?: Awaited<ReturnType<typeof resolveComposeBin>>;
+    signingKey: string;
+    provider?: ProviderResult;
+    userID?: string;
+    agentID?: string;
+  },
+  envFile: string,
+): Step[] {
+  return [
+    {
+      title: "Refresh local-dev env file with your IDs",
+      run: async () => {
+        narrate(
+          "Filling in user_id + agent_id so the dashboard auto-logs you in.",
+        );
+        writeEnvFile(
+          buildEnvVars(
+            state.provider,
+            state.signingKey,
+            state.userID ?? "",
+            state.agentID ?? "",
+          ),
+        );
+        return { kind: "ok", status: envFile };
+      },
+    },
+    {
+      title: "Start the dashboard (trust-app)",
+      run: async () => {
+        narrate(
+          `The dashboard runs at ${TRUST_APP_URL} — your timeline of every memory, redaction, and audit event.`,
+        );
+        return composeUp(state.composeBin!, {
+          cwd: runtimeDir(),
+          services: ["trust-app"],
+        });
+      },
+    },
+  ];
+}
+
+/**
+ * Detect installed agent adapters, print the list, and confirm before
+ * patching their configs. Mutates `state` with results so the caller
+ * can surface errors after `runSteps` finishes.
  */
 async function runAdapterStep(state: {
   detectedAdapters: Adapter[];
@@ -370,21 +552,32 @@ async function runAdapterStep(state: {
 }): Promise<void> {
   process.stdout.write("\n");
   process.stdout.write("▸ Detecting your AI tools…\n");
+  narrate(
+    "Klio supports Claude Code, Cursor, and Codex — we patch each one's config to add the MCP server.",
+  );
   const detected = allAdapters().filter((a) => a.installed());
   state.detectedAdapters = detected;
 
   if (detected.length === 0) {
-    process.stdout.write(
-      "    No MCP-capable agents found. Install Claude Code, Cursor, or\n",
+    writeLine("");
+    writeLine(
+      "    No MCP-capable agents found. Install Claude Code, Cursor, or",
     );
-    process.stdout.write(
-      "    Codex and re-run `klio init` to wire them up.\n",
+    writeLine(
+      "    Codex and re-run `klio init` to wire them up.",
     );
     return;
   }
 
-  const names = detected.map((a) => a.name()).join(", ");
-  process.stdout.write(`    Found:    ${names}\n`);
+  const foundNames = detected.map((a) => a.name()).join(", ");
+  const notFound = allAdapters().filter((a) => !a.installed());
+  writeLine("");
+  writeLine(`    Found:     ${foundNames}`);
+  if (notFound.length > 0) {
+    const skipNames = notFound.map((a) => a.name()).join(", ");
+    writeLine(`    Not found: ${skipNames} (skipping)`);
+  }
+  writeLine("");
 
   const answer = await prompt({
     message: "Wire all detected tools?",
@@ -392,9 +585,7 @@ async function runAdapterStep(state: {
   });
   if (!isYes(answer)) {
     state.adaptersSkipped = true;
-    process.stdout.write(
-      "    Skipped — re-run `klio init` to wire them.\n",
-    );
+    writeLine("    Skipped — re-run `klio init` to wire them.");
     return;
   }
 
@@ -412,8 +603,8 @@ async function runAdapterStep(state: {
   }
 
   if (state.adaptersConfigured.length > 0) {
-    process.stdout.write(
-      `  ✓ ${state.adaptersConfigured.join(" + ")} connected\n`,
+    writeLine(
+      `  ✓ ${state.adaptersConfigured.join(" + ")} connected`,
     );
   }
 }
@@ -459,24 +650,109 @@ function writeLine(line: string): void {
 }
 
 /**
- * Translate a user-supplied OpenRouter-native model name (the shape
- * the OpenRouter API accepts at /embeddings + /chat/completions —
- * e.g. "openai/text-embedding-3-small") into the LiteLLM-routing
- * shape the engine expects in KLIO_EMBEDDING_MODEL / KLIO_EXTRACTION_MODEL
- * (e.g. "openrouter/openai/text-embedding-3-small").
+ * Build the env-var bag written to ~/.klio/runtime/.env. Always
+ * emits the four shared keys (`KLIO_OPENROUTER_API_KEY`,
+ * `KLIO_CUSTOM_BASE_URL`, `KLIO_CUSTOM_API_KEY`, `KLIO_LOG_LEVEL`) so
+ * compose's variable-interpolation never fails on a missing variable;
+ * the engine-side router consults the relevant pair based on the
+ * model-name prefix.
  *
- * LiteLLM uses the `openrouter/` prefix to know it should reach
- * OpenRouter as the upstream provider. Without the prefix, LiteLLM
- * tries to route via the model's native vendor (e.g. OpenAI direct,
- * which would require an OPENAI_API_KEY we never set up).
+ * Provider variants:
+ *   - openrouter: writes the key, leaves Custom blank.
+ *   - ollama:     leaves all upstream keys blank — the engine reaches
+ *                 ollama via host.docker.internal:11434, no auth.
+ *   - custom:     writes Custom base URL + key, leaves OpenRouter blank.
+ */
+function buildEnvVars(
+  provider: ProviderResult | undefined,
+  signingKey: string,
+  userID: string,
+  agentID: string,
+): Record<string, string> {
+  const base: Record<string, string> = {
+    KLIO_JWT_SIGNING_KEY: signingKey,
+    KLIO_LOCAL_USER_ID: userID,
+    KLIO_LOCAL_AGENT_ID: agentID,
+    KLIO_LOG_LEVEL: "INFO",
+    KLIO_OPENROUTER_API_KEY: "",
+    KLIO_CUSTOM_BASE_URL: "",
+    KLIO_CUSTOM_API_KEY: "",
+  };
+  if (!provider) return base;
+  if (provider.kind === "openrouter") {
+    base.KLIO_OPENROUTER_API_KEY = provider.config.openrouterKey;
+  } else if (provider.kind === "custom") {
+    base.KLIO_CUSTOM_BASE_URL = provider.config.baseUrl;
+    base.KLIO_CUSTOM_API_KEY = provider.config.apiKey;
+  }
+  // ollama branch: nothing to inject — host-network access via
+  // host.docker.internal is configured by the compose template.
+  return base;
+}
+
+/**
+ * Pull the embedding-model name out of whichever variant of
+ * `ProviderResult` we got. The three variants share the field name
+ * but differ enough in shape that a generic accessor would obscure
+ * intent — branch on `kind` and let TypeScript narrow.
+ */
+function providerEmbedModel(p: ProviderResult | undefined): string | undefined {
+  if (!p) return undefined;
+  return p.config.embeddingModel;
+}
+
+/**
+ * Symmetric to `providerEmbedModel`. Pulls the chat / extraction
+ * model name out of any variant.
+ */
+function providerExtractModel(
+  p: ProviderResult | undefined,
+): string | undefined {
+  if (!p) return undefined;
+  return p.config.extractionModel;
+}
+
+/**
+ * Translate a user-supplied bare model name into the LiteLLM-routing
+ * shape the engine expects in KLIO_EMBEDDING_MODEL / KLIO_EXTRACTION_MODEL
+ * (e.g. "openrouter/openai/text-embedding-3-small",
+ * "ollama/nomic-embed-text", "custom/llama-3.1-70b").
+ *
+ * LiteLLM uses the prefix to know which upstream provider to reach.
+ * Without the prefix, LiteLLM tries to route via the model's native
+ * vendor (e.g. OpenAI direct, which would require an OPENAI_API_KEY
+ * we never set up).
  *
  * Idempotent: returns the input unchanged if the prefix is already
  * present, so users who type "openrouter/openai/text-embedding-3-small"
  * by hand also work.
  */
-function prefixOpenRouter(model: string | undefined): string | undefined {
-  if (!model) return model;
-  return model.startsWith("openrouter/") ? model : `openrouter/${model}`;
+function prefixModel(
+  kind: ProviderKind,
+  name: string | undefined,
+): string | undefined {
+  if (!name) return name;
+  return name.startsWith(`${kind}/`) ? name : `${kind}/${name}`;
+}
+
+/**
+ * `which ollama` test. We need a CLI presence check separate from the
+ * daemon liveness check (`isOllamaRunning`) so we can give the user a
+ * precise diagnostic — "install Ollama" vs "start the daemon" — instead
+ * of lumping them together.
+ *
+ * Resolves true on exit code 0, false on any other exit or a spawn
+ * error (e.g. ENOENT). Stdout/stderr are silenced to avoid polluting
+ * the onboarding UI on systems without `which`.
+ */
+function hasOllamaCli(): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const child = spawn("which", ["ollama"], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    child.on("error", () => resolve(false));
+    child.on("exit", (code) => resolve(code === 0));
+  });
 }
 
 /**
