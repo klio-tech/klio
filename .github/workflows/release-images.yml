@@ -76,6 +76,12 @@ jobs:
             context: ./bridge
           - name: klio-trust-app
             context: ./trust-app
+            build_args: |
+              KLIO_BUILD_TARGET=local
+          - name: klio-landing
+            context: ./trust-app
+            build_args: |
+              KLIO_BUILD_TARGET=public
 
     steps:
       - name: Checkout
@@ -164,6 +170,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ matrix.build_args }}
           # GHA cache keeps inter-run layer cache so a rerun of the
           # workflow on the same Dockerfile completes in <1 min.
           # `mode=max` writes intermediate stage layers too, not just
