@@ -45,7 +45,6 @@ dependencies = [
     "alembic>=1.13",
     "pydantic[email]>=2.9",
     "pydantic-settings>=2.5",
-    "litellm>=1.50",
     "boto3>=1.35",
     "cryptography>=43",
     "structlog>=24",
