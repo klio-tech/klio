@@ -5,6 +5,7 @@
 // `klio init` entry point they used.
 
 import { ClaudeCodeAdapter } from "./claudeCode.js";
+import { ClaudeDesktopAdapter } from "./claudeDesktop.js";
 import { CodexAdapter } from "./codex.js";
 import { CursorAdapter } from "./cursor.js";
 
@@ -52,7 +53,12 @@ export interface Adapter {
  * are independent.
  */
 export function allAdapters(): Adapter[] {
-  return [new ClaudeCodeAdapter(), new CursorAdapter(), new CodexAdapter()];
+  return [
+    new ClaudeCodeAdapter(),
+    new ClaudeDesktopAdapter(),
+    new CursorAdapter(),
+    new CodexAdapter(),
+  ];
 }
 
 /**
