@@ -83,7 +83,17 @@ class EntryService:
         embedding, spec = await self._embeddings.embed(
             content, model=space.embedding_model
         )
-        if spec.dim != space.embedding_dim:
+        # Defence-in-depth dim cross-check between the dispatch-layer
+        # spec and the Space's pinned dim. Skipped when `spec.dim == 0`
+        # — that's the dispatch-layer sentinel for `custom/*` routes
+        # where the engine has no static knowledge of the upstream's
+        # output dim. In that path, EmbeddingService's per-call
+        # `_validate_dim` already enforces SUPPORTED_DIMS against the
+        # actual response length, and the typed pgvector shadow column
+        # selected via `SHADOW_BY_DIM[space.embedding_dim]` rejects any
+        # length mismatch at INSERT time, so a wrong-dim response can't
+        # silently land in the wrong shadow.
+        if spec.dim and spec.dim != space.embedding_dim:
             raise ValueError(
                 f"space {space_id} dim={space.embedding_dim} but model "
                 f"{spec.name!r} produced dim={spec.dim}"

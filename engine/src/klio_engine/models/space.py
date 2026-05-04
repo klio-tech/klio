@@ -19,18 +19,36 @@ from klio_engine.models.base import Base
 
 def _default_embedding_model() -> str:
     """Resolved at INSERT time so KLIO_EMBEDDING_MODEL env overrides work
-    in tests and CLI scripts without explicit kwarg threading."""
-    from klio_engine.config import Settings
-    from klio_engine.services.embedding_models import resolve
+    in tests and CLI scripts without explicit kwarg threading.
 
-    return resolve(Settings().embedding_model).name
+    Uses `resolve_or_synthesize` so non-registry model names (e.g.
+    `custom/<model>`, escape-hatch `openrouter/<model>` picks the npm
+    onboarding probed end-to-end) resolve to the user-supplied name
+    rather than raising. The synthesized spec preserves the original
+    name so the Space row records exactly what the user picked.
+    """
+    from klio_engine.config import Settings
+    from klio_engine.services.embedding_models import resolve_or_synthesize
+
+    s = Settings()
+    return resolve_or_synthesize(s.embedding_model, s.embedding_dim).name
 
 
 def _default_embedding_dim() -> int:
-    from klio_engine.config import Settings
-    from klio_engine.services.embedding_models import resolve
+    """Resolved at INSERT time. Source-of-truth order:
 
-    return resolve(Settings().embedding_model).dim
+      1. Registry hit on `KLIO_EMBEDDING_MODEL` -> registry's dim.
+      2. Registry miss + `KLIO_EMBEDDING_DIM` set -> the env's dim
+         (npm onboarding probed it against the user's provider).
+      3. Registry miss + no env dim -> raise (resolve_or_synthesize),
+         which surfaces a clear error rather than silently storing
+         vectors with the wrong dim.
+    """
+    from klio_engine.config import Settings
+    from klio_engine.services.embedding_models import resolve_or_synthesize
+
+    s = Settings()
+    return resolve_or_synthesize(s.embedding_model, s.embedding_dim).dim
 
 
 class Space(Base):

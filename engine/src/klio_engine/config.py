@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6380/0"
     log_level: str = "INFO"
     embedding_model: str = "ollama/nomic-embed-text"
+    # Native output dim of `embedding_model`. Only consulted for non-
+    # registry models (custom/* or escape-hatch openrouter/* names the
+    # engine doesn't have in its static EMBEDDING_MODELS table). The
+    # npm onboarding probes the user's chosen embedding model end-to-
+    # end and writes the verified dim back here as KLIO_EMBEDDING_DIM.
+    # Left unset (None) for registry-known models — the engine
+    # resolves the dim from `embedding_models.resolve()` in that case.
+    embedding_dim: int | None = None
     extraction_model: str = "stub"
     ollama_api_base: str = "http://127.0.0.1:11434"
     dedup_cosine_threshold: float = 0.92

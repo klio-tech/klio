@@ -64,3 +64,47 @@ def test_resolve_bare_openai_now_raises():
     from klio_engine.services.embedding_models import resolve
     with pytest.raises(ValueError, match="Unknown embedding model"):
         resolve("text-embedding-3-small")
+
+
+def test_resolve_or_synthesize_returns_registry_spec_when_known():
+    """Registry wins when the name is known — override is ignored.
+
+    This guarantees the registry remains authoritative for canonical
+    models so a typo in KLIO_EMBEDDING_DIM can't silently corrupt the
+    space-pin for a model the engine already understands."""
+    from klio_engine.services.embedding_models import resolve_or_synthesize
+    spec = resolve_or_synthesize(
+        "openrouter/openai/text-embedding-3-small", override_dim=999
+    )
+    # Registry wins — override is ignored when name is known.
+    assert spec.dim == 1536
+
+
+def test_resolve_or_synthesize_uses_override_for_custom():
+    """custom/<...> models are user-runtime-supplied and intentionally
+    not in the registry. The npm probe verified the dim end-to-end, so
+    we trust the override here."""
+    from klio_engine.services.embedding_models import resolve_or_synthesize
+    spec = resolve_or_synthesize("custom/anything", override_dim=1024)
+    assert spec.name == "custom/anything"
+    assert spec.dim == 1024
+
+
+def test_resolve_or_synthesize_uses_override_for_unknown_openrouter():
+    """User typed a custom model name at the picker — engine doesn't
+    have it in registry but the npm probe verified the dim."""
+    from klio_engine.services.embedding_models import resolve_or_synthesize
+    spec = resolve_or_synthesize(
+        "openrouter/openai/text-embedding-3-large", override_dim=3072
+    )
+    # Note: 3072 is NOT in SUPPORTED_DIMS — that's a separate problem the
+    # caller handles. resolve_or_synthesize just trusts the dim arg.
+    assert spec.dim == 3072
+
+
+def test_resolve_or_synthesize_raises_when_unknown_and_no_override():
+    """Defence-in-depth — if both registry and override miss, fail loudly."""
+    import pytest
+    from klio_engine.services.embedding_models import resolve_or_synthesize
+    with pytest.raises(ValueError, match="Unknown embedding model"):
+        resolve_or_synthesize("custom/anything", override_dim=None)

@@ -651,17 +651,24 @@ function writeLine(line: string): void {
 
 /**
  * Build the env-var bag written to ~/.klio/runtime/.env. Always
- * emits the four shared keys (`KLIO_OPENROUTER_API_KEY`,
- * `KLIO_CUSTOM_BASE_URL`, `KLIO_CUSTOM_API_KEY`, `KLIO_LOG_LEVEL`) so
- * compose's variable-interpolation never fails on a missing variable;
- * the engine-side router consults the relevant pair based on the
- * model-name prefix.
+ * emits the shared keys (`KLIO_OPENROUTER_API_KEY`,
+ * `KLIO_CUSTOM_BASE_URL`, `KLIO_CUSTOM_API_KEY`, `KLIO_EMBEDDING_DIM`,
+ * `KLIO_LOG_LEVEL`) so compose's variable-interpolation never fails
+ * on a missing variable; the engine-side router consults the
+ * relevant pair based on the model-name prefix.
  *
  * Provider variants:
  *   - openrouter: writes the key, leaves Custom blank.
  *   - ollama:     leaves all upstream keys blank — the engine reaches
  *                 ollama via host.docker.internal:11434, no auth.
  *   - custom:     writes Custom base URL + key, leaves OpenRouter blank.
+ *
+ * `KLIO_EMBEDDING_DIM` carries the dim the npm-side probe verified
+ * against the user's chosen embedding model. The engine uses it to
+ * pin the default Space's `embedding_dim` for non-registry models
+ * (custom/<...>, escape-hatch openrouter/<...> the engine doesn't
+ * know natively). Always emitted (blank when missing) so compose's
+ * variable interpolation never fails.
  */
 function buildEnvVars(
   provider: ProviderResult | undefined,
@@ -677,6 +684,7 @@ function buildEnvVars(
     KLIO_OPENROUTER_API_KEY: "",
     KLIO_CUSTOM_BASE_URL: "",
     KLIO_CUSTOM_API_KEY: "",
+    KLIO_EMBEDDING_DIM: "",
   };
   if (!provider) return base;
   if (provider.kind === "openrouter") {
@@ -685,7 +693,12 @@ function buildEnvVars(
     base.KLIO_CUSTOM_BASE_URL = provider.config.baseUrl;
     base.KLIO_CUSTOM_API_KEY = provider.config.apiKey;
   }
-  // ollama branch: nothing to inject — host-network access via
+  // Every provider variant carries an embeddingDim from its probe;
+  // thread it into the engine container so non-registry model names
+  // (custom/<...>, escape-hatch openrouter/<...>) still pin a valid
+  // dim onto the default Space.
+  base.KLIO_EMBEDDING_DIM = String(provider.config.embeddingDim);
+  // ollama branch: nothing else to inject — host-network access via
   // host.docker.internal is configured by the compose template.
   return base;
 }
@@ -713,15 +726,16 @@ function providerExtractModel(
 }
 
 /**
- * Translate a user-supplied bare model name into the LiteLLM-routing
+ * Translate a user-supplied bare model name into the prefixed routing
  * shape the engine expects in KLIO_EMBEDDING_MODEL / KLIO_EXTRACTION_MODEL
  * (e.g. "openrouter/openai/text-embedding-3-small",
  * "ollama/nomic-embed-text", "custom/llama-3.1-70b").
  *
- * LiteLLM uses the prefix to know which upstream provider to reach.
- * Without the prefix, LiteLLM tries to route via the model's native
- * vendor (e.g. OpenAI direct, which would require an OPENAI_API_KEY
- * we never set up).
+ * The engine's direct-httpx dispatch reads the leading prefix to pick
+ * an upstream provider. Without the prefix, dispatch raises with an
+ * "unsupported model" error — there's no implicit fallback to a
+ * native-vendor SDK (the LiteLLM dependency that previously provided
+ * that fallback was removed in 0.3.0).
  *
  * Idempotent: returns the input unchanged if the prefix is already
  * present, so users who type "openrouter/openai/text-embedding-3-small"

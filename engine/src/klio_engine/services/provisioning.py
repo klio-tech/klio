@@ -25,7 +25,7 @@ from klio_engine.models.agent import Agent, AgentKind
 from klio_engine.models.permission import Permission, PermissionScope
 from klio_engine.models.space import Space
 from klio_engine.models.user import User
-from klio_engine.services.embedding_models import resolve as resolve_embed_model
+from klio_engine.services.embedding_models import resolve_or_synthesize
 from klio_engine.services.user_keys import UserKeyService
 
 
@@ -73,7 +73,16 @@ async def provision_user(
     # 4. Default Space — pinned to the deployment's default embedding
     # model. The pin is permanent for the life of the space; switching
     # models requires `klio reembed --space <id> --to <model>`.
-    spec = resolve_embed_model(Settings().embedding_model)
+    #
+    # `resolve_or_synthesize` lets non-registry model names (custom/*
+    # and escape-hatch openrouter/* picks) succeed when the npm
+    # onboarding has threaded the probed dim into KLIO_EMBEDDING_DIM —
+    # without it, Phase 3 provision would hard-fail for any user who
+    # picked Custom or typed an unknown OpenRouter model id.
+    settings = Settings()
+    spec = resolve_or_synthesize(
+        settings.embedding_model, settings.embedding_dim
+    )
     s = Space(
         user_id=u.id,
         name="Default",

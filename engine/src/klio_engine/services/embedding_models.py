@@ -117,3 +117,53 @@ def shadow_table_for(dim: int) -> str:
             f"Add a new shadow table migration to support it."
         )
     return f"entry_embeddings_{dim}"
+
+
+def resolve_or_synthesize(
+    model_name: str | None, override_dim: int | None
+) -> EmbeddingModelSpec:
+    """Resolve `model_name` from the registry, or synthesize a spec.
+
+    Why synthesis exists:
+      - `custom/<...>` model names are intentionally NOT in the registry
+        because the user's own proxy / runtime can expose any model.
+        These names route through KLIO_CUSTOM_BASE_URL at call time and
+        the engine has no static way to know the model's native dim.
+      - `openrouter/<...>` names the engine doesn't have a row for are
+        escape-hatch picks the user typed at the npm picker. The npm-
+        side probe verified the dim end-to-end against OpenRouter
+        before reaching the engine, so the dim arg is trustworthy.
+
+    Resolution policy:
+      - Registry hit -> return the registry spec. `override_dim` is
+        ignored so a typo'd KLIO_EMBEDDING_DIM can't silently corrupt
+        the dim-pin for a canonical model.
+      - Registry miss + `override_dim` set -> synthesize a spec with
+        provider="custom" and the supplied dim.
+      - Registry miss + no override -> raise ValueError. Failing
+        loudly is required: a default Space pinned with the wrong dim
+        would corrupt every subsequent embedding write.
+
+    The synthetic spec deliberately mirrors the dispatch-layer
+    pass-through used in `services/embeddings.py:_resolve_for_dispatch`
+    — the entries-write path uses `spec.dim == 0` as a sentinel for
+    "skip re-validation here, let `_validate_dim` enforce it against
+    SUPPORTED_DIMS at the per-call boundary." That sentinel is NOT
+    used here: `resolve_or_synthesize` is only called by the
+    space-creation path, which needs a real dim to pin.
+    """
+    spec = _BY_NAME.get(model_name) if model_name is not None else None
+    if spec is not None:
+        return spec
+    if override_dim is None:
+        names = ", ".join(m.name for m in EMBEDDING_MODELS)
+        raise ValueError(
+            f"Unknown embedding model {model_name!r}. "
+            f"Add a row to EMBEDDING_MODELS, set KLIO_EMBEDDING_DIM "
+            f"to the model's native dim, or use one of: {names}"
+        )
+    return EmbeddingModelSpec(
+        name=model_name or "",
+        dim=override_dim,
+        provider="custom",
+    )

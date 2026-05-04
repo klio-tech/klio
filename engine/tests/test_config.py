@@ -58,3 +58,23 @@ def test_settings_default_custom_fields_are_none(monkeypatch):
     s = Settings()
     assert s.custom_base_url is None
     assert s.custom_api_key is None
+
+
+def test_settings_accepts_embedding_dim(monkeypatch):
+    """Phase-3 provisioning needs the npm-side dim probe threaded into
+    the engine container so non-registry models (custom/*, escape-hatch
+    openrouter/*) can pin a valid dim onto the default Space."""
+    monkeypatch.setenv("KLIO_DATABASE_URL", "postgresql+asyncpg://x")
+    monkeypatch.setenv("KLIO_EMBEDDING_DIM", "1024")
+    Settings = _fresh_settings()
+    assert Settings().embedding_dim == 1024
+
+
+def test_settings_default_embedding_dim_is_none(monkeypatch):
+    """Default is None so the registry-resolve path stays the only
+    source of truth when the npm onboarding didn't probe (e.g. legacy
+    re-runs without the new env wiring)."""
+    monkeypatch.setenv("KLIO_DATABASE_URL", "postgresql+asyncpg://x")
+    monkeypatch.delenv("KLIO_EMBEDDING_DIM", raising=False)
+    Settings = _fresh_settings()
+    assert Settings().embedding_dim is None
