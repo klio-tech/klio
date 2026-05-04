@@ -67,11 +67,9 @@ export function Hero() {
               data-stagger="3"
               style={{ marginTop: "1.8rem" }}
             >
-              Klio is the shared memory layer for every AI coding agent on
-              your machine. Preferences taught to one carry across every
-              tool. Decisions made in one window surface in another.
-              Encrypted on disk, cryptographically auditable, open-source —
-              and for now, entirely on your laptop.
+              Klio is the shared memory layer for every AI coding agent
+              on your machine. What one learns, the rest know — encrypted,
+              open-source, and entirely on your laptop.
             </p>
 
             {/* Install snippet — the fastest path for a visitor who's
