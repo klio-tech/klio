@@ -26,7 +26,17 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
+
+# Build target — `local` (npm-launched user dashboard) or `public`
+# (klio.tech marketing site). Both share this Dockerfile; the
+# matching route group ships in each image. The bundle-isolation
+# test below greps the standalone bundle for cross-target string
+# leaks and fails the build if the wrong route group made it in.
+ARG KLIO_BUILD_TARGET=local
+ENV KLIO_BUILD_TARGET=${KLIO_BUILD_TARGET}
+
 RUN npm run build
+RUN npm run test:bundle-isolation
 
 FROM node:20-alpine AS runner
 WORKDIR /app
