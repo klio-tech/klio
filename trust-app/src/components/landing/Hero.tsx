@@ -90,7 +90,7 @@ export function Hero() {
               }}
             >
               <a className="k-btn k-btn--primary" href="#quick-start">
-                Get started
+                How it works
                 <span aria-hidden style={{ transform: "translateY(-1px)" }}>→</span>
               </a>
               <a

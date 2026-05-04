@@ -3,32 +3,46 @@
  * passage with a clean indented monospace code block underneath.
  * No terminal chrome, no traffic-light dots, no "elapsed 1m 47s"
  * theatrics. The information is the same; the form is editorial.
+ *
+ * Post-0.4.1 reality: the user types ONE command (`npx @klio-tech/klio
+ * init`). Everything else happens inside that command — provider
+ * menu, model picker, agent wiring, the wow moment. So the three
+ * numbered "steps" reflect the user's experience as they progress
+ * through the single CLI session, NOT separate commands they invoke.
+ *
+ * Code blocks under steps 02 and 03 show what the CLI prints rather
+ * than what the user types — matches the editorial-specimen style
+ * the rest of the landing uses.
  */
 
-const STEPS: { n: string; title: string; lines: string[]; note?: string }[] = [
+const STEPS: { n: string; title: string; lines: string[]; note: string }[] = [
   {
     n: "01",
-    title: "Clone the repo, bring everything up.",
-    lines: [
-      "git clone https://github.com/klio-tech/klio.git",
-      "cd klio && make first-run",
-    ],
-    note: "Brings up Postgres + Redis + Ollama, runs migrations, builds /tmp/klio and /tmp/klio-mcp.",
+    title: "Type one command.",
+    lines: ["npx @klio-tech/klio init"],
+    note: "Pulls four container images (engine, bridge, dashboard, plus Postgres + Redis), boots them locally, runs migrations. ~30 seconds on a warm Docker, ~2 min on the first run.",
   },
   {
     n: "02",
-    title: "Provision your account, wire Claude Code.",
-    lines: ["KLIO_USE_FILE_KEYCHAIN=1 /tmp/klio init"],
-    note: "Patches ~/.claude.json (MCP server) and ~/.claude/settings.json (six hooks + permissions). Writes ~/.klio/local-dev.env so the dashboard can auto-login.",
+    title: "Pick a model provider.",
+    lines: [
+      "Pick your model provider:",
+      "  1) OpenRouter   one API key, many models — recommended",
+      "  2) Ollama       fully local, your text never leaves the machine",
+      "  3) Custom       any OpenAI-compatible endpoint",
+      "Choice [1] › ⏎",
+    ],
+    note: "The CLI validates your pick with a one-token test request (≈$0.0001) before continuing. Pick Ollama and Klio runs entirely on your laptop with zero outbound traffic.",
   },
   {
     n: "03",
-    title: "Run the daemon, start the dashboard.",
+    title: "Type one memory. Klio proves recall.",
     lines: [
-      "KLIO_USE_FILE_KEYCHAIN=1 /tmp/klio daemon &",
-      "docker compose up -d trust-app",
+      'Your memory › I\'m building a memory layer called Klio.',
+      "  ✓ stored as fact (id: 7a2c…)",
+      "  ✓ found in top result",
     ],
-    note: "Daemon binds the Unix socket; dashboard becomes available at http://127.0.0.1:3000.",
+    note: "Klio detects every AI agent on your machine — Claude Code, Claude Desktop, Cursor, Codex, OpenCode, OpenClaw — and patches each one's MCP config. Open any of them and ask 'what do you know about me?' — it recalls.",
   },
 ];
 
@@ -52,13 +66,14 @@ export function QuickStart() {
           <header>
             <p className="k-eyebrow">two minutes</p>
             <h2 className="k-h2" style={{ marginTop: "1rem" }}>
-              From zero to recall in three steps.
+              From zero to recall in one command.
             </h2>
             <p className="k-lede" style={{ marginTop: "1.2rem" }}>
-              Klio runs entirely on your machine. The bridge daemon talks to
-              the local engine over a Unix socket; the engine talks to a
-              local Postgres + Redis + Ollama. Nothing phones home — there
-              is no analytics endpoint to phone.
+              Klio runs entirely on your machine. One <code>npx</code>{" "}
+              invocation pulls a handful of containers, wires every AI
+              agent you have, and asks you to type one memory to prove
+              the loop works. Nothing phones home — there is no
+              analytics endpoint to phone.
             </p>
             <p className="k-lede" style={{ marginTop: "1rem" }}>
               <a
@@ -137,20 +152,18 @@ export function QuickStart() {
                     ))}
                   </pre>
 
-                  {s.note && (
-                    <p
-                      style={{
-                        marginTop: "1rem",
-                        fontFamily: "var(--font-mono-stack)",
-                        fontSize: "0.78rem",
-                        color: "var(--klio-muted)",
-                        lineHeight: 1.55,
-                        maxWidth: "70ch",
-                      }}
-                    >
-                      {s.note}
-                    </p>
-                  )}
+                  <p
+                    style={{
+                      marginTop: "1rem",
+                      fontFamily: "var(--font-mono-stack)",
+                      fontSize: "0.78rem",
+                      color: "var(--klio-muted)",
+                      lineHeight: 1.55,
+                      maxWidth: "70ch",
+                    }}
+                  >
+                    {s.note}
+                  </p>
                 </div>
               </article>
             ))}
