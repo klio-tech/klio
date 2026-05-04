@@ -7,7 +7,12 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { setupProvider } from "../src/providerSetup.js";
+import {
+  type OllamaSetupDeps,
+  setupOllama,
+  setupProvider,
+} from "../src/providerSetup.js";
+import type { OllamaModel } from "../src/ollama.js";
 
 test("setupProvider returns key + models when all probes pass", async () => {
   const inputs = [
@@ -215,4 +220,225 @@ test("setupProvider falls back to free-form when catalog fetch fails", async () 
   });
   assert.equal(cfg.embeddingModel, "openai/text-embedding-3-small");
   assert.equal(cfg.extractionModel, "anthropic/claude-3-5-haiku");
+});
+
+// ---------------------------------------------------------------------------
+// setupOllama
+// ---------------------------------------------------------------------------
+//
+// Like the OpenRouter tests, every dep is injected. No real fetch,
+// no real spawn. The state machine has three branches we need to
+// pin: CLI absent, daemon down, and the green-path success. We also
+// cover the consent-driven pull and the abort-on-decline edge.
+
+const EMBED_DIMS: Record<string, number> = {
+  "nomic-embed-text": 768,
+  "mxbai-embed-large": 1024,
+  "snowflake-arctic-embed2": 1024,
+  "bge-m3": 1024,
+};
+
+function bare(name: string): string {
+  const i = name.indexOf(":");
+  return i >= 0 ? name.slice(0, i) : name;
+}
+
+function makeOllamaDeps(
+  overrides: Partial<OllamaSetupDeps> & {
+    inputs?: string[];
+  } = {},
+): OllamaSetupDeps & { inputs: string[]; cursor: { i: number }; logs: string[] } {
+  const inputs = overrides.inputs ?? [];
+  const cursor = { i: 0 };
+  const logs: string[] = [];
+  const deps: OllamaSetupDeps = {
+    promptFn: overrides.promptFn ?? (async () => inputs[cursor.i++] ?? ""),
+    log: overrides.log ?? ((line: string) => logs.push(line)),
+    isRunning: overrides.isRunning ?? (async () => true),
+    hasOllamaCli: overrides.hasOllamaCli ?? (async () => true),
+    listModels: overrides.listModels ?? (async () => []),
+    pullModel: overrides.pullModel ?? (async () => {}),
+    getEmbedDim:
+      overrides.getEmbedDim ?? ((name: string) => EMBED_DIMS[bare(name)]),
+    filterEmbed:
+      overrides.filterEmbed ??
+      ((models: OllamaModel[]) =>
+        models.filter((m) => EMBED_DIMS[bare(m.name)] !== undefined)),
+  };
+  return Object.assign(deps, { inputs, cursor, logs });
+}
+
+test("setupOllama returns fallback when CLI is absent and user consents", async () => {
+  const deps = makeOllamaDeps({
+    hasOllamaCli: async () => false,
+    inputs: ["Y"],
+  });
+  const result = await setupOllama(deps);
+  assert.equal(result.kind, "fallback");
+  if (result.kind === "fallback") {
+    assert.match(result.reason, /CLI not found/);
+  }
+});
+
+test("setupOllama throws when CLI absent and user declines fallback", async () => {
+  const deps = makeOllamaDeps({
+    hasOllamaCli: async () => false,
+    inputs: ["n"],
+  });
+  await assert.rejects(setupOllama(deps), /Cannot continue/);
+});
+
+test("setupOllama returns fallback when daemon is down", async () => {
+  const deps = makeOllamaDeps({
+    hasOllamaCli: async () => true,
+    isRunning: async () => false,
+    inputs: ["Y"],
+  });
+  const result = await setupOllama(deps);
+  assert.equal(result.kind, "fallback");
+  if (result.kind === "fallback") {
+    assert.match(result.reason, /daemon is not running/);
+  }
+});
+
+test("setupOllama returns OllamaConfig when both models already installed", async () => {
+  const deps = makeOllamaDeps({
+    listModels: async () => [
+      { name: "nomic-embed-text:latest", size: 274_000_000 },
+      { name: "llama3.1:8b", size: 4_700_000_000 },
+    ],
+    // Two prompts: embed picker default (1), chat picker default (1).
+    inputs: ["1", "1"],
+  });
+  const result = await setupOllama(deps);
+  assert.equal(result.kind, "ollama");
+  if (result.kind === "ollama") {
+    assert.equal(result.embeddingModel, "nomic-embed-text:latest");
+    assert.equal(result.embeddingDim, 768);
+    assert.equal(result.extractionModel, "llama3.1:8b");
+  }
+});
+
+test("setupOllama prompts to pull when no embedding model is installed", async () => {
+  const pulls: string[] = [];
+  // Simulate the post-pull list having both models.
+  let listCalls = 0;
+  const deps = makeOllamaDeps({
+    listModels: async () => {
+      listCalls++;
+      if (listCalls === 1) {
+        // First listing: only a chat model, no embed.
+        return [{ name: "llama3.1:8b", size: 4_700_000_000 }];
+      }
+      return [
+        { name: "nomic-embed-text:latest", size: 274_000_000 },
+        { name: "llama3.1:8b", size: 4_700_000_000 },
+      ];
+    },
+    pullModel: async (name: string) => {
+      pulls.push(name);
+    },
+    // Inputs in order: consent to pull (Y), embed pick (1), chat pick (1).
+    inputs: ["Y", "1", "1"],
+  });
+  const result = await setupOllama(deps);
+  assert.deepEqual(pulls, ["nomic-embed-text"]);
+  assert.equal(result.kind, "ollama");
+  if (result.kind === "ollama") {
+    assert.equal(result.embeddingModel, "nomic-embed-text:latest");
+    assert.equal(result.extractionModel, "llama3.1:8b");
+  }
+});
+
+test("setupOllama falls back when user declines embed pull", async () => {
+  const deps = makeOllamaDeps({
+    listModels: async () => [{ name: "llama3.1:8b", size: 4_700_000_000 }],
+    inputs: ["n"],
+  });
+  const result = await setupOllama(deps);
+  assert.equal(result.kind, "fallback");
+  if (result.kind === "fallback") {
+    assert.match(result.reason, /pull declined/);
+  }
+});
+
+test("setupOllama prompts to pull a chat model when none installed", async () => {
+  const pulls: string[] = [];
+  let listCalls = 0;
+  const deps = makeOllamaDeps({
+    listModels: async () => {
+      listCalls++;
+      if (listCalls === 1) {
+        // No models at all.
+        return [];
+      }
+      if (listCalls === 2) {
+        // After embed pull.
+        return [{ name: "nomic-embed-text:latest", size: 274_000_000 }];
+      }
+      // After chat pull.
+      return [
+        { name: "nomic-embed-text:latest", size: 274_000_000 },
+        { name: "llama3.1:8b", size: 4_700_000_000 },
+      ];
+    },
+    pullModel: async (name: string) => {
+      pulls.push(name);
+    },
+    // consent embed, embed pick, consent chat, chat pick
+    inputs: ["Y", "1", "Y", "1"],
+  });
+  const result = await setupOllama(deps);
+  assert.deepEqual(pulls, ["nomic-embed-text", "llama3.1:8b"]);
+  assert.equal(result.kind, "ollama");
+});
+
+test("setupOllama falls back when user declines chat pull", async () => {
+  let listCalls = 0;
+  const deps = makeOllamaDeps({
+    listModels: async () => {
+      listCalls++;
+      if (listCalls === 1) return [];
+      // Embed model installed after the pull, but no chat models.
+      return [{ name: "nomic-embed-text:latest", size: 274_000_000 }];
+    },
+    // consent embed (Y), embed pick (1), consent chat (n)
+    inputs: ["Y", "1", "n"],
+  });
+  const result = await setupOllama(deps);
+  assert.equal(result.kind, "fallback");
+  if (result.kind === "fallback") {
+    assert.match(result.reason, /chat model.*pull declined/);
+  }
+});
+
+test("setupOllama falls back when picked embed model has unknown dim", async () => {
+  const deps = makeOllamaDeps({
+    listModels: async () => [
+      { name: "nomic-embed-text:latest", size: 274_000_000 },
+    ],
+    // Type a custom name instead of picking; getEmbedDim returns
+    // undefined for it.
+    inputs: ["mystery-model:v1"],
+  });
+  const result = await setupOllama(deps);
+  assert.equal(result.kind, "fallback");
+  if (result.kind === "fallback") {
+    assert.match(result.reason, /dim unknown/);
+  }
+});
+
+test("setupOllama forwards pull progress lines to log", async () => {
+  const deps = makeOllamaDeps({
+    listModels: async () => [{ name: "llama3.1:8b", size: 4_700_000_000 }],
+    pullModel: async (_name, onProgress) => {
+      onProgress("pulling manifest");
+      onProgress("pulling abc123: 100%");
+    },
+    inputs: ["Y", "1", "1"],
+  });
+  await setupOllama(deps);
+  const text = deps.logs.join("\n");
+  assert.match(text, /pulling manifest/);
+  assert.match(text, /pulling abc123: 100%/);
 });
