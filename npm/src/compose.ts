@@ -55,13 +55,23 @@ export type ComposeOptions = {
 };
 
 /**
- * Returns the absolute path under ~/.klio/runtime/ where the npm
- * launcher writes its generated artifacts. The directory is created
- * with mode 0700 because it ends up holding the local-dev .env file
- * (which contains the JWT signing key + your user/agent UUIDs).
+ * Returns the absolute path where the npm launcher writes its
+ * generated artifacts: ~/.klio/. Flat layout — docker-compose.yml,
+ * .env, install.json all live directly here alongside any
+ * bridge-side files (e.g. credentials.enc when running outside
+ * a container).
+ *
+ * Created with mode 0700 because it ends up holding secrets
+ * (the .env file's JWT signing key + your user/agent UUIDs +
+ * any provider API keys you supplied at onboarding).
+ *
+ * Function name kept as `runtimeDir` for backward compatibility
+ * with import sites; the path itself flattened in 0.3.1 from
+ * ~/.klio/runtime/ → ~/.klio/ because the extra nesting was
+ * confusing — every file there belongs to klio anyway.
  */
 export function runtimeDir(): string {
-  return join(homedir(), ".klio", "runtime");
+  return join(homedir(), ".klio");
 }
 
 /**

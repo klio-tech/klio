@@ -136,6 +136,23 @@ export async function composeDown(
 }
 
 /**
+ * `docker compose restart <service>` — stop + start a single service
+ * without disturbing the rest of the stack. We use this after
+ * `klio configure` writes credentials into the bridge container's
+ * volume — the daemon loads its keychain at process start, so a
+ * configure that lands after the daemon is already running leaves
+ * the in-memory token stale until the next process boot.
+ */
+export async function composeRestart(
+  bin: ComposeBin,
+  cwd: string,
+  service: string,
+): Promise<void> {
+  const argv = [...bin.prefix, "restart", service];
+  await streamCommand(bin.cmd, argv, cwd);
+}
+
+/**
  * `docker exec -i <container> <argv...>` with optional stdin.
  * Returns combined stdout. Throws on non-zero exit.
  *

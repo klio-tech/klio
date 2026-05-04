@@ -57,6 +57,7 @@ import {
 } from "../ui.js";
 import {
   composePull,
+  composeRestart,
   composeUp,
   dockerExec,
   preflightDocker,
@@ -484,7 +485,16 @@ function buildStackSteps(
           "--default-space-id",
           state.defaultSpaceID!,
         ]);
-        return { kind: "ok", status: "stored in keychain volume" };
+
+        // The bridge daemon reads the keychain at process start, so a
+        // configure landing AFTER the daemon already started leaves
+        // the in-memory token stale. Restart the container so the
+        // daemon's next refresh loop picks up the freshly-written
+        // creds. Without this, /v1/tokens/refresh 401s in a tight
+        // loop until the user manually restarts the stack.
+        await composeRestart(state.composeBin!, runtimeDir(), BRIDGE_CONTAINER);
+
+        return { kind: "ok", status: "stored + bridge restarted" };
       },
     },
   ];
