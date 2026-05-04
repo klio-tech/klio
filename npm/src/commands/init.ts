@@ -420,6 +420,7 @@ function buildStackSteps(
     agentID?: string;
     defaultSpaceID?: string;
     refreshToken?: string;
+    accessToken?: string;
   },
   engineURL: string,
   composeFile: string,
