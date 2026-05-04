@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { Adapter, AdapterConfig } from "./types.js";
+import { readJson, writeJson } from "./fileutil.js";
 import { runProcess, type Spawner } from "./spawner.js";
 
 export type OpenClawAdapterOptions = {
@@ -51,18 +52,52 @@ export class OpenClawAdapter implements Adapter {
       args: ["exec", "-i", cfg.bridgeContainer, "klio-mcp"],
       env: cfg.env ?? {},
     };
-    const result = await this.spawner("openclaw", [
-      "mcp",
-      "set",
-      "klio",
-      JSON.stringify(payload),
-    ]);
-    if (result.exitCode !== 0) {
-      throw new Error(
-        `openclaw mcp set failed (exit ${result.exitCode}): ` +
-          (result.stderr.trim() || result.stdout.trim()),
-      );
+    try {
+      const result = await this.spawner("openclaw", [
+        "mcp", "set", "klio",
+        JSON.stringify(payload),
+      ]);
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `openclaw mcp set failed (exit ${result.exitCode}): ` +
+            (result.stderr.trim() || result.stdout.trim()),
+        );
+      }
+      return;
+    } catch (err) {
+      // ENOENT means the `openclaw` binary isn't on PATH. Fall
+      // back to a direct file write — the user has ~/.openclaw/
+      // (we wouldn't be here otherwise; installed() returned
+      // true) so they have OpenClaw set up but a non-standard
+      // CLI install. Write to the documented config path.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw err;
+      this.fileWriteFallback(payload);
     }
+  }
+
+  /**
+   * Last-resort install path: write ~/.openclaw/config.json
+   * directly. Mirrors the JSON shape OpenClaw's CLI writes
+   * internally (mcp.servers.<name>: {command, args, env}).
+   *
+   * Idempotent — re-running with identical inputs produces a
+   * byte-equal file.
+   */
+  private fileWriteFallback(payload: {
+    command: string;
+    args: string[];
+    env: Record<string, string>;
+  }): void {
+    const path = join(this.configDir(), "config.json");
+    const settings = readJson(path);
+    const mcp = (settings["mcp"] as Record<string, unknown> | undefined) ?? {};
+    const servers =
+      (mcp["servers"] as Record<string, unknown> | undefined) ?? {};
+    servers["klio"] = payload;
+    mcp["servers"] = servers;
+    settings["mcp"] = mcp;
+    writeJson(path, settings);
   }
 
   async uninstall(): Promise<void> {

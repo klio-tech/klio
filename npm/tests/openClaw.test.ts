@@ -128,3 +128,95 @@ test("uninstall via CLI: spawner called with `mcp unset klio`", async (t) => {
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args, ["mcp", "unset", "klio"]);
 });
+
+test("install falls back to file write when CLI is missing (ENOENT)", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".openclaw"));
+
+  let spawnerCallCount = 0;
+  const a = new OpenClawAdapter({
+    spawner: async () => {
+      spawnerCallCount++;
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    },
+  });
+
+  await a.install({ bridgeContainer: "klio-bridge", env: {} });
+
+  // Spawner attempted once, then fallback wrote the file directly.
+  assert.equal(spawnerCallCount, 1);
+  const path = join(home, ".openclaw", "config.json");
+  assert.equal(existsSync(path), true);
+  const body = JSON.parse(readFileSync(path, "utf8"));
+  assert.deepEqual(body.mcp.servers.klio, {
+    command: "docker",
+    args: ["exec", "-i", "klio-bridge", "klio-mcp"],
+    env: {},
+  });
+});
+
+test("install fallback preserves peer mcp.servers entries", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".openclaw"));
+  const path = join(home, ".openclaw", "config.json");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      mcp: {
+        servers: { other: { command: "/o", args: [], env: {} } },
+      },
+      otherKey: "preserve me",
+    }),
+  );
+
+  const a = new OpenClawAdapter({
+    spawner: async () => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    },
+  });
+
+  await a.install({ bridgeContainer: "klio-bridge", env: {} });
+
+  const body = JSON.parse(readFileSync(path, "utf8"));
+  assert.deepEqual(body.mcp.servers.other, {
+    command: "/o", args: [], env: {},
+  });
+  assert.equal(body.otherKey, "preserve me");
+  assert.ok(body.mcp.servers.klio);
+});
+
+test("install fallback is idempotent", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".openclaw"));
+  const a = new OpenClawAdapter({
+    spawner: async () => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    },
+  });
+
+  await a.install({ bridgeContainer: "klio-bridge", env: { K: "V" } });
+  const first = readFileSync(
+    join(home, ".openclaw", "config.json"), "utf8",
+  );
+  await a.install({ bridgeContainer: "klio-bridge", env: { K: "V" } });
+  const second = readFileSync(
+    join(home, ".openclaw", "config.json"), "utf8",
+  );
+  assert.equal(first, second);
+});
+
+test("install rethrows non-ENOENT spawner errors (CLI present but exits non-zero)", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".openclaw"));
+  const a = new OpenClawAdapter({
+    spawner: async () => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: "boom",
+    }),
+  });
+  await assert.rejects(
+    () => a.install({ bridgeContainer: "klio-bridge", env: {} }),
+    /openclaw mcp set failed/,
+  );
+});
