@@ -132,3 +132,51 @@ export async function runSteps(steps: Step[]): Promise<void> {
     }
   }
 }
+
+// Module-level quiet flag. Toggled by `setQuiet` from `init.ts` when
+// the user passes `--quiet`. Kept module-private so callers can't
+// mutate it directly — narrate/phaseRecap read it via the closure.
+let _quiet = false;
+
+/**
+ * Toggle quiet mode. When true, `narrate` and `phaseRecap` become
+ * no-ops; structural markers (▸/✓/✗ via runSteps, plus phaseHeader)
+ * still render so the user can still see where they are in the flow.
+ *
+ * Defaults to false — pass-through behaviour for the standard
+ * `klio init` run.
+ */
+export function setQuiet(q: boolean): void {
+  _quiet = q;
+}
+
+/**
+ * Indented per-step context line under the ▸ marker. Suppressed
+ * when --quiet is set, so re-runs by experienced users skip the
+ * explanatory text but the structural ▸/✓/✗ markers remain.
+ */
+export function narrate(line: string): void {
+  if (_quiet) return;
+  process.stdout.write(`        ${line}\n`);
+}
+
+/**
+ * Section header between phases. Always rendered (even with --quiet)
+ * because it's the structural marker that orients the user across
+ * a multi-phase flow.
+ */
+export function phaseHeader(n: number, total: number, title: string): void {
+  process.stdout.write(
+    `\n───────────────────────────────────────────────────────\n` +
+      `Phase ${n} / ${total}  ·  ${title}\n\n`,
+  );
+}
+
+/**
+ * Phase-boundary recap — one dim line summarising what was just
+ * accomplished. Suppressed when --quiet to keep re-runs snappy.
+ */
+export function phaseRecap(line: string): void {
+  if (_quiet) return;
+  process.stdout.write(`\n  ${line}\n`);
+}
