@@ -204,6 +204,13 @@ services:
       # LiteLLM convention — required so \`openrouter/<model>\` routes
       # work without a per-call api_key argument inside the engine.
       OPENROUTER_API_KEY: \${KLIO_OPENROUTER_API_KEY}
+      # Custom OpenAI-compatible endpoint (LiteLLM proxy, Azure OpenAI,
+      # vLLM, Together, Groq, etc.). Both vars are blank when the user
+      # picked OpenRouter or Ollama; the engine's \`custom/<model>\`
+      # router only consults them when a model name carries the
+      # matching prefix.
+      KLIO_CUSTOM_BASE_URL: \${KLIO_CUSTOM_BASE_URL}
+      KLIO_CUSTOM_API_KEY: \${KLIO_CUSTOM_API_KEY}
       KLIO_EMBEDDING_MODEL: ${embedModel}
       KLIO_EXTRACTION_MODEL: ${extractModel}
       KLIO_DEV_KMS_PATH: /var/lib/klio/dev-kms.key

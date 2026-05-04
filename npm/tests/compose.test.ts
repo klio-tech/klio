@@ -55,3 +55,14 @@ test("compose body interpolates KLIO_OPENROUTER_API_KEY from env file", () => {
   assert.match(body, /KLIO_OPENROUTER_API_KEY: \$\{KLIO_OPENROUTER_API_KEY\}/);
   assert.match(body, /OPENROUTER_API_KEY: \$\{KLIO_OPENROUTER_API_KEY\}/);
 });
+
+test("compose body includes KLIO_CUSTOM_BASE_URL + KLIO_CUSTOM_API_KEY env vars", () => {
+  const body = renderComposeBody({
+    imageTag: "0.3.0",
+    jwtSigningKey: "k",
+    embeddingModel: "openrouter/openai/text-embedding-3-small",
+    extractionModel: "openrouter/anthropic/claude-3-5-haiku",
+  });
+  assert.match(body, /KLIO_CUSTOM_BASE_URL: \$\{KLIO_CUSTOM_BASE_URL\}/);
+  assert.match(body, /KLIO_CUSTOM_API_KEY: \$\{KLIO_CUSTOM_API_KEY\}/);
+});
