@@ -20,6 +20,7 @@ const APP_DIR = join(process.cwd(), "src", "app");
 const GROUPS = ["local", "public"];
 
 let restoredCount = 0;
+let conflictCount = 0;
 for (const group of GROUPS) {
   const visible = join(APP_DIR, `(${group})`);
   const hidden = join(APP_DIR, `__klio_hidden_${group}__`);
@@ -31,11 +32,23 @@ for (const group of GROUPS) {
     // Both exist — somebody created (group)/ manually while the
     // hidden form was around. Don't merge; leave the hidden form
     // alone but warn so the dev knows to clean up.
+    conflictCount += 1;
     console.warn(
       `[restore-targets] WARNING: both ${visible} and ${hidden} exist. ` +
         `Leaving ${hidden} in place. Resolve manually.`,
     );
   }
+}
+
+// Conflict state must surface as a non-zero exit so CI / build
+// orchestration sees the error. Without this, a stale
+// `__klio_hidden_<group>__` directory could persist silently in
+// the working tree across builds and ship into the GHCR image.
+if (conflictCount > 0) {
+  console.error(
+    `[restore-targets] ${conflictCount} unresolved conflict(s) — manual cleanup required.`,
+  );
+  process.exit(1);
 }
 
 if (restoredCount === 0) {
