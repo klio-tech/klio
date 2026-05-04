@@ -42,3 +42,14 @@ test("InitOptions only requires imageTag", () => {
   assert.equal(minimal.email, undefined);
   assert.equal(minimal.skipProvider, undefined);
 });
+
+test("InitOptions accepts a quiet flag", () => {
+  // Compile-time assertion via TypeScript: this should typecheck.
+  // The runtime check is a sanity guard against the type drifting
+  // (e.g. someone narrowing `quiet` to `true` literal by mistake).
+  const opts: InitOptions = {
+    imageTag: "0.3.0",
+    quiet: true,
+  };
+  assert.equal(opts.quiet, true);
+});

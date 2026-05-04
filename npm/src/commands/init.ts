@@ -36,7 +36,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { renderBanner } from "../banner.js";
-import { info, runSteps, type Step } from "../ui.js";
+import { info, runSteps, setQuiet, type Step } from "../ui.js";
 import {
   composePull,
   composeUp,
@@ -104,10 +104,24 @@ export type InitOptions = {
    * prompt when stdin isn't a TTY.
    */
   skipCommunity?: boolean;
+  /**
+   * Suppress per-step narration and phase-recap lines. The
+   * structural markers (▸ start, ✓ ok, ✗ fail, phase headers)
+   * still render, so the user can see the shape of the flow even
+   * with quiet on. Aimed at experienced users on re-runs who don't
+   * need the explanatory text. Defaults to false.
+   */
+  quiet?: boolean;
 };
 
 export async function init(opts: InitOptions): Promise<void> {
   process.stdout.write(renderBanner("init") + "\n");
+
+  // Apply --quiet immediately after the banner so every narrate /
+  // phaseRecap call from this point on respects the user's choice.
+  // Default false preserves the standard verbose flow when the flag
+  // is omitted.
+  setQuiet(opts.quiet ?? false);
 
   const engineURL = opts.engineURL ?? ENGINE_URL;
   const composeFile = join(runtimeDir(), "docker-compose.yml");

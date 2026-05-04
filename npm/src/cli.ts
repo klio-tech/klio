@@ -78,10 +78,13 @@ function parseInitArgs(rest: string[]): Parameters<typeof init>[0] {
       opts.skipWow = true;
     } else if (a === "--skip-community") {
       opts.skipCommunity = true;
+    } else if (a === "--quiet") {
+      opts.quiet = true;
     } else if (a === "-h" || a === "--help") {
       process.stdout.write(
         "usage: klio init [--email <addr>] [--image-tag <tag>] [--engine-url <url>]\n" +
-          "                 [--skip-provider] [--skip-wow] [--skip-community]\n",
+          "                 [--skip-provider] [--skip-wow] [--skip-community]\n" +
+          "                 [--quiet]\n",
       );
       process.exit(0);
     } else {
