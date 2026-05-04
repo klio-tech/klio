@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -219,4 +220,86 @@ test("install rethrows non-ENOENT spawner errors (CLI present but exits non-zero
     () => a.install({ bridgeContainer: "klio-bridge", env: {} }),
     /openclaw mcp set failed/,
   );
+});
+
+test("install fallback backs up an existing config file", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".openclaw"));
+  const path = join(home, ".openclaw", "config.json");
+  writeFileSync(path, JSON.stringify({ existingKey: "preserve" }));
+
+  const a = new OpenClawAdapter({
+    spawner: async () => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    },
+  });
+
+  await a.install({ bridgeContainer: "klio-bridge", env: {} });
+
+  const backups = readdirSync(join(home, ".openclaw")).filter((f) =>
+    f.startsWith("config.json.klio-backup-"),
+  );
+  assert.ok(
+    backups.length >= 1,
+    "expected at least one timestamped backup of the prior config",
+  );
+});
+
+test("uninstall ENOENT path strips klio in place when no backup exists", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".openclaw"));
+  const path = join(home, ".openclaw", "config.json");
+  // Hand-write a config with klio + a peer; no backup file.
+  writeFileSync(
+    path,
+    JSON.stringify({
+      mcp: {
+        servers: {
+          klio: { command: "docker", args: [], env: {} },
+          peer: { command: "/peer", args: [], env: {} },
+        },
+      },
+    }),
+  );
+
+  const a = new OpenClawAdapter({
+    spawner: async () => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    },
+  });
+
+  await a.uninstall();
+
+  const body = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(body.mcp.servers.klio, undefined);
+  assert.deepEqual(body.mcp.servers.peer, {
+    command: "/peer",
+    args: [],
+    env: {},
+  });
+});
+
+test("uninstall ENOENT path restores from backup when one exists", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".openclaw"));
+  const path = join(home, ".openclaw", "config.json");
+  // Pre-existing user config that the install fallback should
+  // back up — the test then runs uninstall (also via fallback)
+  // and asserts the original bytes return.
+  const original = JSON.stringify({
+    mcp: { servers: { peer: { command: "/p", args: [], env: {} } } },
+    userKey: 42,
+  });
+  writeFileSync(path, original);
+
+  const a = new OpenClawAdapter({
+    spawner: async () => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    },
+  });
+
+  await a.install({ bridgeContainer: "klio-bridge", env: {} });
+  await a.uninstall();
+
+  assert.equal(readFileSync(path, "utf8"), original);
 });
