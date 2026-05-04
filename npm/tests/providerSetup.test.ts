@@ -21,6 +21,7 @@ test("setupProvider returns key + models when all probes pass", async () => {
     probeKey: async () => ({ label: "test", creditRemaining: 42 }),
     probeEmbedding: async () => ({ dim: 1536, tokensUsed: 1 }),
     probeChat: async () => ({ tokensUsed: 1, latencyMs: 200 }),
+    fetchCatalog: async () => [],
     log: () => {},
   });
   assert.equal(cfg.openrouterKey, "sk-or-test");
@@ -48,6 +49,7 @@ test("setupProvider re-prompts on key probe failure", async () => {
     },
     probeEmbedding: async () => ({ dim: 1536, tokensUsed: 1 }),
     probeChat: async () => ({ tokensUsed: 1, latencyMs: 200 }),
+    fetchCatalog: async () => [],
     log: () => {},
   });
   assert.equal(probeCalls, 2);
@@ -71,6 +73,7 @@ test("setupProvider re-prompts on embedding probe failure", async () => {
       return { dim: 1536, tokensUsed: 1 };
     },
     probeChat: async () => ({ tokensUsed: 1, latencyMs: 200 }),
+    fetchCatalog: async () => [],
     log: () => {},
   });
   assert.equal(embedCalls, 2);
@@ -95,6 +98,7 @@ test("setupProvider re-prompts on chat probe failure", async () => {
       if (m === "bad/chat") throw new Error("Model not found");
       return { tokensUsed: 5, latencyMs: 100 };
     },
+    fetchCatalog: async () => [],
     log: () => {},
   });
   assert.equal(chatCalls, 2);
@@ -102,7 +106,7 @@ test("setupProvider re-prompts on chat probe failure", async () => {
   assert.equal(cfg.totalTestTokens, 8);
 });
 
-test("setupProvider passes embedding/chat defaults to promptFn", async () => {
+test("setupProvider passes embedding/chat defaults to promptFn (free-form fallback)", async () => {
   const seen: Array<{ message: string; default?: string; mask?: boolean }> = [];
   await setupProvider({
     promptFn: async (opts) => {
@@ -117,6 +121,10 @@ test("setupProvider passes embedding/chat defaults to promptFn", async () => {
     probeKey: async () => ({ label: "ok", creditRemaining: null }),
     probeEmbedding: async () => ({ dim: 1536, tokensUsed: 1 }),
     probeChat: async () => ({ tokensUsed: 1, latencyMs: 50 }),
+    // Empty catalog → picker degrades to the historical free-form
+    // prompt with the historical default. This test pins that
+    // contract so we don't accidentally drop it during refactors.
+    fetchCatalog: async () => [],
     log: () => {},
   });
   // Three prompts in this exact order: key, embedding, chat.
@@ -138,9 +146,73 @@ test("setupProvider logs the failure message before re-prompting", async () => {
     },
     probeEmbedding: async () => ({ dim: 1536, tokensUsed: 1 }),
     probeChat: async () => ({ tokensUsed: 1, latencyMs: 50 }),
+    fetchCatalog: async () => [],
     log: (l) => logs.push(l),
   });
   // The first key attempt should have produced a failure log line.
   const failureLine = logs.find((l) => l.includes("Invalid key"));
   assert.ok(failureLine, "expected an Invalid-key failure log line");
+});
+
+test("setupProvider uses curated lists from the catalog", async () => {
+  const inputs = ["sk-or-test", "1", "1"];
+  let i = 0;
+  const cfg = await setupProvider({
+    promptFn: async () => inputs[i++],
+    probeKey: async () => ({ label: "test", creditRemaining: 1 }),
+    probeEmbedding: async () => ({ dim: 1536, tokensUsed: 1 }),
+    probeChat: async () => ({ tokensUsed: 1, latencyMs: 200 }),
+    fetchCatalog: async () => [
+      {
+        id: "openai/text-embedding-3-small",
+        architecture: { modality: "text->embedding" },
+        pricing: { prompt: "0.00000002" },
+      },
+      {
+        id: "anthropic/claude-3-5-haiku",
+        architecture: { modality: "text->text" },
+        supported_parameters: ["tools"],
+        pricing: { prompt: "0.0000008", completion: "0.000004" },
+      },
+    ],
+    log: () => {},
+  });
+  assert.equal(cfg.embeddingModel, "openai/text-embedding-3-small");
+  assert.equal(cfg.extractionModel, "anthropic/claude-3-5-haiku");
+});
+
+test("setupProvider accepts custom typed model name via escape hatch", async () => {
+  const inputs = [
+    "sk-or-test",
+    "openai/text-embedding-3-small",
+    "anthropic/claude-3-5-haiku",
+  ];
+  let i = 0;
+  const cfg = await setupProvider({
+    promptFn: async () => inputs[i++],
+    probeKey: async () => ({ label: "test", creditRemaining: 1 }),
+    probeEmbedding: async () => ({ dim: 1536, tokensUsed: 1 }),
+    probeChat: async () => ({ tokensUsed: 1, latencyMs: 200 }),
+    fetchCatalog: async () => [],
+    log: () => {},
+  });
+  assert.equal(cfg.embeddingModel, "openai/text-embedding-3-small");
+  assert.equal(cfg.extractionModel, "anthropic/claude-3-5-haiku");
+});
+
+test("setupProvider falls back to free-form when catalog fetch fails", async () => {
+  const inputs = ["sk-or-test", "", ""];
+  let i = 0;
+  const cfg = await setupProvider({
+    promptFn: async () => inputs[i++],
+    probeKey: async () => ({ label: "test", creditRemaining: 1 }),
+    probeEmbedding: async () => ({ dim: 1536, tokensUsed: 1 }),
+    probeChat: async () => ({ tokensUsed: 1, latencyMs: 200 }),
+    fetchCatalog: async () => {
+      throw new Error("network down");
+    },
+    log: () => {},
+  });
+  assert.equal(cfg.embeddingModel, "openai/text-embedding-3-small");
+  assert.equal(cfg.extractionModel, "anthropic/claude-3-5-haiku");
 });
