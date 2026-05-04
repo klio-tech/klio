@@ -39,6 +39,23 @@ class EmbeddingModelSpec:
 # Order is significant: first entry is the default if the user has not set
 # KLIO_EMBEDDING_MODEL. The default is nomic-embed-text because it runs on
 # any laptop with no API key and produces solid-quality 768-dim vectors.
+#
+# Naming convention notes:
+#   - `ollama/<model>`        — LiteLLM routes to a local Ollama daemon.
+#   - `text-embedding-*`      — LiteLLM routes direct to OpenAI (needs
+#                               OPENAI_API_KEY). Kept for power users
+#                               who want to bypass OpenRouter.
+#   - `openrouter/<vendor>/<model>` — LiteLLM routes via OpenRouter
+#                               (needs OPENROUTER_API_KEY). This is
+#                               the default path for the npm-launched
+#                               onboarding flow (`npx @klio-tech/klio
+#                               init`), which writes the prefix when
+#                               threading the user's chosen model into
+#                               compose env. When adding new
+#                               OpenRouter-routed entries, the dim
+#                               must match the model's native output
+#                               size (look it up via OpenRouter's
+#                               /api/v1/models or the upstream docs).
 EMBEDDING_MODELS: tuple[EmbeddingModelSpec, ...] = (
     EmbeddingModelSpec("ollama/nomic-embed-text", 768, "ollama"),
     EmbeddingModelSpec("ollama/mxbai-embed-large", 1024, "ollama"),
@@ -46,6 +63,12 @@ EMBEDDING_MODELS: tuple[EmbeddingModelSpec, ...] = (
     EmbeddingModelSpec("ollama/bge-m3", 1024, "ollama"),
     EmbeddingModelSpec("text-embedding-3-small", 1536, "openai"),
     EmbeddingModelSpec("text-embedding-ada-002", 1536, "openai"),
+    EmbeddingModelSpec(
+        "openrouter/openai/text-embedding-3-small", 1536, "openrouter"
+    ),
+    EmbeddingModelSpec(
+        "openrouter/openai/text-embedding-ada-002", 1536, "openrouter"
+    ),
     EmbeddingModelSpec("stub", 1536, "internal"),
 )
 

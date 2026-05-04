@@ -156,8 +156,8 @@ export async function init(opts: InitOptions): Promise<void> {
         writeComposeFile({
           imageTag: opts.imageTag,
           jwtSigningKey: state.signingKey,
-          embeddingModel: state.provider?.embeddingModel,
-          extractionModel: state.provider?.extractionModel,
+          embeddingModel: prefixOpenRouter(state.provider?.embeddingModel),
+          extractionModel: prefixOpenRouter(state.provider?.extractionModel),
         });
         // Minimum env needed for compose's variable interpolation.
         // user/agent IDs are filled in after provisioning (below).
@@ -442,6 +442,27 @@ function isYes(answer: string): boolean {
 
 function writeLine(line: string): void {
   process.stdout.write(line + "\n");
+}
+
+/**
+ * Translate a user-supplied OpenRouter-native model name (the shape
+ * the OpenRouter API accepts at /embeddings + /chat/completions —
+ * e.g. "openai/text-embedding-3-small") into the LiteLLM-routing
+ * shape the engine expects in KLIO_EMBEDDING_MODEL / KLIO_EXTRACTION_MODEL
+ * (e.g. "openrouter/openai/text-embedding-3-small").
+ *
+ * LiteLLM uses the `openrouter/` prefix to know it should reach
+ * OpenRouter as the upstream provider. Without the prefix, LiteLLM
+ * tries to route via the model's native vendor (e.g. OpenAI direct,
+ * which would require an OPENAI_API_KEY we never set up).
+ *
+ * Idempotent: returns the input unchanged if the prefix is already
+ * present, so users who type "openrouter/openai/text-embedding-3-small"
+ * by hand also work.
+ */
+function prefixOpenRouter(model: string | undefined): string | undefined {
+  if (!model) return model;
+  return model.startsWith("openrouter/") ? model : `openrouter/${model}`;
 }
 
 /**
