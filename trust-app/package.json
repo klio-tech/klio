@@ -30,11 +30,16 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "next dev -p 3000",
-    "build": "next build",
+    "dev": "KLIO_BUILD_TARGET=${KLIO_BUILD_TARGET:-local} next dev -p 3000",
+    "dev:local": "KLIO_BUILD_TARGET=local next dev -p 3000",
+    "dev:public": "KLIO_BUILD_TARGET=public next dev -p 3001",
+    "build": "KLIO_BUILD_TARGET=${KLIO_BUILD_TARGET:-local} next build",
+    "build:local": "KLIO_BUILD_TARGET=local next build",
+    "build:public": "KLIO_BUILD_TARGET=public next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:bundle-isolation": "node scripts/check-bundle-isolation.mjs"
   },
   "dependencies": {
     "jose": "5.9.6",
