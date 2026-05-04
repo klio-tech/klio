@@ -100,7 +100,16 @@ import { spawn } from "node:child_process";
 
 const ENGINE_URL = "http://127.0.0.1:8000";
 const TRUST_APP_URL = "http://127.0.0.1:3000";
+// `BRIDGE_CONTAINER` is the docker container_name set in the compose
+// template, used for `docker exec`. `BRIDGE_SERVICE` is the YAML key
+// under `services:` in the same template, used for `docker compose
+// restart`. They differ by convention: container_name follows the
+// `klio-<svc>` pattern (so all five containers sort together in
+// `docker ps`), while service names are bare (`bridge`, `engine`).
+// Mixing them up is what made `docker compose restart klio-bridge`
+// fail with "no such service" in 0.3.1.
 const BRIDGE_CONTAINER = "klio-bridge";
+const BRIDGE_SERVICE = "bridge";
 // Agent enum value defined in
 // engine/src/klio_engine/models/agent.py — must match an
 // existing variant. We register the npm-launched user as
@@ -492,7 +501,7 @@ function buildStackSteps(
         // daemon's next refresh loop picks up the freshly-written
         // creds. Without this, /v1/tokens/refresh 401s in a tight
         // loop until the user manually restarts the stack.
-        await composeRestart(state.composeBin!, runtimeDir(), BRIDGE_CONTAINER);
+        await composeRestart(state.composeBin!, runtimeDir(), BRIDGE_SERVICE);
 
         return { kind: "ok", status: "stored + bridge restarted" };
       },
