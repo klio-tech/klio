@@ -12,6 +12,9 @@ import {
   probeKey,
   probeEmbeddingModel,
   probeChatModel,
+  fetchModelCatalog,
+  curateEmbeddingModels,
+  curateChatModels,
 } from "../src/openrouter.js";
 
 type FetchHandler = (req: Request) => Response | Promise<Response>;
@@ -188,4 +191,184 @@ test("probeChatModel throws with provider message on non-2xx", async (t) => {
     () => probeChatModel("k", "m"),
     /rate limited/,
   );
+});
+
+test("fetchModelCatalog returns the data array with attribution headers sent", async (t) => {
+  t.after(restoreFetch);
+  const captured: { url?: string; headers?: Record<string, string> } = {};
+  mockFetch(async (req) => {
+    captured.url = req.url;
+    captured.headers = Object.fromEntries(req.headers.entries());
+    return new Response(
+      JSON.stringify({
+        data: [
+          {
+            id: "openai/text-embedding-3-small",
+            architecture: { modality: "text->embedding" },
+            pricing: { prompt: "0.00000002" },
+          },
+        ],
+      }),
+      { status: 200 },
+    );
+  });
+  const cat = await fetchModelCatalog("sk-or-test");
+  assert.equal(captured.url, "https://openrouter.ai/api/v1/models");
+  assert.equal(captured.headers?.["x-title"], "Klio");
+  assert.equal(captured.headers?.["http-referer"], "https://klio.tech");
+  assert.equal(cat.length, 1);
+});
+
+test("probeKey now sends attribution headers too", async (t) => {
+  t.after(restoreFetch);
+  const captured: { headers?: Record<string, string> } = {};
+  mockFetch(async (req) => {
+    captured.headers = Object.fromEntries(req.headers.entries());
+    return new Response(
+      JSON.stringify({ data: { label: "x", limit_remaining: 1 } }),
+      { status: 200 },
+    );
+  });
+  await probeKey("sk-or-test");
+  assert.equal(captured.headers?.["x-title"], "Klio");
+  assert.equal(captured.headers?.["http-referer"], "https://klio.tech");
+});
+
+test("probeEmbeddingModel sends attribution headers", async (t) => {
+  t.after(restoreFetch);
+  const captured: { headers?: Record<string, string> } = {};
+  mockFetch(async (req) => {
+    captured.headers = Object.fromEntries(req.headers.entries());
+    return new Response(
+      JSON.stringify({
+        data: [{ embedding: new Array(8).fill(0) }],
+        usage: { total_tokens: 1 },
+      }),
+      { status: 200 },
+    );
+  });
+  await probeEmbeddingModel("sk-or-test", "x/y");
+  assert.equal(captured.headers?.["x-title"], "Klio");
+  assert.equal(captured.headers?.["http-referer"], "https://klio.tech");
+});
+
+test("probeChatModel sends attribution headers", async (t) => {
+  t.after(restoreFetch);
+  const captured: { headers?: Record<string, string> } = {};
+  mockFetch(async (req) => {
+    captured.headers = Object.fromEntries(req.headers.entries());
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "ok" } }],
+        usage: { total_tokens: 1 },
+      }),
+      { status: 200 },
+    );
+  });
+  await probeChatModel("sk-or-test", "x/y");
+  assert.equal(captured.headers?.["x-title"], "Klio");
+  assert.equal(captured.headers?.["http-referer"], "https://klio.tech");
+});
+
+test("curateEmbeddingModels filters to known-dim text->embedding, sorts by price, takes top 3", () => {
+  const catalog = [
+    {
+      id: "voyage/voyage-3",
+      architecture: { modality: "text->embedding" },
+      pricing: { prompt: "0.00000006" },
+    },
+    {
+      id: "openai/text-embedding-3-small",
+      architecture: { modality: "text->embedding" },
+      pricing: { prompt: "0.00000002" },
+    },
+    {
+      id: "anthropic/claude-3-5-haiku",
+      architecture: { modality: "text->text" },
+      pricing: { prompt: "0.0000008" },
+    },
+    {
+      id: "cohere/embed-multilingual-v3.0",
+      architecture: { modality: "text->embedding" },
+      pricing: { prompt: "0.00000011" },
+    },
+    {
+      id: "voyage/voyage-3-lite",
+      architecture: { modality: "text->embedding" },
+      pricing: { prompt: "0.00000003" },
+    },
+    {
+      id: "unknown/model",
+      architecture: { modality: "text->embedding" },
+      pricing: { prompt: "0.00000001" },
+    },
+  ];
+  const out = curateEmbeddingModels(catalog);
+  assert.equal(out.length, 3);
+  assert.equal(out[0].id, "openai/text-embedding-3-small");
+  assert.equal(out[1].id, "voyage/voyage-3");
+  assert.equal(out[2].id, "cohere/embed-multilingual-v3.0");
+  assert.ok(!out.some((m) => m.id === "anthropic/claude-3-5-haiku"));
+  assert.ok(!out.some((m) => m.id === "voyage/voyage-3-lite"));
+  assert.ok(!out.some((m) => m.id === "unknown/model"));
+});
+
+test("curateChatModels keeps known-curated names that exist + support tools", () => {
+  const catalog = [
+    {
+      id: "anthropic/claude-3-5-haiku",
+      architecture: { modality: "text->text" },
+      supported_parameters: ["tools"],
+      pricing: { prompt: "0.0000008", completion: "0.000004" },
+    },
+    {
+      id: "openai/gpt-4o-mini",
+      architecture: { modality: "text->text" },
+      supported_parameters: ["tools"],
+      pricing: { prompt: "0.00000015", completion: "0.0000006" },
+    },
+    {
+      id: "openai/text-embedding-3-small",
+      architecture: { modality: "text->embedding" },
+    },
+    {
+      id: "anthropic/claude-3-haiku",
+      architecture: { modality: "text->text" },
+      supported_parameters: ["tools"],
+    },
+    {
+      id: "google/gemini-flash-1.5",
+      architecture: { modality: "text->text" },
+    },
+  ];
+  const out = curateChatModels(catalog);
+  const ids = out.map((m) => m.id);
+  assert.deepEqual(
+    ids.slice().sort(),
+    ["anthropic/claude-3-5-haiku", "openai/gpt-4o-mini"].sort(),
+  );
+});
+
+test("curateChatModels preserves curated order (Haiku first, etc.)", () => {
+  const catalog = [
+    {
+      id: "openai/gpt-4o",
+      architecture: { modality: "text->text" },
+      supported_parameters: ["tools"],
+    },
+    {
+      id: "anthropic/claude-3-5-haiku",
+      architecture: { modality: "text->text" },
+      supported_parameters: ["tools"],
+    },
+  ];
+  const out = curateChatModels(catalog);
+  assert.equal(out[0].id, "anthropic/claude-3-5-haiku");
+  assert.equal(out[1].id, "openai/gpt-4o");
+});
+
+test("fetchModelCatalog throws on non-2xx", async (t) => {
+  t.after(restoreFetch);
+  mockFetch(async () => new Response("err", { status: 500 }));
+  await assert.rejects(() => fetchModelCatalog("sk"), /HTTP 500/);
 });
