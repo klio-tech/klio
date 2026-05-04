@@ -28,8 +28,10 @@
 // the success and failure paths so the working tree is never left
 // in a hidden state.
 
-import { existsSync, renameSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+
+import { moveDir } from "./move-dir.mjs";
 
 const APP_DIR = join(process.cwd(), "src", "app");
 
@@ -55,7 +57,7 @@ function show(group) {
   const { visible, hidden } = GROUPS[group];
   if (existsSync(visible)) return;
   if (existsSync(hidden)) {
-    renameSync(hidden, visible);
+    moveDir(hidden, visible);
     return;
   }
   throw new Error(
@@ -75,7 +77,7 @@ function hide(group) {
       `Cannot hide route group (${group}): neither ${visible} nor ${hidden} exists.`,
     );
   }
-  renameSync(visible, hidden);
+  moveDir(visible, hidden);
 }
 
 function main() {

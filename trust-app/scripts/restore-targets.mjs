@@ -10,8 +10,10 @@
 // hidden state. Also useful to run manually if a build was killed
 // (Ctrl-C) mid-flight.
 
-import { existsSync, renameSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+
+import { moveDir } from "./move-dir.mjs";
 
 const APP_DIR = join(process.cwd(), "src", "app");
 
@@ -22,7 +24,7 @@ for (const group of GROUPS) {
   const visible = join(APP_DIR, `(${group})`);
   const hidden = join(APP_DIR, `__klio_hidden_${group}__`);
   if (existsSync(hidden) && !existsSync(visible)) {
-    renameSync(hidden, visible);
+    moveDir(hidden, visible);
     restoredCount += 1;
     console.log(`[restore-targets] restored (${group})`);
   } else if (existsSync(hidden) && existsSync(visible)) {
