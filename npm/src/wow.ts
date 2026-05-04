@@ -15,12 +15,16 @@ export type WowDeps = {
   /** Base URL of the engine, e.g. "http://localhost:8000". No trailing slash. */
   engineURL: string;
   /**
-   * Refresh token returned by /v1/users/provision. We exchange it for
-   * a short-lived access token via /v1/tokens/refresh on entry to
-   * runWowMoment — `require_auth` on /v1/spaces/{id}/entries decodes
-   * a JWT, not a raw refresh token, so the exchange must happen here.
+   * JWT access token sent as `Authorization: Bearer <token>` on the
+   * entries POST and the recall POST. The init flow exchanges the
+   * refresh token returned by `/v1/users/provision` immediately
+   * after provisioning (before the bridge daemon rotates it) and
+   * passes the resulting access token through here. Doing the
+   * exchange in init rather than inside `runWowMoment` avoids a
+   * race with the bridge's own refresh loop, which would invalidate
+   * a refresh token before the wow moment got to use it.
    */
-  refreshToken: string;
+  accessToken: string;
   /** Target space ID for the write + the recall. */
   spaceID: string;
   /**
@@ -64,24 +68,20 @@ const ENTRY_KIND = "memory";
 export async function runWowMoment(deps: WowDeps): Promise<WowResult> {
   const fetchFn = deps.fetchFn ?? fetch;
 
-  // Exchange the long-lived refresh token for a short-lived access
-  // token before the entries write — `require_auth` on the engine
-  // decodes a JWT, and refresh tokens are opaque url-safe strings.
-  const accessToken = await exchangeRefreshForAccess(
-    fetchFn,
-    deps.engineURL,
-    deps.refreshToken,
-  );
-
   const memory = await deps.promptFn({
     message: "Your memory",
     multiline: true,
   });
 
-  const entryID = await writeMemory(fetchFn, deps, accessToken, memory);
+  const entryID = await writeMemory(fetchFn, deps, deps.accessToken, memory);
   deps.log(`      ✓ stored as fact (id: ${truncateID(entryID)})`);
 
-  const recallScore = await verifyRecall(fetchFn, deps, accessToken, entryID);
+  const recallScore = await verifyRecall(
+    fetchFn,
+    deps,
+    deps.accessToken,
+    entryID,
+  );
 
   printPostWriteInstructions(deps);
   await deps.waitEnter();
@@ -93,35 +93,6 @@ export async function runWowMoment(deps: WowDeps): Promise<WowResult> {
   );
 
   return { entryID, recallScore };
-}
-
-/**
- * POST /v1/tokens/refresh — exchange the refresh token returned by
- * /v1/users/provision for a JWT access token. The engine's auth
- * decorator on /v1/spaces/{id}/entries (and /recall) requires the
- * latter; sending the refresh token directly fails with a JWT
- * decode error rendered as 401.
- */
-async function exchangeRefreshForAccess(
-  fetchFn: typeof fetch,
-  engineURL: string,
-  refreshToken: string,
-): Promise<string> {
-  const res = await fetchFn(`${engineURL}/v1/tokens/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: refreshToken }),
-  });
-  if (!res.ok) {
-    throw new Error(
-      `token exchange failed (HTTP ${res.status}) — refresh token rejected by engine`,
-    );
-  }
-  const body = (await res.json()) as { access_token?: unknown };
-  if (typeof body.access_token !== "string" || body.access_token.length === 0) {
-    throw new Error("token exchange failed (engine did not return an access_token)");
-  }
-  return body.access_token;
 }
 
 async function writeMemory(

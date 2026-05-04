@@ -68,7 +68,11 @@ import {
   writeComposeFile,
   writeEnvFile,
 } from "../compose.js";
-import { provision, waitForEngineHealth } from "../engine.js";
+import {
+  exchangeRefreshToken,
+  provision,
+  waitForEngineHealth,
+} from "../engine.js";
 import { generateSigningKey, getOrCreateInstallId } from "../installId.js";
 import { allAdapters, type Adapter } from "../adapters/types.js";
 import { prompt } from "../prompt.js";
@@ -199,7 +203,24 @@ export async function init(opts: InitOptions): Promise<void> {
     userID?: string;
     agentID?: string;
     defaultSpaceID?: string;
+    /**
+     * Refresh token currently held by the npm CLI. Note: refresh
+     * tokens are one-time-use rotation tokens. The original token
+     * returned by `/v1/users/provision` is exchanged immediately
+     * (see "Persist credentials" step) for an access token + the
+     * NEXT refresh token. We hand the next-refresh-token to the
+     * bridge container; the npm CLI keeps the access token only.
+     * Any later use of `state.refreshToken` would 401 because the
+     * bridge will rotate it again on its first refresh loop.
+     */
     refreshToken?: string;
+    /**
+     * JWT access token minted by the immediate-after-provision
+     * exchange. Used by Phase 5's wow-moment HTTP calls
+     * (`/v1/spaces/<id>/entries`, `/v1/spaces/<id>/recall`) which
+     * `require_auth` on the engine side decodes as a JWT.
+     */
+    accessToken?: string;
     detectedAdapters: Adapter[];
     adaptersConfigured: string[];
     adaptersErrored: string[];
@@ -266,10 +287,10 @@ export async function init(opts: InitOptions): Promise<void> {
   // Phase 5 / 5 · Prove it works
   // -----------------------------------------------------------------
   phaseHeader(5, 5, "Prove it works");
-  if (!opts.skipWow && state.refreshToken && state.defaultSpaceID) {
+  if (!opts.skipWow && state.accessToken && state.defaultSpaceID) {
     await runWowStep({
       engineURL,
-      refreshToken: state.refreshToken,
+      accessToken: state.accessToken,
       spaceID: state.defaultSpaceID,
     });
   }
@@ -459,7 +480,7 @@ function buildStackSteps(
       title: "Set up your account",
       run: async () => {
         narrate(
-          "Your refresh token is stored encrypted inside the bridge — never written to ~/.klio/runtime/.env.",
+          "Your refresh token is stored encrypted inside the bridge — never written to ~/.klio/.env.",
         );
         const r = await provision(engineURL, {
           agentKind: PROVISION_AGENT_KIND,
@@ -469,7 +490,18 @@ function buildStackSteps(
         state.userID = r.user_id;
         state.agentID = r.agent_id;
         state.defaultSpaceID = r.default_space_id;
-        state.refreshToken = r.api_key;
+
+        // Refresh tokens are one-time-use. The bridge daemon will
+        // rotate this on its first refresh loop, so we exchange it
+        // here BEFORE handing it over — the CLI keeps the resulting
+        // access token (for Phase 5's wow moment) and forwards the
+        // post-rotation refresh token to the bridge. Without this
+        // pre-rotation step, the wow moment would 401 because the
+        // bridge would have already invalidated the original token.
+        const exchanged = await exchangeRefreshToken(engineURL, r.api_key);
+        state.accessToken = exchanged.access_token;
+        state.refreshToken = exchanged.refresh_token;
+
         info(`user_id        ${r.user_id}`);
         info(`agent_id       ${r.agent_id}`);
         info(`default space  ${r.default_space_id}`);
@@ -635,12 +667,12 @@ async function runAdapterStep(state: {
  */
 async function runWowStep(args: {
   engineURL: string;
-  refreshToken: string;
+  accessToken: string;
   spaceID: string;
 }): Promise<void> {
   await runWowMoment({
     engineURL: args.engineURL,
-    refreshToken: args.refreshToken,
+    accessToken: args.accessToken,
     spaceID: args.spaceID,
     promptFn: (o) =>
       prompt({ message: o.message, multiline: o.multiline ?? false }),

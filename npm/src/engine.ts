@@ -105,3 +105,49 @@ export async function provision(
   }
   return data;
 }
+
+export type ExchangeResponse = {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+};
+
+/**
+ * POST /v1/tokens/refresh — exchange a refresh token for a JWT
+ * access token + a fresh refresh token. The original refresh token
+ * is revoked by this call (one-time-use rotation), so the caller
+ * should treat the returned `refresh_token` as the new authoritative
+ * value going forward.
+ *
+ * Used by the npm init flow immediately after `/v1/users/provision`
+ * so the wow-moment HTTP calls (which require a JWT access token)
+ * have one to use, AND the bridge daemon receives a fresh refresh
+ * token instead of the one provision returned (which would already
+ * be revoked by the time the bridge tried to use it).
+ */
+export async function exchangeRefreshToken(
+  engineURL: string,
+  refreshToken: string,
+): Promise<ExchangeResponse> {
+  const res = await fetch(
+    engineURL.replace(/\/+$/, "") + "/v1/tokens/refresh",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `token exchange failed: HTTP ${res.status} from ${engineURL}\n${text.trim()}`,
+    );
+  }
+  const data = (await res.json()) as ExchangeResponse;
+  for (const k of ["access_token", "refresh_token"] as const) {
+    if (!data[k]) {
+      throw new Error(`exchange response missing ${k}: ${JSON.stringify(data)}`);
+    }
+  }
+  return data;
+}
