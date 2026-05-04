@@ -3,7 +3,14 @@
  * an annotated specimen of what an agent actually receives back from
  * a recall() call. No terminal chrome — the typography is the
  * container.
+ *
+ * Below the lede sits a single-row install-command panel
+ * (InstallSnippet) — the fastest path for a visitor who already
+ * knows they want to try it. The traditional CTAs sit immediately
+ * below for visitors who'd rather read docs first.
  */
+
+import { InstallSnippet } from "./InstallSnippet";
 
 const ENTRIES = [
   {
@@ -60,17 +67,22 @@ export function Hero() {
               data-stagger="3"
               style={{ marginTop: "1.8rem" }}
             >
-              Klio is the shared memory layer for AI coding agents — Claude
-              Code, Cursor, Codex, anything that speaks MCP. Preferences
-              taught to one agent carry across every tool. Decisions made
-              in one window surface in another. Encrypted on disk,
-              cryptographically auditable, open-source — and for now,
-              entirely on your laptop.
+              Klio is the shared memory layer for every AI coding agent on
+              your machine. Preferences taught to one carry across every
+              tool. Decisions made in one window surface in another.
+              Encrypted on disk, cryptographically auditable, open-source —
+              and for now, entirely on your laptop.
             </p>
+
+            {/* Install snippet — the fastest path for a visitor who's
+                already convinced. The CTAs below stay for the rest. */}
+            <div className="k-rise" data-stagger="4">
+              <InstallSnippet />
+            </div>
 
             <div
               className="k-rise"
-              data-stagger="4"
+              data-stagger="5"
               style={{
                 marginTop: "2.4rem",
                 display: "flex",
