@@ -38,3 +38,23 @@ def test_settings_default_openrouter_key_is_none(monkeypatch: pytest.MonkeyPatch
     Settings = _fresh_settings()
     s = Settings()
     assert s.openrouter_api_key is None
+
+
+def test_settings_accepts_custom_endpoint_fields(monkeypatch):
+    monkeypatch.setenv("KLIO_DATABASE_URL", "postgresql+asyncpg://x")
+    monkeypatch.setenv("KLIO_CUSTOM_BASE_URL", "https://litellm.acme.corp/v1")
+    monkeypatch.setenv("KLIO_CUSTOM_API_KEY", "sk-test")
+    Settings = _fresh_settings()
+    s = Settings()
+    assert s.custom_base_url == "https://litellm.acme.corp/v1"
+    assert s.custom_api_key == "sk-test"
+
+
+def test_settings_default_custom_fields_are_none(monkeypatch):
+    monkeypatch.setenv("KLIO_DATABASE_URL", "postgresql+asyncpg://x")
+    monkeypatch.delenv("KLIO_CUSTOM_BASE_URL", raising=False)
+    monkeypatch.delenv("KLIO_CUSTOM_API_KEY", raising=False)
+    Settings = _fresh_settings()
+    s = Settings()
+    assert s.custom_base_url is None
+    assert s.custom_api_key is None

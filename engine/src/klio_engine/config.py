@@ -35,3 +35,9 @@ class Settings(BaseSettings):
     # instead of local Ollama. Wired via the npm onboarding flow into the
     # engine container's environment as KLIO_OPENROUTER_API_KEY.
     openrouter_api_key: str | None = None
+    # Optional. When set, the engine routes embedding/extraction calls
+    # whose model name starts with `custom/` to <custom_base_url>/embeddings
+    # (or /chat/completions). Used by the npm onboarding's "Custom"
+    # provider option for self-hosted LiteLLM proxies, Azure, vLLM, etc.
+    custom_base_url: str | None = None
+    custom_api_key: str | None = None
