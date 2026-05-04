@@ -8,7 +8,9 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
+  type CustomSetupDeps,
   type OllamaSetupDeps,
+  setupCustom,
   setupOllama,
   setupProvider,
 } from "../src/providerSetup.js";
@@ -441,4 +443,336 @@ test("setupOllama forwards pull progress lines to log", async () => {
   const text = deps.logs.join("\n");
   assert.match(text, /pulling manifest/);
   assert.match(text, /pulling abc123: 100%/);
+});
+
+// ---------------------------------------------------------------------------
+// setupCustom
+// ---------------------------------------------------------------------------
+//
+// Same dependency-injection seam as `setupProvider` and `setupOllama`.
+// All three probe boundaries are stubbed; tests assert the
+// orchestrator's control flow (re-prompts, picker shape, fallback)
+// rather than the wire shape, which is covered in
+// `customEndpoint.test.ts`.
+
+function makeCustomDeps(
+  overrides: Partial<CustomSetupDeps> & { inputs?: string[] } = {},
+): CustomSetupDeps & {
+  inputs: string[];
+  cursor: { i: number };
+  logs: string[];
+} {
+  const inputs = overrides.inputs ?? [];
+  const cursor = { i: 0 };
+  const logs: string[] = [];
+  const deps: CustomSetupDeps = {
+    promptFn: overrides.promptFn ?? (async () => inputs[cursor.i++] ?? ""),
+    log: overrides.log ?? ((line: string) => logs.push(line)),
+    probeEndpoint:
+      overrides.probeEndpoint ??
+      (async () => ({ modelsAvailable: 0, modelsList: [] })),
+    probeEmbed:
+      overrides.probeEmbed ??
+      (async () => ({ dim: 1536, tokensUsed: 1 })),
+    probeChat:
+      overrides.probeChat ??
+      (async () => ({ tokensUsed: 1, latencyMs: 50 })),
+  };
+  return Object.assign(deps, { inputs, cursor, logs });
+}
+
+test("setupCustom returns CustomConfig when all probes pass", async () => {
+  const deps = makeCustomDeps({
+    // base URL, API key, embed pick (1 → text-embedding-3-small),
+    // chat pick (2 → claude-3-5-haiku).
+    inputs: [
+      "https://litellm.acme.corp/v1",
+      "sk-test",
+      "1",
+      "2",
+    ],
+    probeEndpoint: async () => ({
+      modelsAvailable: 2,
+      modelsList: ["text-embedding-3-small", "claude-3-5-haiku"],
+    }),
+    probeEmbed: async () => ({ dim: 1536, tokensUsed: 1 }),
+    probeChat: async () => ({ tokensUsed: 4, latencyMs: 120 }),
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(cfg.kind, "custom");
+  assert.equal(cfg.baseUrl, "https://litellm.acme.corp/v1");
+  assert.equal(cfg.apiKey, "sk-test");
+  assert.equal(cfg.embeddingModel, "text-embedding-3-small");
+  assert.equal(cfg.embeddingDim, 1536);
+  assert.equal(cfg.extractionModel, "claude-3-5-haiku");
+});
+
+test("setupCustom re-prompts on endpoint probe failure", async () => {
+  let endpointCalls = 0;
+  const deps = makeCustomDeps({
+    // bad URL+key → retry → good URL+key, then embed pick, chat pick
+    inputs: [
+      "https://bad/v1",
+      "bad",
+      "https://good/v1",
+      "sk-good",
+      "1",
+      "1",
+    ],
+    probeEndpoint: async (url) => {
+      endpointCalls++;
+      if (url === "https://bad/v1") throw new Error("Invalid key");
+      return { modelsAvailable: 1, modelsList: ["model-a"] };
+    },
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(endpointCalls, 2);
+  assert.equal(cfg.baseUrl, "https://good/v1");
+  assert.equal(cfg.apiKey, "sk-good");
+  // Failure log line appears.
+  const text = deps.logs.join("\n");
+  assert.match(text, /Invalid key/);
+});
+
+test("setupCustom re-prompts on embedding probe failure", async () => {
+  let embedCalls = 0;
+  const deps = makeCustomDeps({
+    // base URL, API key, bad embed pick (custom name), good embed pick (1), chat pick (1)
+    inputs: [
+      "https://x/v1",
+      "sk",
+      "broken-embed",
+      "1",
+      "1",
+    ],
+    probeEndpoint: async () => ({
+      modelsAvailable: 1,
+      modelsList: ["good-embed"],
+    }),
+    probeEmbed: async (_url, _key, model) => {
+      embedCalls++;
+      if (model === "broken-embed") throw new Error("Model not found");
+      return { dim: 768, tokensUsed: 2 };
+    },
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(embedCalls, 2);
+  assert.equal(cfg.embeddingModel, "good-embed");
+  assert.equal(cfg.embeddingDim, 768);
+});
+
+test("setupCustom re-prompts on chat probe failure", async () => {
+  let chatCalls = 0;
+  const deps = makeCustomDeps({
+    // base URL, API key, embed pick (1), bad chat (custom name), good chat pick (1)
+    inputs: [
+      "https://x/v1",
+      "sk",
+      "1",
+      "broken-chat",
+      "1",
+    ],
+    probeEndpoint: async () => ({
+      modelsAvailable: 1,
+      modelsList: ["good-model"],
+    }),
+    probeChat: async (_url, _key, model) => {
+      chatCalls++;
+      if (model === "broken-chat") throw new Error("rate limited");
+      return { tokensUsed: 5, latencyMs: 80 };
+    },
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(chatCalls, 2);
+  assert.equal(cfg.extractionModel, "good-model");
+});
+
+test("setupCustom falls back to free-form when modelsList is null (404 case)", async () => {
+  const seen: Array<{ message: string; default?: string }> = [];
+  const deps = makeCustomDeps({
+    // base URL, API key, embed name (free-form), chat name (free-form)
+    inputs: [
+      "https://localproxy/v1",
+      "",
+      "my-custom-embed",
+      "my-custom-chat",
+    ],
+    promptFn: async (opts) => {
+      seen.push({ message: opts.message, default: opts.default });
+      const inputs = [
+        "https://localproxy/v1",
+        "",
+        "my-custom-embed",
+        "my-custom-chat",
+      ];
+      return inputs[seen.length - 1] ?? "";
+    },
+    probeEndpoint: async () => ({
+      modelsAvailable: 0,
+      modelsList: null,
+    }),
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(cfg.embeddingModel, "my-custom-embed");
+  assert.equal(cfg.extractionModel, "my-custom-chat");
+  // The model prompts should NOT carry the picker default of "1" —
+  // they're free-form because modelsList is null.
+  const embedPrompt = seen.find((s) => s.message === "Embedding model");
+  const chatPrompt = seen.find((s) => s.message === "Extraction model");
+  assert.ok(embedPrompt);
+  assert.equal(embedPrompt?.default, undefined);
+  assert.ok(chatPrompt);
+  assert.equal(chatPrompt?.default, undefined);
+});
+
+test("setupCustom falls back to free-form when modelsList is empty", async () => {
+  const deps = makeCustomDeps({
+    inputs: [
+      "https://x/v1",
+      "sk",
+      "embed-x",
+      "chat-x",
+    ],
+    probeEndpoint: async () => ({
+      modelsAvailable: 0,
+      modelsList: [],
+    }),
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(cfg.embeddingModel, "embed-x");
+  assert.equal(cfg.extractionModel, "chat-x");
+});
+
+test("setupCustom accepts empty API key (local proxy without auth)", async () => {
+  const seenKeys: string[] = [];
+  const deps = makeCustomDeps({
+    inputs: [
+      "http://localhost:4000/v1",
+      "",
+      "embed",
+      "chat",
+    ],
+    probeEndpoint: async (_url, key) => {
+      seenKeys.push(key ?? "<undef>");
+      return { modelsAvailable: 0, modelsList: null };
+    },
+    probeEmbed: async (_url, key) => {
+      seenKeys.push(key ?? "<undef>");
+      return { dim: 768, tokensUsed: 1 };
+    },
+    probeChat: async (_url, key) => {
+      seenKeys.push(key ?? "<undef>");
+      return { tokensUsed: 1, latencyMs: 50 };
+    },
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(cfg.apiKey, "");
+  // Every probe call saw the empty string.
+  assert.deepEqual(seenKeys, ["", "", ""]);
+});
+
+test("setupCustom strips trailing slash from base URL", async () => {
+  let seenUrl = "";
+  const deps = makeCustomDeps({
+    inputs: [
+      "https://x/v1/",
+      "sk",
+      "embed",
+      "chat",
+    ],
+    probeEndpoint: async (url) => {
+      seenUrl = url;
+      return { modelsAvailable: 0, modelsList: null };
+    },
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(cfg.baseUrl, "https://x/v1");
+  assert.equal(seenUrl, "https://x/v1");
+});
+
+test("setupCustom picker accepts numeric choice over modelsList", async () => {
+  const deps = makeCustomDeps({
+    // base URL, API key, embed pick "2", chat pick "3"
+    inputs: [
+      "https://x/v1",
+      "sk",
+      "2",
+      "3",
+    ],
+    probeEndpoint: async () => ({
+      modelsAvailable: 4,
+      modelsList: ["a-model", "b-model", "c-model", "d-model"],
+    }),
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(cfg.embeddingModel, "b-model");
+  assert.equal(cfg.extractionModel, "c-model");
+});
+
+test("setupCustom picker accepts custom typed name as escape hatch", async () => {
+  const deps = makeCustomDeps({
+    inputs: [
+      "https://x/v1",
+      "sk",
+      "my-special-embed",
+      "my-special-chat",
+    ],
+    probeEndpoint: async () => ({
+      modelsAvailable: 2,
+      modelsList: ["a-model", "b-model"],
+    }),
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(cfg.embeddingModel, "my-special-embed");
+  assert.equal(cfg.extractionModel, "my-special-chat");
+});
+
+test("setupCustom picker shows at most 5 models", async () => {
+  const deps = makeCustomDeps({
+    inputs: [
+      "https://x/v1",
+      "sk",
+      "1",
+      "1",
+    ],
+    probeEndpoint: async () => ({
+      modelsAvailable: 10,
+      modelsList: [
+        "m1",
+        "m2",
+        "m3",
+        "m4",
+        "m5",
+        "m6",
+        "m7",
+        "m8",
+        "m9",
+        "m10",
+      ],
+    }),
+  });
+  await setupCustom(deps);
+  // The picker should have rendered at most 5 numbered lines per
+  // pick step. Count "  N) " entries across both pickers.
+  const numbered = deps.logs.filter((l) => /^\s+\d+\)\s/.test(l));
+  // 5 for embed picker + 5 for chat picker = 10 total.
+  assert.equal(numbered.length, 10);
+});
+
+test("setupCustom picker default of empty input → first option", async () => {
+  const deps = makeCustomDeps({
+    inputs: [
+      "https://x/v1",
+      "sk",
+      "", // empty → default to first option
+      "", // empty → default to first option
+    ],
+    probeEndpoint: async () => ({
+      modelsAvailable: 2,
+      modelsList: ["first-model", "second-model"],
+    }),
+  });
+  const cfg = await setupCustom(deps);
+  assert.equal(cfg.embeddingModel, "first-model");
+  assert.equal(cfg.extractionModel, "first-model");
 });

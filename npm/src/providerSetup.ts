@@ -28,6 +28,11 @@ import {
   fetchModelCatalog as defaultFetchCatalog,
   knownEmbedDim,
 } from "./openrouter.js";
+import {
+  probeCustomChat as defaultProbeCustomChat,
+  probeCustomEmbedding as defaultProbeCustomEmbedding,
+  probeCustomEndpoint as defaultProbeCustomEndpoint,
+} from "./customEndpoint.js";
 import type { OllamaModel } from "./ollama.js";
 
 export type ProviderConfig = {
@@ -660,4 +665,254 @@ function formatSize(bytes: number): string {
     return `${(bytes / 1_000).toFixed(0)} KB`;
   }
   return `${bytes} B`;
+}
+
+// ---------------------------------------------------------------------------
+// Custom OpenAI-compatible endpoint setup
+// ---------------------------------------------------------------------------
+//
+// Mirrors `setupProvider` in shape — the orchestrator drives a
+// sequence of prompt → probe → re-prompt loops over an injected set
+// of probe functions — but the data model is different:
+//
+//   1. The user supplies a base URL (any OpenAI-compatible server:
+//      LiteLLM proxy, Azure OpenAI, vLLM, Together, Groq, etc.).
+//   2. The user supplies an API key (empty string allowed; some
+//      local proxies don't require auth).
+//   3. We hit `<baseUrl>/models` to validate auth + reachability and
+//      to discover the available model list. Three outcomes:
+//        - 200 with a populated list → numbered picker over the
+//          first 5 entries (with custom-name escape hatch).
+//        - 200 with empty list, or 404 (proxy disabled /models) →
+//          free-form prompt with no default.
+//        - 401/403/5xx → re-prompt the URL + key.
+//   4. Embedding model picker → `probeCustomEmbedding` to validate.
+//   5. Chat model picker → `probeCustomChat` to validate.
+//
+// All four side-effect boundaries (`promptFn`, the three probes,
+// `log`) are injected via `CustomSetupDeps`. The probes default to
+// the real implementations in `./customEndpoint.js` so the runtime
+// caller in `init.ts` doesn't have to wire them; tests override them
+// with stubs to keep the suite hermetic.
+
+export type CustomConfig = {
+  kind: "custom";
+  /** Base URL of the OpenAI-compatible endpoint (no trailing slash). */
+  baseUrl: string;
+  /**
+   * API key. Empty string is a valid value — many local proxies
+   * accept unauthenticated requests, and the probe layer omits the
+   * Authorization header when the key is empty.
+   */
+  apiKey: string;
+  /** Embedding model id the user accepted. */
+  embeddingModel: string;
+  /** Vector dimensionality reported by the embedding probe. */
+  embeddingDim: number;
+  /** Extraction (chat) model id the user accepted. */
+  extractionModel: string;
+};
+
+export type CustomSetupDeps = {
+  /**
+   * Same shape as the OpenRouter prompt. The orchestrator passes
+   * `mask: true` for the API-key prompt; URL + model-name prompts go
+   * unmasked.
+   */
+  promptFn: (opts: {
+    message: string;
+    default?: string;
+    mask?: boolean;
+  }) => Promise<string>;
+  /** Single-line console writer; receives every probe success/failure line. */
+  log: (line: string) => void;
+  /**
+   * Endpoint validation probe. Defaults to the real
+   * `probeCustomEndpoint` from `./customEndpoint.js`. Returns the
+   * model list on success or throws on auth/reachability failure.
+   */
+  probeEndpoint?: typeof defaultProbeCustomEndpoint;
+  /**
+   * Embedding-model probe. Defaults to the real
+   * `probeCustomEmbedding`. Returns dim + tokens on success.
+   */
+  probeEmbed?: typeof defaultProbeCustomEmbedding;
+  /**
+   * Chat-model probe. Defaults to the real `probeCustomChat`. Returns
+   * tokens + latency on success.
+   */
+  probeChat?: typeof defaultProbeCustomChat;
+};
+
+/** Number of catalog entries we surface in the model picker. */
+const CUSTOM_PICKER_LIMIT = 5;
+
+/**
+ * Drive the custom-endpoint setup flow. Three retry loops:
+ *
+ *   1. Base URL + key → endpoint probe.
+ *   2. Embedding model → embedding probe.
+ *   3. Chat model → chat probe.
+ *
+ * On any probe failure we log the error verbatim and re-enter the
+ * surrounding prompt loop. Returns once every probe has succeeded.
+ */
+export async function setupCustom(
+  deps: CustomSetupDeps,
+): Promise<CustomConfig> {
+  const probeEndpoint = deps.probeEndpoint ?? defaultProbeCustomEndpoint;
+  const probeEmbed = deps.probeEmbed ?? defaultProbeCustomEmbedding;
+  const probeChat = deps.probeChat ?? defaultProbeCustomChat;
+
+  const { baseUrl, apiKey, modelsList } = await collectEndpoint(
+    deps,
+    probeEndpoint,
+  );
+
+  const { model: embeddingModel, dim: embeddingDim } =
+    await collectCustomEmbedding(deps, probeEmbed, baseUrl, apiKey, modelsList);
+
+  const extractionModel = await collectCustomChat(
+    deps,
+    probeChat,
+    baseUrl,
+    apiKey,
+    modelsList,
+  );
+
+  return {
+    kind: "custom",
+    baseUrl,
+    apiKey,
+    embeddingModel,
+    embeddingDim,
+    extractionModel,
+  };
+}
+
+/**
+ * Prompt for base URL + API key, then validate via `probeEndpoint`.
+ * Re-prompts on probe failure (auth, reachability). On success the
+ * normalised base URL (trailing slashes stripped) and the model list
+ * sentinel propagate to the model pickers.
+ */
+async function collectEndpoint(
+  deps: CustomSetupDeps,
+  probeEndpoint: typeof defaultProbeCustomEndpoint,
+): Promise<{
+  baseUrl: string;
+  apiKey: string;
+  modelsList: string[] | null;
+}> {
+  while (true) {
+    const rawUrl = await deps.promptFn({
+      message: "Base URL (e.g. https://litellm.acme.corp/v1)",
+    });
+    const baseUrl = rawUrl.trim().replace(/\/+$/, "");
+    const apiKey = await deps.promptFn({
+      message: "API key (leave blank if not required)",
+      mask: true,
+    });
+    try {
+      const info = await probeEndpoint(baseUrl, apiKey);
+      const summary =
+        info.modelsList === null
+          ? `      ✓ Reachable · /models disabled (you'll type names)`
+          : `      ✓ Reachable · ${info.modelsAvailable} model(s) available`;
+      deps.log(summary);
+      return { baseUrl, apiKey, modelsList: info.modelsList };
+    } catch (err) {
+      deps.log(`      ✗ ${(err as Error).message}`);
+    }
+  }
+}
+
+/**
+ * Collect the embedding model. Renders a numbered picker over the
+ * first `CUSTOM_PICKER_LIMIT` entries when `modelsList` is non-null
+ * and non-empty; falls back to a free-form prompt otherwise. Probe
+ * failures re-enter the picker.
+ */
+async function collectCustomEmbedding(
+  deps: CustomSetupDeps,
+  probeEmbed: typeof defaultProbeCustomEmbedding,
+  baseUrl: string,
+  apiKey: string,
+  modelsList: string[] | null,
+): Promise<{ model: string; dim: number }> {
+  while (true) {
+    const model = await pickCustomModel(deps, "Embedding model", modelsList);
+    try {
+      const result = await probeEmbed(baseUrl, apiKey, model);
+      deps.log(
+        `      ✓ ${result.dim}-dim, ${result.tokensUsed} test token(s)`,
+      );
+      return { model, dim: result.dim };
+    } catch (err) {
+      deps.log(`      ✗ ${(err as Error).message}`);
+    }
+  }
+}
+
+/**
+ * Collect the chat model. Same picker shape as the embedding step;
+ * separate function because the success-line formatting differs and
+ * the probe shape is different.
+ */
+async function collectCustomChat(
+  deps: CustomSetupDeps,
+  probeChat: typeof defaultProbeCustomChat,
+  baseUrl: string,
+  apiKey: string,
+  modelsList: string[] | null,
+): Promise<string> {
+  while (true) {
+    const model = await pickCustomModel(deps, "Extraction model", modelsList);
+    try {
+      const result = await probeChat(baseUrl, apiKey, model);
+      deps.log(
+        `      ✓ responded in ${result.latencyMs}ms, ${result.tokensUsed} test token(s)`,
+      );
+      return model;
+    } catch (err) {
+      deps.log(`      ✗ ${(err as Error).message}`);
+    }
+  }
+}
+
+/**
+ * Render a numbered picker for the custom-endpoint flow. Three input
+ * shapes accepted:
+ *   - empty input → first option's id (when picker is rendered)
+ *   - "1".."N"    → that option's id
+ *   - any other   → returned verbatim as a custom model name
+ *
+ * If `modelsList` is null (proxy disabled /models) or empty, we skip
+ * the numbered picker entirely and prompt for a model name with no
+ * default. The user must type something — there's no curated default
+ * we can guess for a user-supplied endpoint.
+ */
+async function pickCustomModel(
+  deps: Pick<CustomSetupDeps, "promptFn" | "log">,
+  prompt: string,
+  modelsList: string[] | null,
+): Promise<string> {
+  if (modelsList === null || modelsList.length === 0) {
+    const answer = await deps.promptFn({ message: prompt });
+    return answer.trim();
+  }
+  const options = modelsList.slice(0, CUSTOM_PICKER_LIMIT);
+  for (let i = 0; i < options.length; i++) {
+    const star = i === 0 ? " · ★ default" : "";
+    deps.log(`     ${i + 1}) ${options[i]}${star}`);
+  }
+  deps.log(`     (or type any model name)`);
+  const choice = await deps.promptFn({ message: prompt, default: "1" });
+  const trimmed = choice.trim();
+  if (trimmed === "") return options[0];
+  const n = Number(trimmed);
+  if (Number.isInteger(n) && n >= 1 && n <= options.length) {
+    return options[n - 1];
+  }
+  return trimmed;
 }
