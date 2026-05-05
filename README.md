@@ -44,11 +44,12 @@ npx @klio-tech/klio init
 
 ## What Klio is
 
-Most AI coding agents — Claude Code, Cursor, Codex — start every session
-from zero. They don't remember that you prefer Bun over Node, that you
-chose Railway over Fly, or that the bug you spent two hours on yesterday
-turned out to be a stale cache. The agent re-asks. You re-explain. The
-context evaporates the moment you close the window.
+Most AI coding agents — Claude Code, Claude Desktop, Cursor, Codex,
+OpenCode, OpenClaw — start every session from zero. They don't
+remember that you prefer Bun over Node, that you chose Railway over
+Fly, or that the bug you spent two hours on yesterday turned out to be
+a stale cache. The agent re-asks. You re-explain. The context
+evaporates the moment you close the window.
 
 **Klio fixes that.** It's a local memory daemon that captures every
 prompt and tool call from your AI agents, extracts the durable facts,
@@ -57,24 +58,25 @@ embeds them with a vector model, and serves them back as MCP tools so
 agents, across sessions, across projects.
 
 ```
-┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
-│   Claude Code   │         │     Cursor      │         │      Codex      │
-└────────┬────────┘         └────────┬────────┘         └────────┬────────┘
-         │ MCP tools + hooks         │ MCP tools                 │ MCP tools
-         └───────────────────────────┼───────────────────────────┘
-                                     ▼
-                          ┌──────────────────────┐
-                          │   Klio bridge daemon │ ◄── encrypted-at-rest
-                          │   (Go, Unix socket)  │     audit-chained
-                          └──────────┬───────────┘     ~/.klio
-                                     │
-                          ┌──────────▼───────────┐
-                          │     Klio engine      │ ◄── per-space pluggable
-                          │ (Python, FastAPI)    │     embeddings
-                          │ Postgres + pgvector  │     OpenTimestamps
-                          │ Redis pub/sub        │     notarized
-                          │ Local file KMS       │
-                          └──────────────────────┘
+┌──────────────┐  ┌──────────────┐  ┌────────┐  ┌───────┐  ┌──────────┐  ┌──────────┐
+│ Claude Code  │  │ Claude Desktop│ │ Cursor │  │ Codex │  │ OpenCode │  │ OpenClaw │
+└──────┬───────┘  └───────┬──────┘  └───┬────┘  └───┬───┘  └────┬─────┘  └────┬─────┘
+       │ MCP stdio        │ MCP stdio  │ MCP stdio │ MCP stdio │ MCP stdio   │ MCP stdio
+       └──────────────────┴────────────┴─────┬─────┴───────────┴─────────────┘
+                                             ▼
+                          ┌──────────────────────────┐
+                          │   klio-bridge container  │ ◄── packages both:
+                          │   (Go)                   │     • daemon (HTTP + Unix socket)
+                          │                          │     • klio-mcp (stdio shim)
+                          └──────────────┬───────────┘
+                                         │
+                          ┌──────────────▼───────────┐
+                          │       klio-engine        │ ◄── per-space pluggable
+                          │ (Python, FastAPI)        │     embeddings
+                          │ Postgres + pgvector      │     OpenTimestamps
+                          │ Redis pub/sub            │     notarized
+                          │ Local file KMS (~/.klio) │     AES-256-GCM at rest
+                          └──────────────────────────┘
 ```
 
 Everything runs on your machine. Your memories never leave it unless you
@@ -93,21 +95,30 @@ owned by you). No cloud, no telemetry, no phone-home, no analytics.
 
 ### MCP-native — works with every agent that speaks the protocol
 
-One `klio init` command:
+One command — `npx @klio-tech/klio init` — does the entire setup:
 
-1. Registers Klio as an MCP server in your Claude Code config (via the
-   official `claude mcp add-json` CLI)
-2. Patches six event hooks (`SessionStart`, `UserPromptSubmit`,
-   `PreToolUse`, `PostToolUse`, `SubagentStop`, `Stop`) so Klio
-   silently captures activity without any prompting
-3. Auto-allowlists all seven Klio tools in `permissions.allow` so
-   first-run users don't see "Do you want to proceed?" prompts
-4. Writes a docker-compose `.env` so the trust-app dashboard auto-logs
-   in — no magic-link round-trip on your own machine
-5. Provisions an anonymous account; claim it later via email if you
-   want to sync to Klio Cloud
+1. **Pulls four containers** (engine, bridge, dashboard, plus Postgres
+   + Redis), boots them locally, runs migrations.
+2. **Walks you through provider + model picks** (OpenRouter, Ollama,
+   or any OpenAI-compatible endpoint) and validates your choice with a
+   one-token probe before continuing.
+3. **Detects every supported AI agent on your machine** and patches
+   each one's MCP config so they all point at the same shared bridge:
+   - Claude Code (`~/.claude/settings.json` + 6 hooks + tool allowlist)
+   - Claude Desktop — Chat **and** Cowork
+     (`~/Library/Application Support/Claude/claude_desktop_config.json`)
+   - Cursor (`~/.cursor/mcp.json`)
+   - Codex (`~/.codex/config.toml`)
+   - OpenCode (`~/.config/opencode/opencode.json`)
+   - OpenClaw (`openclaw mcp set` CLI, with file-write fallback)
+4. **Asks you to type one memory** so the loop is provably wired —
+   the CLI confirms recall before exiting.
+5. **Provisions an anonymous account**; claim it later via email if
+   you want to sync to Klio Cloud.
 
-Cursor + Codex adapters land next.
+Each adapter writes a timestamped backup of the file it modifies, so
+`npx @klio-tech/klio uninstall` is non-destructive — it restores the
+exact pre-Klio state for every agent.
 
 ### Cross-agent collaboration in real time
 
@@ -128,18 +139,25 @@ to a third-party auditor with no trust in Klio.
 
 Each space pins its own embedding model and dim. Out of the box:
 
-| Model                                | Dim  | Disk     | License     |
-|--------------------------------------|------|----------|-------------|
-| `ollama/nomic-embed-text` *(default)* | 768  | 274 MB   | Apache 2.0  |
-| `ollama/mxbai-embed-large`            | 1024 | 670 MB   | Apache 2.0  |
-| `ollama/snowflake-arctic-embed2`      | 1024 | ~1.2 GB  | Apache 2.0  |
-| `ollama/bge-m3`                       | 1024 | ~2.2 GB  | MIT         |
-| `text-embedding-3-small` (OpenAI)     | 1536 | -        | proprietary |
+| Model                                          | Dim  | Disk     | License     |
+|------------------------------------------------|------|----------|-------------|
+| `ollama/nomic-embed-text` *(default)*          | 768  | 274 MB   | Apache 2.0  |
+| `ollama/mxbai-embed-large`                     | 1024 | 670 MB   | Apache 2.0  |
+| `ollama/snowflake-arctic-embed2`               | 1024 | ~1.2 GB  | Apache 2.0  |
+| `ollama/bge-m3`                                | 1024 | ~2.2 GB  | MIT         |
+| `openrouter/openai/text-embedding-3-small`     | 1536 | -        | proprietary |
+| `openrouter/voyage/voyage-3`                   | 1024 | -        | proprietary |
+| `openrouter/cohere/embed-multilingual-v3.0`    | 1024 | -        | proprietary |
+
+(Bare-OpenAI rows were dropped in 0.3.0 alongside the LiteLLM removal;
+all hosted-model traffic now flows through OpenRouter so a single API
+key covers every provider.)
 
 Switch a space's model at any time without re-architecting:
 
 ```bash
-klio reembed --space default --to ollama/snowflake-arctic-embed2
+docker exec -i klio-bridge klio reembed \
+  --space default --to ollama/snowflake-arctic-embed2
 ```
 
 The shadow-table architecture means new models are a one-migration add,
@@ -161,49 +179,55 @@ boundary.
 Prerequisites:
 
 - Docker Desktop running (`docker info`)
-- Python 3.12+ (`python3 --version`)
-- Go 1.22+ (`go version`)
-- Node 20+ (`node --version`)
-- Homebrew on macOS (for native Ollama with Metal acceleration); on
-  Linux, the docker-compose `docker-ollama` profile is used as a
-  CPU fallback.
+- Node 20+ (`node --version`) — needed only for the launcher (`npx`)
 - ~8 GB free disk
+- *(macOS)* If you pick the Ollama provider: a working `ollama`
+  install (Metal acceleration). On Linux, the docker-compose
+  `docker-ollama` profile is used as a CPU fallback.
 
 ```bash
-# 1. Clone + provision dependencies
-git clone https://github.com/klio-tech/klio.git
-cd klio
-make first-run            # docker + ollama + migrate + build /tmp/klio + /tmp/klio-mcp
-
-# 2. Start the engine in one terminal
-make engine
-
-# 3. In a second terminal: provision your account + wire Claude Code
-KLIO_USE_FILE_KEYCHAIN=1 KLIO_API_URL=http://127.0.0.1:8000 \
-  /tmp/klio init
-
-# 4. Start the bridge daemon in the background
-KLIO_USE_FILE_KEYCHAIN=1 KLIO_API_URL=http://127.0.0.1:8000 \
-  /tmp/klio daemon &
-
-# 5. Bring up the memories dashboard
-docker compose up -d trust-app
-
-# 6. Open it
-open http://127.0.0.1:3000
-
-# 7. Restart Claude Code so it picks up the new MCP server + hooks
+npx @klio-tech/klio init
 ```
 
-Now in a fresh Claude Code session, ask:
+That's it. The launcher pulls four containers (engine, bridge,
+dashboard, plus Postgres + Redis), boots them, runs migrations, walks
+you through provider + model selection, detects every supported AI
+agent on your machine, and patches each one's MCP config. ~30 seconds
+on a warm Docker, ~2 min on a cold first run.
+
+The five interactive phases:
+
+| Phase                     | What happens                                                       |
+|---------------------------|--------------------------------------------------------------------|
+| 1. Stack boot             | `docker compose pull` + `up -d` for engine, bridge, dashboard, db. |
+| 2. Provider pick          | OpenRouter (recommended), Ollama (fully local), or custom OpenAI-compatible. |
+| 3. Model probe            | One-token test request validates the key + model before committing. |
+| 4. Agent wiring           | All six adapters detect → backup → patch each agent's MCP config.   |
+| 5. Wow moment             | You type one memory, the CLI proves recall before exiting.          |
+
+Open any patched agent (Claude Code, Claude Desktop, Cursor, Codex,
+OpenCode, OpenClaw) and ask:
 *"Use Klio's recall tool to find what I prefer for JavaScript runtime."*
 
 It'll find what you write going forward and any prior memories you've
-added. Hooks silently capture every prompt and tool call.
+added. The Claude Code hooks silently capture every prompt and tool
+call, and Redis pub/sub fans those memories out to every other agent
+in real time.
 
-To stop everything: `docker compose down && pkill -f /tmp/klio`.
-To uninstall fully: `KLIO_USE_FILE_KEYCHAIN=1 /tmp/klio uninstall`
-(restores `~/.claude/settings.json` from the backup created at install).
+The trust-app dashboard is served at <http://127.0.0.1:3000> the
+moment the stack is up.
+
+To uninstall fully:
+
+```bash
+npx @klio-tech/klio uninstall
+```
+
+This walks the same six adapters in reverse, restoring the timestamped
+backup each one wrote at install time — your agent configs return to
+their pre-Klio state byte-for-byte.
+
+To stop the stack without uninstalling: `docker compose down`.
 
 ---
 
@@ -223,6 +247,13 @@ To uninstall fully: `KLIO_USE_FILE_KEYCHAIN=1 /tmp/klio uninstall`
 
 ### The six Claude Code hooks
 
+Every agent gets the seven MCP tools. Claude Code *also* gets six
+event hooks so memory capture happens silently — no prompt-engineering,
+no "did you mean to remember this?" loop. The other five agents
+(Claude Desktop, Cursor, Codex, OpenCode, OpenClaw) capture via tool
+calls today; their hook equivalents will land as each platform
+exposes a stable hook surface.
+
 | Event              | What Klio captures                                          |
 |--------------------|-------------------------------------------------------------|
 | `SessionStart`     | Marks a session boundary, attaches subsequent activity.      |
@@ -235,7 +266,7 @@ To uninstall fully: `KLIO_USE_FILE_KEYCHAIN=1 /tmp/klio uninstall`
 ### Architecture at a glance
 
 ```
-trust-app (Next.js)        ◄─────────►  engine
+trust-app (Next.js, container)  ◄─────►  engine (FastAPI, container)
   /memories                                ├── /v1/spaces
   /spaces                                  ├── /v1/spaces/{id}/entries
   /access-requests                         ├── /v1/spaces/{id}/recall
@@ -244,24 +275,31 @@ trust-app (Next.js)        ◄─────────►  engine
                                            ├── /v1/audit
                                            └── ...
 
-klio-mcp (Go, stdio MCP)   ◄─────────►  bridge daemon
-                                          ├── unix socket
-                                          ├── SQLite cache
-                                          ├── keychain backend
-                                          └── Redis subscriber
+klio-bridge (Go, container)              ── packages two binaries:
+  ├── klio-mcp   ◄─ MCP stdio shim         (consumed by every agent
+  │                                          via `docker exec -i`)
+  └── klio-daemon                          (long-running)
+        ├── unix socket
+        ├── SQLite cache
+        ├── keychain backend
+        └── Redis subscriber
 
 bridge daemon              ◄─────────►  engine + Redis
                                            publishes + receives frames
 
-Postgres                                 entries (encrypted)
-   + pgvector                            entry_embeddings_768/1024/1536
-                                         audit_log (hash-chained)
-                                         spaces (per-space embedding pin)
-                                         users (envelope-key-wrapped)
-                                         agents, permissions, access_requests
-                                         audit_notarizations (OpenTimestamps proofs)
+Postgres + pgvector                       entries (encrypted)
+                                          entry_embeddings_768/1024/1536
+                                          audit_log (hash-chained)
+                                          spaces (per-space embedding pin)
+                                          users (envelope-key-wrapped)
+                                          agents, permissions, access_requests
+                                          audit_notarizations (OpenTimestamps proofs)
 
-Ollama (native or docker)               nomic-embed-text + qwen2.5:7b-instruct
+Ollama (native or docker)                nomic-embed-text + qwen2.5:7b-instruct
+
+@klio-tech/klio (npm)                    user-facing launcher: pulls
+                                          containers, picks provider,
+                                          patches every agent's MCP config
 ```
 
 For deep architecture: [docs/plans/2026-05-02-klio-architecture-design.md](docs/plans/2026-05-02-klio-architecture-design.md).
@@ -270,17 +308,18 @@ For deep architecture: [docs/plans/2026-05-02-klio-architecture-design.md](docs/
 
 ## How Klio compares
 
-| Feature                              | **Klio** | mem0      | Zep       | Supermemory |
-|--------------------------------------|----------|-----------|-----------|-------------|
-| Open source                          | ✅ Apache 2.0 | ✅       | ✅       | ❌ proprietary |
-| Self-hosted by default               | ✅       | ✅        | ✅        | ❌ cloud-only  |
-| Encrypted at rest with user-owned key| ✅ AES-256-GCM + KMS | ❌ | ❌ | ❌            |
-| Cryptographic audit chain            | ✅ + OpenTimestamps  | ❌ | ❌ | ❌            |
-| MCP-native (drops into agents)       | ✅ 7 tools          | ❌ SDK only | ❌ SDK only | ❌ SDK only |
-| Real-time cross-agent pub/sub        | ✅ Redis            | ❌  | partial | ❌            |
-| Per-space embedding model            | ✅ 5 models, runtime-switchable | one global | one global | opaque |
-| Local UI                             | ✅ Next.js dashboard | ❌  | ✅ web | ✅ web         |
-| Anonymous-first onboarding           | ✅                  | account up-front | account up-front | account up-front |
+| Feature                              | **Klio**                | mem0           | Zep             | Supermemory     |
+|--------------------------------------|-------------------------|----------------|-----------------|-----------------|
+| Open source                          | ✅ AGPL v3 + Apache 2.0  | ✅             | ✅              | ❌ proprietary  |
+| Self-hosted by default               | ✅                      | ✅             | ✅              | ❌ cloud-only   |
+| Encrypted at rest with user-owned key| ✅ AES-256-GCM + KMS     | ❌             | ❌              | ❌              |
+| Cryptographic audit chain            | ✅ + OpenTimestamps      | ❌             | ❌              | ❌              |
+| MCP-native (drops into agents)       | ✅ 7 tools, 6 adapters   | ❌ SDK only    | ❌ SDK only     | ❌ SDK only     |
+| Real-time cross-agent pub/sub        | ✅ Redis                 | ❌             | partial         | ❌              |
+| Per-space embedding model            | ✅ 7 models, runtime-switchable | one global | one global  | opaque          |
+| Local UI                             | ✅ Next.js dashboard     | ❌             | ✅ web          | ✅ web          |
+| Anonymous-first onboarding           | ✅                      | account up-front | account up-front | account up-front |
+| One-command setup                    | ✅ `npx @klio-tech/klio init` | npm install + config | docker run + config | hosted only |
 
 Klio's bet: trust + protocol-native > connectors + polish (for now).
 
@@ -291,26 +330,37 @@ Klio's bet: trust + protocol-native > connectors + polish (for now).
 ```
 klio/
 ├── README.md                  # this file
-├── LICENSE                    # Apache 2.0
+├── LICENSE                    # AGPL v3 (engine + everything not Apache-licensed)
+├── LICENSE-APACHE-2.0         # Apache 2.0 — covers the MCP shim + claude-plugin
 ├── LICENSING.md               # open-core boundary
 ├── HANDOFF.md                 # exhaustive run-recipe + state of every component
-├── Makefile                   # `make first-run` is the one-shot setup
-├── docker-compose.yml         # Postgres + Redis + (opt) Ollama + trust-app
+├── Makefile                   # contributor convenience targets (engine dev, lint, etc.)
+├── docker-compose.yml         # Postgres + Redis + Ollama + trust-app + bridge
 ├── .env.example               # template for trust-app docker auto-login
 ├── docs/
+│   ├── klio-mark.svg          # canonical wordmark (matches KlioMark.tsx)
 │   ├── embedding-models.md    # how the per-space pluggable embeddings work
 │   ├── plans/                 # architecture + implementation plans
 │   └── security/              # threat-model + triage-runbook
 ├── engine/                    # Python 3.12 / FastAPI / SQLAlchemy / pgvector
 │   ├── pyproject.toml
-│   ├── alembic/               # migrations (5 of them)
+│   ├── alembic/               # migrations
 │   └── src/klio_engine/       # api/, audit/, auth/, crypto/, models/, services/
-├── bridge/                    # Go 1.22 / daemon + CLI + MCP shim
+├── bridge/                    # Go 1.22 / daemon + CLI + MCP shim (one container)
 │   ├── go.mod
+│   ├── cmd/                   # klio-daemon, klio-mcp, klio CLI
 │   └── internal/              # agentadapters/, backfill/, bootstrap/, cache/, cloud/,
 │                              # config/, daemon/, hooks/, keychain/, mcp/, realtime/, socket/
+├── npm/                       # @klio-tech/klio — user-facing launcher (TypeScript)
+│   ├── package.json
+│   ├── src/                   # commands/init, commands/uninstall, providerSetup,
+│   │                          # adapters/{claudeCode,claudeDesktop,cursor,codex,
+│   │                          #          openCode,openClaw}.ts
+│   └── tests/                 # vitest — ~190 hermetic unit tests
 ├── claude-plugin/             # Claude Code plugin manifest + 3 skills + 4 slash commands
-├── trust-app/                 # Next.js 15 / TypeScript / React 19 — local dashboard
+├── trust-app/                 # Next.js 16 / TypeScript / React 19 — landing + dashboard
+│   └── src/app/(local)/       # local dashboard (memories, spaces, security)
+│       src/app/(public)/      # klio.tech marketing site
 └── infra/                     # SQL init scripts; Terraform deferred
 ```
 
@@ -323,20 +373,25 @@ implemented and tested locally on the author's machine, but the
 project has not yet had a wider security review or external production
 deployment.
 
-| Component                | State                                  |
-|--------------------------|----------------------------------------|
-| Engine (FastAPI)         | ✅ 103 tests passing                    |
-| Bridge daemon (Go)       | ✅ 13 packages, all tests passing       |
-| Trust-app dashboard      | ✅ typecheck + production build green   |
-| Claude Code adapter      | ✅ live in author's daily use           |
-| Cursor adapter           | ❌ designed, not built                  |
-| Codex adapter            | ❌ designed, not built                  |
-| Real-time pub/sub        | ✅ verified end-to-end                  |
-| OpenTimestamps notarize  | ✅ hourly cron + stub fallback          |
-| Pluggable embeddings     | ✅ 5 models supported, runtime-switch   |
-| Encrypted-at-rest        | ✅ AES-256-GCM + persistent local KMS   |
-| Audit hash chain         | ✅ tamper-evident                       |
-| Klio Cloud (multi-tenant)| ❌ private repo, planned                |
+| Component                  | State                                       |
+|----------------------------|---------------------------------------------|
+| Engine (FastAPI)           | ✅ 130 tests passing                         |
+| Bridge daemon (Go)         | ✅ 14 packages, all tests passing            |
+| Trust-app (landing + dash) | ✅ typecheck + dual-target build green       |
+| `@klio-tech/klio` (npm)    | ✅ published; ~190 tests passing             |
+| Claude Code adapter        | ✅ live in author's daily use                |
+| Claude Desktop adapter     | ✅ Chat + Cowork variants                    |
+| Cursor adapter             | ✅ shipped                                   |
+| Codex adapter              | ✅ shipped (TOML config)                     |
+| OpenCode adapter           | ✅ shipped (0.4.1)                           |
+| OpenClaw adapter           | ✅ shipped (0.4.1, CLI-first)                |
+| Real-time pub/sub          | ✅ verified end-to-end                       |
+| OpenTimestamps notarize    | ✅ hourly cron + stub fallback               |
+| Pluggable embeddings       | ✅ 7 models supported, runtime-switch        |
+| Encrypted-at-rest          | ✅ AES-256-GCM + persistent local KMS        |
+| Audit hash chain           | ✅ tamper-evident                            |
+| GitHub Actions CI          | ✅ engine + npm + container images           |
+| Klio Cloud (multi-tenant)  | ❌ private repo, planned                     |
 
 ---
 
@@ -344,26 +399,25 @@ deployment.
 
 **v0.x — pre-launch (current)**
 
-- Cursor adapter (`agentadapters/cursor.go`)
-- Codex / OpenAI Apps adapter
 - Audit-chain visualizer in the trust-app
 - `klio backfill` UX polish (progress bars, resume tokens)
-- CI on GitHub Actions (engine pytest + bridge `go test ./...` + trust-app `next build`)
+- Windows-native adapter paths (today the adapters assume macOS / Linux
+  XDG conventions; Windows users run via WSL2)
+- Per-project space auto-routing (cwd → space)
 
 **v1.0 — public launch**
 
-- npm `@klio/cli` package wrapping the Go binaries via `npx klio init`
-- PyPI `klio-engine` package
+- PyPI `klio-engine` package (the engine as a library, not just a container)
 - Signed releases (Sigstore / Cosign)
 - Klio Cloud beta (waitlist at https://klio.tech/cloud)
-- Pre-launch private security review
+- Pre-launch external security review
 
 **v1.x — cross-agent intelligence**
 
 - Cross-agent conflict resolution (when two agents write contradicting facts)
-- Per-project space auto-routing (cwd → space)
 - Premium connectors: Salesforce, Notion, Linear, Slack, Gmail
 - Hosted enterprise SSO + RBAC
+- Audit-chain attestation export (proof bundle for compliance teams)
 
 ---
 
@@ -419,6 +473,8 @@ Klio stands on the shoulders of:
 
 - [pgvector](https://github.com/pgvector/pgvector) — the vector index
 - [Ollama](https://ollama.com) — local model serving
-- [LiteLLM](https://github.com/BerriAI/litellm) — provider abstraction
+- [OpenRouter](https://openrouter.ai) — single-API-key access to every hosted provider
 - [Model Context Protocol](https://modelcontextprotocol.io) — Anthropic's open spec for agent tools
 - [OpenTimestamps](https://opentimestamps.org) — Bitcoin-anchored proof of existence
+- [FastAPI](https://fastapi.tiangolo.com) · [SQLAlchemy](https://www.sqlalchemy.org) · [Alembic](https://alembic.sqlalchemy.org) — Python web + data stack
+- [Next.js](https://nextjs.org) — the trust-app dashboard and klio.tech
