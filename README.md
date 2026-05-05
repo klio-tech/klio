@@ -1,24 +1,42 @@
 <div align="center">
 
+<a href="https://klio.tech">
+  <img src="docs/klio-mark.svg" alt="Klio" width="64" height="64" />
+</a>
+
 # Klio
 
 **The local-first, encrypted, MCP-native memory layer for AI agents.**
 
-Your Claude Code, Cursor, and Codex sessions — finally remembering what
-you've decided, learned, and chosen, across every window and every project.
+Your Claude Code, Claude Desktop, Cursor, Codex, OpenCode, and OpenClaw
+sessions — finally remembering what you've decided, learned, and chosen,
+across every window and every project.
 
 [**klio.tech**](https://klio.tech) ·
 [Quick start](#quick-start) ·
 [How it works](#how-it-works) ·
 [Why Klio](#why-klio) ·
-[Roadmap](#roadmap) ·
+[Discord](https://discord.gg/xRRPnW3fN2) ·
 [Cloud (waitlist)](https://klio.tech/cloud)
+
+<!-- Live status badges. The CI ones pull workflow state from
+     GitHub Actions automatically; npm pulls from the registry. The
+     license + MCP-native badges are static (they don't change). -->
+[![Publish container images](https://github.com/klio-tech/klio/actions/workflows/release-images.yml/badge.svg?branch=main)](https://github.com/klio-tech/klio/actions/workflows/release-images.yml)
+[![Publish to npm](https://github.com/klio-tech/klio/actions/workflows/publish-npm.yml/badge.svg?branch=main)](https://github.com/klio-tech/klio/actions/workflows/publish-npm.yml)
+[![npm version](https://img.shields.io/npm/v/%40klio-tech%2Fklio?label=npm)](https://www.npmjs.com/package/@klio-tech/klio)
+[![Discord](https://img.shields.io/badge/discord-join-7289DA?logo=discord&logoColor=white)](https://discord.gg/xRRPnW3fN2)
+[![GitHub stars](https://img.shields.io/github/stars/klio-tech/klio?style=social)](https://github.com/klio-tech/klio)
 
 [![License: AGPL-3.0](https://img.shields.io/badge/Engine-AGPL--3.0-blue.svg)](LICENSE)
 [![MCP Shim: Apache-2.0](https://img.shields.io/badge/MCP%20Shim-Apache--2.0-green.svg)](LICENSE-APACHE-2.0)
-[![Engine tests](https://img.shields.io/badge/engine%20tests-103%20passing-brightgreen)](engine/tests)
-[![Bridge tests](https://img.shields.io/badge/bridge%20tests-13%20packages%20passing-brightgreen)](bridge)
 [![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-native-purple)](https://modelcontextprotocol.io)
+
+```
+npx @klio-tech/klio init
+```
+
+**[★ Star Klio on GitHub](https://github.com/klio-tech/klio)** if memory-that-survives-the-window-close sounds like a primitive every AI agent should have.
 
 </div>
 

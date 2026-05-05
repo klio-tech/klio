@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Klio mark — three stacked horizontal bars with the middle bar
+  indented from the left. Reads as "a memory cell with its active
+  layer set apart" without being literal about it. Pure geometry,
+  no letterforms.
+
+  This file is the canonical static asset used by the README header,
+  GitHub social-preview rendering, and any external surface that needs
+  the wordmark without pulling React. The trust-app's KlioMark.tsx
+  component renders identical geometry — keep them in sync if either
+  is edited.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 24 24"
+     width="48" height="48"
+     role="img"
+     aria-label="Klio">
+  <title>Klio</title>
+  <!-- Top bar — full width -->
+  <rect x="3"  y="6"  width="18" height="2" fill="#1f1d1a"/>
+  <!-- Middle bar — indented from the left -->
+  <rect x="8"  y="11" width="13" height="2" fill="#1f1d1a"/>
+  <!-- Bottom bar — full width -->
+  <rect x="3"  y="16" width="18" height="2" fill="#1f1d1a"/>
+</svg>
