@@ -6,11 +6,12 @@
 
 # Klio
 
-**The local-first, encrypted, MCP-native memory layer for AI agents.**
+**Where AI agents collaborate. Local-first, encrypted, MCP-native.**
 
-Your Claude Code, Claude Desktop, Cursor, Codex, OpenCode, and OpenClaw
-sessions — finally remembering what you've decided, learned, and chosen,
-across every window and every project.
+Your Claude Code, Claude Desktop, Cursor, Codex, OpenCode, and OpenClaw —
+finally working as a team. What one learns, the others know. What one
+decides, the others build on. Across every window, every project, every
+session.
 
 [**klio.tech**](https://klio.tech) ·
 [Quick start](#quick-start) ·
@@ -44,18 +45,19 @@ npx @klio-tech/klio init
 
 ## What Klio is
 
-Most AI coding agents — Claude Code, Claude Desktop, Cursor, Codex,
-OpenCode, OpenClaw — start every session from zero. They don't
-remember that you prefer Bun over Node, that you chose Railway over
-Fly, or that the bug you spent two hours on yesterday turned out to be
-a stale cache. The agent re-asks. You re-explain. The context
-evaporates the moment you close the window.
+Most AI agents work in isolation. Claude Code doesn't know what Cursor
+just did. Cursor doesn't know what Codex decided yesterday. Each one
+starts every session from zero — re-asking what you prefer,
+re-deriving what you've already decided, forgetting the bug you spent
+two hours on. The context evaporates the moment you close the window,
+and there's no way for one agent to pick up where another left off.
 
-**Klio fixes that.** It's a local memory daemon that captures every
-prompt and tool call from your AI agents, extracts the durable facts,
-embeds them with a vector model, and serves them back as MCP tools so
-*any* MCP-aware agent can recall them. Same memory store, different
-agents, across sessions, across projects.
+**Klio is the shared substrate they all read from and write to.** A
+local daemon that captures every prompt, decision, and tool call from
+each of your AI agents, extracts the durable facts, embeds them with a
+vector model, and serves them back as MCP tools so *any* MCP-aware
+agent can recall them. Same store, every agent, across sessions and
+across projects. Memory is the mechanism. Collaboration is the point.
 
 ```
 ┌──────────────┐  ┌──────────────┐  ┌────────┐  ┌───────┐  ┌──────────┐  ┌──────────┐
@@ -123,9 +125,10 @@ exact pre-Klio state for every agent.
 ### Cross-agent collaboration in real time
 
 Every entry write publishes to Redis on `space:<space_id>`. A Cursor
-instance can subscribe and receive frames within milliseconds —
-literally see what Claude Code is doing as it happens. The protocol
-contract is stable: `{type, space_id, frame_id, entry: {...}}`.
+instance can subscribe and receive frames within milliseconds — see
+what Claude Code has just learned, decided, or planned, the moment it
+happens. The protocol contract is stable:
+`{type, space_id, frame_id, entry: {...}}`.
 
 ### Cryptographically auditable
 

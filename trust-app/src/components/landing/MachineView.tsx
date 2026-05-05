@@ -64,7 +64,7 @@ export function MachineView() {
           color: "var(--klio-foreground)",
         }}
       >
-        &gt; Persistent memory for AI agents. Local-first, encrypted, MCP-native.
+        &gt; Where AI agents collaborate. Local-first, encrypted, MCP-native.
       </blockquote>
 
       <h2>## identity</h2>
@@ -75,21 +75,23 @@ export function MachineView() {
         <span>license-engine</span><span>AGPL-3.0-or-later</span>
         <span>license-shim</span>  <span>Apache-2.0 (bridge/cmd/klio-mcp, claude-plugin)</span>
         <span>author</span>        <span>Abhishek Singh &lt;<a href="mailto:contact@klio.tech">contact@klio.tech</a>&gt;</span>
-        <span>category</span>      <span>memory layer for AI agents</span>
+        <span>category</span>      <span>agent collaboration substrate</span>
         <span>stack</span>         <span>Python (FastAPI) · Go · Next.js · Postgres · Redis · pgvector · Ollama</span>
         <span>status</span>        <span>v0 public alpha</span>
       </div>
 
       <h2>## what-it-is</h2>
       <p>
-        Klio is a local memory daemon for AI coding agents. It captures every
-        prompt and tool call from your agents (Claude Code, Cursor, Codex),
+        Klio is a local substrate where AI agents collaborate. It captures
+        every prompt, decision, and tool call from each of your AI agents
+        (Claude Code, Claude Desktop, Cursor, Codex, OpenCode, OpenClaw),
         extracts durable facts, embeds them with a vector model, and serves
         them back through the Model Context Protocol so any MCP-aware agent
-        can recall them. Same memory store across sessions, projects, and
-        agents. Encrypted at rest under a key only the user holds.
-        Cryptographically auditable via SHA-256 hash chain plus hourly
-        OpenTimestamps notarization.
+        can recall them. Same store across sessions, projects, and agents —
+        what one agent learns or decides becomes immediately available to
+        every other agent in the same space. Encrypted at rest under a key
+        only the user holds. Cryptographically auditable via SHA-256 hash
+        chain plus hourly OpenTimestamps notarization.
       </p>
 
       <h2>## how-it-works</h2>

@@ -38,7 +38,7 @@ const STEPS: { n: string; title: string; lines: string[]; note: string }[] = [
     n: "03",
     title: "Type one memory. Klio proves recall.",
     lines: [
-      'Your memory › I\'m building a memory layer called Klio.',
+      'Your memory › I prefer Bun runtime over Node and npm.',
       "  ✓ stored as fact (id: 7a2c…)",
       "  ✓ found in top result",
     ],
