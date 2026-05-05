@@ -425,8 +425,7 @@ deployment.
 
 **Abhishek Singh** ·
 [@7hakurg](https://github.com/7hakurg) ·
-contact@klio.tech ·
-[oppla.ai](https://oppla.ai)
+contact@klio.tech
 
 Klio is a separate brand from [Vex](https://tryvex.dev) — the author's
 enterprise reliability product. Klio is consumer + B2B2C OSS; Vex is
