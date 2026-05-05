@@ -31,7 +31,18 @@ if (!["local", "public"].includes(TARGET)) {
 // targets (rare), update this list and document why.
 const FORBIDDEN = {
   // Local builds must not contain landing-only artefacts
-  local: ["MachineView", "HumanView", "ViewToggle", "(public)"],
+  local: [
+    "MachineView",
+    "HumanView",
+    "ViewToggle",
+    "(public)",
+    // Analytics is public-only: a local dashboard that phones home
+    // would betray the local-first promise. These strings only exist
+    // in components/landing/PublicAnalytics.tsx and must never appear
+    // in the local bundle.
+    "PublicAnalytics",
+    "googletagmanager",
+  ],
   // Public builds must not contain dashboard / local-only artefacts
   public: [
     "KLIO_LOCAL_USER_ID",
