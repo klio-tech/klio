@@ -37,6 +37,33 @@ class Settings(BaseSettings):
     embedding_dim: int | None = None
     extraction_model: str = "stub"
     ollama_api_base: str = "http://127.0.0.1:11434"
+    # ---------- Curator (v0.5.0) ----------
+    # Background async job inside this container that reads recent
+    # observations and synthesises memory/decision/plan/note entries
+    # from them. See docs/plans/2026-05-06-klio-curator-design.md.
+    #
+    # Disabled-by-config (`curator_enabled=false`) skips APScheduler
+    # registration in build_app's lifespan — no I/O, no DB rows.
+    curator_enabled: bool = True
+    # Tick interval. Default 1 hour; the npm `klio update curator`
+    # picker offers 1h / 4h / 24h / on-demand-only / disable.
+    curator_interval_secs: int = 3600
+    # Empty string means "fall back to extraction_model". The
+    # `effective_curator_model` property below resolves the fallback
+    # so call sites don't have to.
+    curator_model: str = ""
+    # How many observations the curator hands to FactExtractor per
+    # tick. Capped to keep LLM context reasonable; oversized backlogs
+    # drain over multiple ticks.
+    curator_batch_size: int = 50
+
+    @property
+    def effective_curator_model(self) -> str:
+        """Resolve `curator_model` against the extraction-model
+        fallback. Empty string → use the user's extraction model so
+        `klio init` only has to ask the model question once."""
+        return self.curator_model or self.extraction_model
+
     dedup_cosine_threshold: float = 0.92
     jwt_signing_key: str = "dev-only-secret-replace-me"
     # When set, embedding/extraction LLM calls can be routed through OpenRouter
