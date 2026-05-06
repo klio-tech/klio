@@ -82,6 +82,7 @@ import {
 } from "../engine.js";
 import { generateSigningKey, getOrCreateInstallId } from "../installId.js";
 import { allAdapters, type Adapter } from "../adapters/types.js";
+import { wireDetectedAgents } from "./wireAgents.js";
 import { prompt } from "../prompt.js";
 import {
   setupProvider,
@@ -682,10 +683,15 @@ async function runAdapterStep(state: {
   narrate(
     "Klio supports Claude Code, Claude Desktop (Chat + Cowork), Cursor, Codex, OpenCode, and OpenClaw — we patch each one's config to add the MCP server.",
   );
-  const detected = allAdapters().filter((a) => a.installed());
-  state.detectedAdapters = detected;
 
-  if (detected.length === 0) {
+  // Snapshot the detected adapters BEFORE handing off to the shared
+  // wire-agents helper so downstream Phase 4/5 steps that read
+  // `state.detectedAdapters` (e.g. trust-app dashboard wording) keep
+  // their input. The helper itself re-runs detection, but since
+  // `installed()` is a pure host-fs check the two readings agree.
+  state.detectedAdapters = allAdapters().filter((a) => a.installed());
+
+  if (state.detectedAdapters.length === 0) {
     writeLine("");
     writeLine(
       "    No MCP-capable agents found. Install Claude Code, Cursor, or",
@@ -696,51 +702,31 @@ async function runAdapterStep(state: {
     return;
   }
 
-  const foundNames = detected.map((a) => a.name()).join(", ");
-  const notFound = allAdapters().filter((a) => !a.installed());
-  writeLine("");
-  writeLine(`    Found:     ${foundNames}`);
-  if (notFound.length > 0) {
-    const skipNames = notFound.map((a) => a.name()).join(", ");
-    writeLine(`    Not found: ${skipNames} (skipping)`);
-  }
-  writeLine("");
+  // Delegate the detection + confirm + install loop to the shared
+  // helper so `klio update agents` runs the EXACT same flow. The
+  // helper handles the "Found / Not found / Wire all detected
+  // tools?" UI and per-adapter install with backups; init's
+  // responsibility shrinks to translating the result back into
+  // `state` for the downstream phases.
+  const result = await wireDetectedAgents({
+    bridgeContainer: BRIDGE_CONTAINER,
+    env: {},
+    log: writeLine,
+  });
 
-  // Use the re-prompting confirm (askConfirm) instead of a single
-  // shot prompt + isYes check. The 0.4.1 production bug let a user's
-  // memory text ("Abhishek Singh is good") get parsed as "no" and
-  // silently skip every adapter; askConfirm re-prompts on
-  // unrecognized input with a "please answer yes or no" hint so the
-  // user notices they typed at the wrong prompt.
-  const wireAll = await askConfirm(
-    prompt,
-    "Wire all detected tools?",
-    true,
-    writeLine,
-  );
-  if (!wireAll) {
+  if (result.skipped && result.configured.length === 0 && result.errored.length === 0) {
+    // Two paths land here: detection was empty (already handled
+    // above with init-specific copy), OR the user answered "no" at
+    // the confirm. Init wants the second case to print the recovery
+    // hint that update.ts can't (it'd be circular there).
     state.adaptersSkipped = true;
     writeLine("    Skipped — re-run `klio init` to wire them.");
     return;
   }
 
-  for (const adapter of detected) {
-    try {
-      await adapter.install({
-        bridgeContainer: BRIDGE_CONTAINER,
-        env: {},
-      });
-      state.adaptersConfigured.push(adapter.name());
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      state.adaptersErrored.push(`${adapter.name()}: ${msg}`);
-    }
-  }
-
-  if (state.adaptersConfigured.length > 0) {
-    writeLine(
-      `  ✓ ${state.adaptersConfigured.join(" + ")} connected`,
-    );
+  state.adaptersConfigured.push(...result.configured);
+  for (const e of result.errored) {
+    state.adaptersErrored.push(`${e.name}: ${e.message}`);
   }
 }
 

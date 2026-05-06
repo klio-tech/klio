@@ -9,13 +9,50 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 
 import { parseEnvFile } from "../src/envFile.js";
 import { runUpdate, parseUpdateTarget } from "../src/commands/update.js";
+
+
+type TestCtx = { after: (fn: () => void) => void };
+
+/**
+ * Redirect HOME (POSIX), USERPROFILE (Windows-via-os.homedir),
+ * APPDATA, and XDG_CONFIG_HOME to a fresh tmpdir so every adapter's
+ * `installed()` check resolves to false on this test process. Lets
+ * us drive the "no agents detected" branch of `runUpdateAgents`
+ * deterministically without relying on what's installed on the
+ * developer's machine.
+ */
+function withFakeHome(t: TestCtx): string {
+  const home = mkdtempSync(join(tmpdir(), "klio-updateagents-test-"));
+  const prev = {
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    APPDATA: process.env.APPDATA,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.APPDATA = home;
+  process.env.XDG_CONFIG_HOME = home;
+  t.after(() => {
+    process.env.HOME = prev.HOME;
+    process.env.USERPROFILE = prev.USERPROFILE;
+    process.env.APPDATA = prev.APPDATA;
+    process.env.XDG_CONFIG_HOME = prev.XDG_CONFIG_HOME;
+    try {
+      rmSync(home, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+  return home;
+}
 
 
 test("parseUpdateTarget recognises the three direct subcommands", () => {
@@ -196,3 +233,97 @@ test("runUpdate curator with custom model writes the typed string", async () => 
   );
   assert.equal(after.KLIO_CURATOR_INTERVAL_SECS, "3600");
 });
+
+
+// --- Agents-block tests -------------------------------------------
+
+
+/**
+ * Capture stdout into an array of chunks for prefix/substring
+ * assertions. No prompt automation here — when no adapters are
+ * detected, `wireDetectedAgents` returns before reading stdin, so
+ * we don't need the cursor-driven script harness from the curator
+ * tests.
+ */
+function captureStdout(): { stdout: Writable; chunks: string[] } {
+  const chunks: string[] = [];
+  const stdout = new Writable({
+    write(chunk, _enc, cb) {
+      chunks.push(chunk.toString());
+      cb();
+    },
+  });
+  return { stdout, chunks };
+}
+
+
+test(
+  "runUpdate agents prints the re-detection prologue (regression: not the stub)",
+  async (t) => {
+    // The most important guarantee for E3: the stub message
+    // "klio update agents: not yet implemented" no longer ships.
+    // Anyone reverting `runUpdateAgents` to the stub flunks this
+    // test immediately. We don't fake adapters here — even on a
+    // host with adapters installed, the prologue prints first.
+    withFakeHome(t);
+
+    const { stdout, chunks } = captureStdout();
+    // Empty stdin: if the test host happens to have an adapter,
+    // the confirm prompt's `askConfirm` will burn through five
+    // unrecognized retries and fall back to defaultYes. With our
+    // fake HOME no adapters are detected, so the prompt is never
+    // reached.
+    const stdin = new Readable({ read() {} });
+    stdin.push(null);
+
+    await runUpdate({
+      args: ["agents"],
+      stdin,
+      stdout,
+    });
+
+    const out = chunks.join("");
+    assert.ok(
+      out.includes("Re-detecting AI agents and re-wiring MCP configs"),
+      `expected the agents prologue, got:\n${out}`,
+    );
+    assert.ok(
+      !out.includes("not yet implemented"),
+      `runUpdateAgents must no longer print the v0.4.x stub:\n${out}`,
+    );
+  },
+);
+
+
+test(
+  "runUpdate agents on an empty host prints the install hint and exits cleanly",
+  async (t) => {
+    // No adapters detected ⇒ shared helper returns
+    // `{ skipped: true, configured: [], errored: [] }`. The agents
+    // block should render the "Install ... and re-run" copy rather
+    // than the "Skipped — re-run" copy (which only fires when the
+    // user declined a confirm — unreachable when there's nothing
+    // to confirm).
+    withFakeHome(t);
+
+    const { stdout, chunks } = captureStdout();
+    const stdin = new Readable({ read() {} });
+    stdin.push(null);
+
+    await runUpdate({
+      args: ["agents"],
+      stdin,
+      stdout,
+    });
+
+    const out = chunks.join("");
+    assert.ok(
+      out.includes("No supported AI agents detected"),
+      `expected the install hint on an empty host, got:\n${out}`,
+    );
+    assert.ok(
+      !out.includes("Skipped"),
+      `the empty-host branch must not print the declined-confirm copy:\n${out}`,
+    );
+  },
+);

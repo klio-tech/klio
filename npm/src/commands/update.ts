@@ -25,8 +25,23 @@ import {
   resolveComposeBin,
   type ComposeBin,
 } from "../docker.js";
+import { allAdapters } from "../adapters/types.js";
 import { mergeEnvFile, parseEnvFile } from "../envFile.js";
 import { prompt } from "../prompt.js";
+import {
+  wireDetectedAgents,
+  type WireAgentsResult,
+} from "./wireAgents.js";
+
+/**
+ * Container the bridge runs under — must match `BRIDGE_CONTAINER`
+ * in `init.ts`. Duplicated as a module-private constant rather
+ * than imported because exporting it from init.ts would drag the
+ * whole init module (and its transitive deps) into update's
+ * import graph; a future refactor that lifts the value into a
+ * shared `constants.ts` is cheap, but not in scope for E3.
+ */
+const BRIDGE_CONTAINER = "klio-bridge";
 
 
 export type UpdateTarget = "menu" | "curator" | "agents" | "provider" | "unknown";
@@ -297,10 +312,75 @@ function composeFileDir(filePath: string): string {
 }
 
 
-async function runUpdateAgents(_opts: UpdateOptions): Promise<void> {
-  process.stdout.write(
-    "klio update agents: not yet implemented (lands in v0.5.0 / Task E3).\n",
-  );
+/**
+ * `klio update agents` — re-run adapter detection and re-wire any
+ * detected AI agent's MCP config. Recovery path for users whose
+ * Phase 4 confirmation went sideways during init (the 0.4.1 bug
+ * where memory text typed at the prompt skipped every adapter).
+ *
+ * Delegates to `wireDetectedAgents`, the shared helper init's
+ * Phase 4 also calls — so any future hardening there (new adapter
+ * added to `allAdapters()`, tighter confirm UX) is picked up by
+ * this entry point automatically.
+ *
+ * Engine restart is intentionally NOT performed: re-wiring touches
+ * agent-side config files (~/.claude.json, ~/.cursor/mcp.json,
+ * etc.), not engine env vars. The user reloads their agent on the
+ * next session and the new MCP server entry is live.
+ */
+async function runUpdateAgents(opts: UpdateOptions): Promise<void> {
+  const out = opts.stdout ?? process.stdout;
+  const log = (line: string): void => {
+    out.write(line + "\n");
+  };
+
+  out.write("\nRe-detecting AI agents and re-wiring MCP configs…\n");
+
+  const result = await wireDetectedAgents({
+    bridgeContainer: BRIDGE_CONTAINER,
+    env: {},
+    log,
+  });
+
+  if (result.skipped && result.configured.length === 0 && result.errored.length === 0) {
+    if (allAdaptersUndetected(result)) {
+      out.write(
+        "\n  No supported AI agents detected. Install Claude Code, Claude Desktop, " +
+          "Cursor, Codex, OpenCode, or OpenClaw and re-run `klio update agents`.\n",
+      );
+      return;
+    }
+    out.write("\n  Skipped — re-run `klio update agents` to wire them.\n");
+    return;
+  }
+
+  for (const e of result.errored) {
+    process.stderr.write(`! ${e.name}: ${e.message}\n`);
+  }
+  out.write("\n  Done.\n");
+}
+
+
+/**
+ * Distinguish the two "skipped" sub-cases. `wireDetectedAgents`
+ * returns `skipped: true, configured: [], errored: []` for BOTH
+ * "no agents on host" and "user said no at the confirm". The
+ * difference matters for the recovery copy: an empty host gets
+ * the install hint; a declined confirm gets the re-run hint.
+ *
+ * The signal we use: when the helper printed nothing past the
+ * leading newline (no "Found:" line), the host is empty. Our
+ * proxy is `result.errored.length === 0` AND `result.configured
+ * .length === 0` — already true at the call site — combined with
+ * the absence of any `notFound` info we could re-derive. To keep
+ * this honest without re-running detection, we re-check
+ * `allAdapters()` ourselves.
+ */
+function allAdaptersUndetected(_: WireAgentsResult): boolean {
+  // Re-check directly. `installed()` is a pure host-fs lookup so
+  // running it twice in this command is cheap and avoids leaking
+  // detection state through the helper's return shape.
+  return allAdapters().every((a) => !a.installed());
 }
 
 
