@@ -88,6 +88,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		// the next successful ListSpaces.
 		go d.subscribeAccessibleSpaces(ctx)
 	}
+	// v0.6.0: periodic auto-update check against the npm registry.
+	// `runUpdaterTicker` short-circuits if KLIO_AUTO_UPDATE=off.
+	go d.runUpdaterTicker(ctx)
 	return d.server.Run(ctx)
 }
 
