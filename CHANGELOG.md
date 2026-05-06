@@ -4,6 +4,37 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] — 2026-05-07
+
+### Fixed
+
+- **`klio init` is now actually idempotent.** Pre-0.5.2, the engine's
+  `provision_user` always inserted a fresh `User()` row even when
+  called with an `install_id` it had seen before — every re-run of
+  `klio init` silently created a brand-new anonymous account, and
+  the user's prior memories became invisible (still in Postgres,
+  just under a user_id no longer wired to the bridge or trust-app).
+  0.5.2 makes `provision_user` look up the agent by `install_id`
+  first; if found, it mints a fresh access+refresh token for the
+  existing user and returns the same `(user_id, agent_id,
+  default_space_id)` tuple instead of creating a duplicate.
+- Users on 0.5.1 and earlier who already accumulated duplicate
+  users will recover automatically: the next `klio init` after
+  upgrading picks the OLDEST user with their install_id (the one
+  with the longest write history, hence the most memories) and
+  rebinds the bridge to them.
+- Audit log records whether a `user.provision` call created a new
+  user or re-found an existing one via `metadata.created` (true /
+  false), so operators can tell the two paths apart from the chain.
+
+### Known follow-ups (not in 0.5.2)
+
+- A `UNIQUE(install_id)` constraint on `agents` — requires a
+  back-fill migration to merge any pre-existing duplicates first.
+- A cleanup script that merges duplicate users by install_id (for
+  operators who care; the auto-recovery above means most users
+  won't notice the duplicates exist).
+
 ## [0.5.1] — 2026-05-07
 
 ### Fixed
