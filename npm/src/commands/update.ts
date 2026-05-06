@@ -15,6 +15,8 @@
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
+import { spawn } from "node:child_process";
+
 import { runtimeDir } from "../compose.js";
 import {
   CURATOR_CADENCE_LABELS,
@@ -100,6 +102,42 @@ export type UpdateOptions = {
    * touches readline or the network.
    */
   runProviderStep?: () => Promise<ProviderResult>;
+  /**
+   * Override the `--run-now` exec hook. When `klio update curator
+   * --run-now` is invoked, the npm CLI asks the bridge container
+   * (which holds the user's bearer token — the npm side does not)
+   * to issue `POST /v1/curator/run-now` against the engine on the
+   * user's behalf. The contract: `docker exec klio-bridge klio
+   * curator run-now`.
+   *
+   * Tests inject a stub that records the argv and returns a
+   * synthetic `RunNowResult` so the suite never shells out to
+   * docker. Production callers leave this undefined and get the
+   * default `dockerExecCapture` implementation that wraps
+   * `docker exec` and returns the captured streams.
+   *
+   * Why a hook seam rather than calling `dockerExec` directly: the
+   * existing `dockerExec` helper THROWS on non-zero exit. The
+   * run-now path needs to inspect a non-zero exit (bridge too old,
+   * engine still booting, etc.) and degrade gracefully — so it
+   * needs the captured-streams shape, not the throw-on-failure one.
+   */
+  runNowExec?: (argv: readonly string[]) => Promise<RunNowResult>;
+};
+
+
+/**
+ * Captured-streams result from a `--run-now` docker exec. Unlike
+ * the rest of the npm package's docker helpers (which throw on
+ * non-zero exit), the run-now path treats failure as a soft signal:
+ * the env file is already saved and the engine is already restarted
+ * before this hook fires, so a docker-exec failure is purely an
+ * informational miss for the user — not a fatal CLI error.
+ */
+export type RunNowResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
 };
 
 
@@ -274,6 +312,128 @@ async function runUpdateCurator(opts: UpdateOptions): Promise<void> {
 
   const restart = opts.restartEngine ?? defaultRestartEngine(opts);
   await restart();
+
+  // `--run-now` post-step. Strictly opt-in: the flag has to be in
+  // argv. We intentionally do NOT trigger this on every curator
+  // update — the schedule picker offering "every 5 minutes" already
+  // gives the user a near-immediate cadence. The flag is for the
+  // "disabled" / "on-demand" cadence, where the timer won't fire and
+  // the user wants the queued backlog to drain right now.
+  if (hasRunNowFlag(opts.args)) {
+    await invokeRunNow(opts, out);
+  }
+}
+
+
+/** True iff `--run-now` appears anywhere in the residual argv. */
+function hasRunNowFlag(args: readonly string[]): boolean {
+  // Accept the GNU-long form only. Single-letter shortcuts are
+  // reserved — `--run-now` is unambiguous and self-documenting in
+  // shell history (`klio update curator --run-now`).
+  return args.includes("--run-now");
+}
+
+
+/**
+ * Drive the `--run-now` post-step. Calls into the user-supplied or
+ * default `runNowExec`, prints a short status line, and intentionally
+ * SWALLOWS non-zero exits — by the time this runs, the env was saved
+ * and the engine was re-created, so the curator settings change has
+ * fully landed. A failed run-now is a convenience miss, not a fatal
+ * CLI error.
+ *
+ * Failure modes we expect:
+ *   - Bridge container's `klio` binary is too old to recognise the
+ *     `curator run-now` subcommand (typical first time the user
+ *     upgrades the npm package without bouncing the bridge).
+ *   - Engine still booting after the `up -d --no-deps engine` we
+ *     just issued (the bridge will get a connection refused). The
+ *     user can re-issue the flag manually after a few seconds, or
+ *     wait for the timer if they re-enabled cadence.
+ *   - Auth token revoked / expired. The bridge prints a token error
+ *     to stderr; we surface it verbatim so the user can act.
+ *
+ * In all cases the contract is: the run-now is best-effort, never
+ * blocks success of the underlying settings change.
+ */
+async function invokeRunNow(
+  opts: UpdateOptions,
+  out: Writable,
+): Promise<void> {
+  out.write("\n  Triggering an immediate curator pass…\n");
+
+  const exec = opts.runNowExec ?? defaultRunNowExec();
+  const argv = ["exec", "-i", BRIDGE_CONTAINER, "klio", "curator", "run-now"];
+
+  let result: RunNowResult;
+  try {
+    result = await exec(argv);
+  } catch (err) {
+    // Hook itself blew up — surface the message but don't fail the
+    // command. Treat the same as a non-zero exit.
+    const message = err instanceof Error ? err.message : String(err);
+    out.write(`  ! Run-now skipped: ${message}\n`);
+    return;
+  }
+
+  if (result.exitCode === 0) {
+    // Stream the bridge's stdout straight through; the bridge prints
+    // a one-line summary suitable for human consumption.
+    const trimmed = result.stdout.trim();
+    if (trimmed.length > 0) {
+      out.write(`  ${trimmed}\n`);
+    } else {
+      out.write("  ✓ Run-now dispatched.\n");
+    }
+    return;
+  }
+
+  // Non-zero exit. Most common case is the bridge being older than
+  // the npm package — the bridge will print "unknown subcommand:
+  // curator" to stderr. We surface a single, friendly line so the
+  // user knows what happened without a stack trace.
+  const stderr = result.stderr.trim();
+  if (stderr.length > 0) {
+    out.write(
+      `  ! Run-now skipped (bridge exit ${result.exitCode}): ${stderr}\n`,
+    );
+  } else {
+    out.write(`  ! Run-now skipped (bridge exit ${result.exitCode}).\n`);
+  }
+}
+
+
+/**
+ * Default `runNowExec` — wraps `docker exec` and returns the
+ * captured streams. Distinct from `dockerExec` in `../docker.ts`
+ * which throws on non-zero exit; the run-now path needs to inspect
+ * a non-zero exit (bridge too old, engine still booting) and
+ * degrade gracefully.
+ */
+function defaultRunNowExec(): (
+  argv: readonly string[],
+) => Promise<RunNowResult> {
+  return (argv) =>
+    new Promise<RunNowResult>((resolve, reject) => {
+      const child = spawn("docker", [...argv], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+      // `error` fires when the binary itself can't be spawned (e.g.
+      // docker not on PATH). Caller's try/catch turns that into a
+      // friendly skip line.
+      child.on("error", reject);
+      child.on("exit", (code) => {
+        resolve({ exitCode: code ?? 0, stdout, stderr });
+      });
+    });
 }
 
 

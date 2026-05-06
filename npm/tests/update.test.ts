@@ -235,6 +235,139 @@ test("runUpdate curator with custom model writes the typed string", async () => 
 });
 
 
+// --- Curator --run-now flag tests ---------------------------------
+//
+// E5 wires the `--run-now` flag onto `klio update curator`. After
+// the env file is rewritten and the engine is re-created, the flag
+// asks the bridge container to invoke `POST /v1/curator/run-now`
+// against the engine on the user's behalf. The bridge already holds
+// the user's bearer token; the npm CLI does not. So the contract is:
+// `docker exec klio-bridge klio curator run-now`. The bridge gains
+// that subcommand in a follow-up task; the npm side is written
+// against the contract and degrades gracefully if the bridge is too
+// old to recognise the subcommand.
+
+
+test("runUpdate curator with --run-now triggers the bridge run-now invocation", async () => {
+  const envPath = tmpEnvFile(
+    "KLIO_CURATOR_ENABLED=true\nKLIO_CURATOR_INTERVAL_SECS=3600\nKLIO_CURATOR_MODEL=\n",
+  );
+
+  // Schedule = 1 (hourly), model = 1 (extraction fallback).
+  const { stdin, stdout } = captureStreams(["1", "1"]);
+
+  const restartOrder: string[] = [];
+  const runNowCalls: string[][] = [];
+
+  await runUpdate({
+    args: ["curator", "--run-now"],
+    envPath,
+    stdin,
+    stdout,
+    restartEngine: async () => {
+      restartOrder.push("restart");
+    },
+    runNowExec: async (argv) => {
+      restartOrder.push("run-now");
+      runNowCalls.push([...argv]);
+      return { exitCode: 0, stdout: '{"runs_count":1,"facts_synthesized":4}\n', stderr: "" };
+    },
+  });
+
+  // The flag fires the run-now exec exactly once, AFTER the restart.
+  assert.equal(runNowCalls.length, 1);
+  assert.deepEqual(restartOrder, ["restart", "run-now"]);
+  // The argv we pass to the exec helper must target the bridge
+  // container with the `klio curator run-now` subcommand contract.
+  // We don't pin the exact argv shape (the helper owns the docker
+  // exec wrapping) but we assert the intent: container + subcommand.
+  const argv = runNowCalls[0];
+  assert.ok(
+    argv.includes("klio-bridge"),
+    `expected the bridge container in argv, got: ${JSON.stringify(argv)}`,
+  );
+  assert.ok(
+    argv.includes("curator") && argv.includes("run-now"),
+    `expected the curator run-now subcommand in argv, got: ${JSON.stringify(argv)}`,
+  );
+});
+
+
+test("runUpdate curator without --run-now does NOT invoke the bridge", async () => {
+  const envPath = tmpEnvFile(
+    "KLIO_CURATOR_ENABLED=true\nKLIO_CURATOR_INTERVAL_SECS=3600\nKLIO_CURATOR_MODEL=\n",
+  );
+
+  // Schedule = 1, model = 1 — same shape as the --run-now test, but
+  // we omit the flag from argv. The run-now hook MUST stay untouched.
+  const { stdin, stdout } = captureStreams(["1", "1"]);
+
+  let runNowCalls = 0;
+  await runUpdate({
+    args: ["curator"],
+    envPath,
+    stdin,
+    stdout,
+    restartEngine: async () => {},
+    runNowExec: async () => {
+      runNowCalls += 1;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  });
+
+  assert.equal(
+    runNowCalls,
+    0,
+    "the run-now hook must only fire when --run-now is in argv",
+  );
+});
+
+
+test(
+  "runUpdate curator --run-now reports a friendly message when the bridge is too old",
+  async () => {
+    // Simulates `docker exec klio-bridge klio curator run-now`
+    // failing because the bridge binary doesn't yet recognise the
+    // subcommand. The npm CLI must NOT throw — env was already
+    // saved, the engine was already re-created, and the user's
+    // settings change has fully landed. The run-now is a best-effort
+    // convenience; failure here is logged, not fatal.
+    const envPath = tmpEnvFile(
+      "KLIO_CURATOR_ENABLED=true\nKLIO_CURATOR_INTERVAL_SECS=3600\nKLIO_CURATOR_MODEL=\n",
+    );
+
+    const { stdin, stdout, chunks } = captureStreams(["1", "1"]);
+
+    let runNowCalls = 0;
+    // Intentionally non-zero exit + a stderr that mimics the bridge
+    // CLI's "unknown subcommand" copy.
+    await runUpdate({
+      args: ["curator", "--run-now"],
+      envPath,
+      stdin,
+      stdout,
+      restartEngine: async () => {},
+      runNowExec: async () => {
+        runNowCalls += 1;
+        return {
+          exitCode: 2,
+          stdout: "",
+          stderr: "unknown subcommand: curator\n",
+        };
+      },
+    });
+
+    assert.equal(runNowCalls, 1);
+    const out = chunks.join("");
+    // The user must see a clear message; the env file save still happened.
+    assert.ok(
+      out.includes("run-now") || out.includes("Run-now"),
+      `expected a run-now status line in stdout, got:\n${out}`,
+    );
+  },
+);
+
+
 // --- Agents-block tests -------------------------------------------
 
 
