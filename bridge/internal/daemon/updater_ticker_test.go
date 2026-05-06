@@ -43,8 +43,14 @@ func (r *recordingRunner) Run(ctx context.Context, name string, args []string, l
 	return r.err
 }
 
+// newDeps builds a deps struct backed by a tempdir state path and a
+// stub registry. The mode is NOT a deps field anymore — `runUpdateOnce`
+// re-reads `KLIO_AUTO_UPDATE` on every tick, so callers must set the
+// env (via `t.Setenv`) before invoking. Passing the mode here so the
+// helper does the env wiring keeps individual tests readable.
 func newDeps(t *testing.T, current string, mode string, latest string, runner *recordingRunner) *updateTickerDeps {
 	t.Helper()
+	t.Setenv("KLIO_AUTO_UPDATE", mode)
 	dir := t.TempDir()
 	return &updateTickerDeps{
 		statePath:      filepath.Join(dir, "update-state.json"),
@@ -55,7 +61,6 @@ func newDeps(t *testing.T, current string, mode string, latest string, runner *r
 		}},
 		runner: runner,
 		log:    io.Discard,
-		mode:   mode,
 	}
 }
 
@@ -111,6 +116,21 @@ func TestRunUpdateOnceNotifyMode(t *testing.T) {
 	}
 }
 
+func TestRunUpdateOnceOffMode(t *testing.T) {
+	// Off-mode tick is a hard no-op: no http call, no state read,
+	// no runner invocation. The state file should not even exist
+	// after the tick.
+	runner := &recordingRunner{}
+	deps := newDeps(t, "0.6.0", UpdateModeOff, "0.6.1", runner)
+	runUpdateOnce(context.Background(), deps)
+	if runner.calls != 0 {
+		t.Errorf("off mode must NOT invoke apply; calls=%d", runner.calls)
+	}
+	if _, err := os.Stat(deps.statePath); !os.IsNotExist(err) {
+		t.Errorf("off mode must NOT write state; stat err=%v", err)
+	}
+}
+
 func TestRunUpdateOnceCheckFailureWritesError(t *testing.T) {
 	runner := &recordingRunner{}
 	deps := newDeps(t, "0.6.0", UpdateModeApply, "ignored", runner)
@@ -137,6 +157,34 @@ func TestRunUpdateOnceApplyFailureWritesError(t *testing.T) {
 	}
 	if state.LastAppliedVersion != "" {
 		t.Errorf("LastAppliedVersion must NOT advance on failure; got %q", state.LastAppliedVersion)
+	}
+}
+
+// TestRunUpdateOnceMidTickModeChange proves a `klio configure
+// auto-update off` flip is observed on the very next tick — not on
+// daemon restart. This is the regression test for the v0.6.0
+// finding: previously `mode` was captured into deps at goroutine
+// startup, so a running daemon kept applying updates after the mode
+// flipped to off.
+func TestRunUpdateOnceMidTickModeChange(t *testing.T) {
+	runner := &recordingRunner{}
+	deps := newDeps(t, "0.6.0", UpdateModeApply, "0.6.1", runner)
+
+	// Tick 1: apply mode + newer version → pull + up = 2 runner calls.
+	runUpdateOnce(context.Background(), deps)
+	if runner.calls != 2 {
+		t.Fatalf("tick 1 (apply): expected 2 runner calls, got %d", runner.calls)
+	}
+
+	// Mid-run: operator runs `klio configure auto-update off`. The
+	// env var changes; deps stays the same; the running daemon must
+	// observe the new mode on the very next tick.
+	t.Setenv("KLIO_AUTO_UPDATE", UpdateModeOff)
+
+	// Tick 2: off mode → no NEW runner calls (count must stay at 2).
+	runUpdateOnce(context.Background(), deps)
+	if runner.calls != 2 {
+		t.Errorf("tick 2 (off): runner.calls must stay at 2 (mid-run flip ignored?); got %d", runner.calls)
 	}
 }
 

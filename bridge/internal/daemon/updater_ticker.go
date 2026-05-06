@@ -31,6 +31,14 @@ const defaultUpdateStatePath = "/host/.klio/update-state.json"
 // updateTickerDeps factors out the side-effect surfaces so tests can
 // stub them. Production wires httpClient = updater.DefaultClient(),
 // runner = updater.ExecRunner{}, log = a slog-bound writer.
+//
+// Note: the auto-update mode is intentionally NOT stored on deps.
+// `runUpdateOnce` re-reads it from the env on every tick so a
+// `klio configure auto-update <mode>` change takes effect on the
+// next tick without a daemon restart. The ticker interval IS still
+// captured at startup because changing it would require recreating
+// the time.Ticker — that's a follow-up; per-tick mode re-read is
+// sufficient to make the configure command non-silent.
 type updateTickerDeps struct {
 	statePath      string
 	composePath    string
@@ -38,7 +46,6 @@ type updateTickerDeps struct {
 	httpClient     updater.HTTPGetter
 	runner         updater.Runner
 	log            io.Writer
-	mode           string
 
 	// mu guards the in-flight flag to prevent overlapping ticks.
 	mu       sync.Mutex
@@ -54,16 +61,16 @@ type updateTickerDeps struct {
 //     `docker compose pull && up -d --no-deps engine bridge trust-app`.
 //  4. Persists the outcome back to the state file.
 //
-// `mode == "off"` short-circuits before the ticker is even constructed —
-// the daemon never spins up a goroutine for it. `mode == "notify"`
-// performs steps 1+2+4 but skips the compose invocation.
+// The mode is re-read from the env on every tick inside `runUpdateOnce`
+// so `klio configure auto-update <mode>` takes effect on the next tick
+// without a daemon restart. When the operator flips to `off`, the
+// ticker keeps firing but each tick observes the off mode and returns
+// immediately — a tiny, predictable cost in exchange for a one-line
+// fix that makes the configure command non-silent.
+//
+// We still consult the mode at startup for the boot-time log line so
+// operators can see what mode the daemon woke up in.
 func (d *Daemon) runUpdaterTicker(ctx context.Context) {
-	mode := readUpdateMode()
-	if mode == UpdateModeOff {
-		slog.Info("updater: KLIO_AUTO_UPDATE=off, ticker disabled")
-		return
-	}
-
 	interval := readUpdateCheckInterval()
 	deps := &updateTickerDeps{
 		statePath:      readUpdateStatePath(),
@@ -72,10 +79,9 @@ func (d *Daemon) runUpdaterTicker(ctx context.Context) {
 		httpClient:     updater.DefaultClient(),
 		runner:         updater.ExecRunner{},
 		log:            slogWriter{},
-		mode:           mode,
 	}
 	slog.Info("updater: starting ticker",
-		"mode", mode,
+		"mode", readUpdateMode(),
 		"interval_secs", interval,
 		"state_path", deps.statePath,
 		"current_version", deps.currentVersion,
@@ -107,6 +113,18 @@ func (d *Daemon) runUpdaterTicker(ctx context.Context) {
 // per-user lock hold up — but the auto-updater takes its own lock
 // here for belt-and-suspenders.
 func runUpdateOnce(ctx context.Context, deps *updateTickerDeps) {
+	// Re-read the mode every tick so a `klio configure auto-update`
+	// flip takes effect on the next tick without a daemon restart.
+	// Storing it on deps would freeze the value at goroutine startup —
+	// the bug fixed here in v0.6.0.
+	mode := readUpdateMode()
+	if mode == UpdateModeOff {
+		// Off-mode tick is a no-op. The ticker keeps running so a
+		// later flip back to apply/notify is observed promptly; the
+		// per-tick cost is one env read.
+		return
+	}
+
 	deps.mu.Lock()
 	if deps.inFlight {
 		deps.mu.Unlock()
@@ -153,7 +171,7 @@ func runUpdateOnce(ctx context.Context, deps *updateTickerDeps) {
 	// 2. Newer version available.
 	state.LastKnownAvailableVersion = latest
 
-	if deps.mode != UpdateModeApply {
+	if mode != UpdateModeApply {
 		// Notify-only: persist + return. Dashboard banner reads
 		// last_known_available_version.
 		_ = updater.Write(deps.statePath, state)

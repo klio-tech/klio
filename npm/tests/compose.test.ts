@@ -158,3 +158,28 @@ test("compose body mounts ~/.klio ro into trust-app so the dashboard can read up
     /trust-app:[\s\S]*?volumes:[\s\S]*?\$\{HOME\}\/\.klio:\/host\/\.klio:ro/,
   );
 });
+
+test("compose body wires KLIO_AUTO_UPDATE et al into the bridge service environment", () => {
+  const body = renderComposeBody({
+    imageTag: "0.6.0",
+    jwtSigningKey: "k",
+    embeddingModel: "ollama/nomic-embed-text",
+    extractionModel: "ollama/qwen2.5:7b-instruct",
+  });
+  // The bridge service block must contain all five updater env vars.
+  // Without these, the bridge daemon falls back to defaults and
+  // `klio configure auto-update` is silently a no-op.
+  for (const v of [
+    "KLIO_AUTO_UPDATE",
+    "KLIO_UPDATE_CHECK_INTERVAL_SECS",
+    "KLIO_UPDATE_STATE_PATH",
+    "KLIO_BRIDGE_VERSION",
+    "KLIO_COMPOSE_PATH",
+  ]) {
+    assert.match(
+      body,
+      new RegExp(`bridge:[\\s\\S]*?${v}:[\\s\\S]*?\\$\\{${v}:-`),
+      `${v} must be set on bridge service with a default`,
+    );
+  }
+});

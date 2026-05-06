@@ -5,8 +5,12 @@
  * Two targets in v0.6.0:
  *   `klio configure auto-update {apply, notify, off}`
  *     - Writes KLIO_AUTO_UPDATE=<mode> into ~/.klio/.env via
- *       mergeEnvFile. The bridge's updater ticker reads this on
- *       its next iteration; no restart required.
+ *       mergeEnvFile. Compose's automatic env-file pickup propagates
+ *       the value into the bridge container the next time the
+ *       container is (re)created — and inside the bridge daemon, the
+ *       updater ticker re-reads `KLIO_AUTO_UPDATE` on every tick, so
+ *       a running daemon picks up the new value on its next 6h tick
+ *       (or sooner if the container restarts for any reason).
  *
  *   `klio configure email <addr>`
  *     - Posts the email to POST /v1/auth/login-link on the local

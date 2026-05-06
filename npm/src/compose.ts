@@ -281,6 +281,20 @@ services:
       KLIO_API_URL: http://engine:8000
       KLIO_REDIS_URL: redis://redis:6379/0
       KLIO_LOG_LEVEL: \${KLIO_LOG_LEVEL:-INFO}
+      # Auto-updater plumbing — Compose does NOT auto-propagate host
+      # env vars into containers; they MUST be declared here for the
+      # bridge daemon's updater ticker to see them. Without these,
+      # \`klio configure auto-update\` writes to ~/.klio/.env but the
+      # bridge container keeps falling back to the in-binary defaults
+      # (apply / 6h / /host/.klio/update-state.json). Defaults below
+      # mirror \`readUpdateMode\` / \`readUpdateCheckInterval\` /
+      # \`readUpdateStatePath\` / \`readCurrentVersion\` /
+      # \`readComposePath\` in bridge/internal/daemon/updater_ticker.go.
+      KLIO_AUTO_UPDATE: \${KLIO_AUTO_UPDATE:-apply}
+      KLIO_UPDATE_CHECK_INTERVAL_SECS: \${KLIO_UPDATE_CHECK_INTERVAL_SECS:-21600}
+      KLIO_UPDATE_STATE_PATH: \${KLIO_UPDATE_STATE_PATH:-/host/.klio/update-state.json}
+      KLIO_BRIDGE_VERSION: \${KLIO_BRIDGE_VERSION:-0.0.0-dev}
+      KLIO_COMPOSE_PATH: \${KLIO_COMPOSE_PATH:-/host/.klio/docker-compose.yml}
     volumes:
       - klio-bridge-data:/data
       # ~/.claude is read-only because the daemon only walks session
