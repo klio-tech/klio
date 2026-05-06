@@ -8,9 +8,10 @@
 import { init } from "./commands/init.js";
 import { status } from "./commands/status.js";
 import { down, uninstall } from "./commands/down.js";
+import { runUpdate } from "./commands/update.js";
 import { packageVersion } from "./version.js";
 
-const SUBCOMMANDS = ["init", "status", "down", "uninstall", "version"] as const;
+const SUBCOMMANDS = ["init", "status", "down", "uninstall", "update", "version"] as const;
 type Subcommand = (typeof SUBCOMMANDS)[number];
 
 async function main(): Promise<void> {
@@ -49,6 +50,9 @@ async function main(): Promise<void> {
       return;
     case "uninstall":
       await uninstall();
+      return;
+    case "update":
+      await runUpdate({ args: rest });
       return;
     case "version":
       process.stdout.write(packageVersion() + "\n");
