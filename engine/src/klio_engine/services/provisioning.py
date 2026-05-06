@@ -13,18 +13,30 @@ Returns plaintext refresh_token (the API key handed back to the daemon).
 
 Idempotency: if the supplied `install_id` matches an existing agent,
 the new-user path is skipped entirely and the caller gets a fresh
-refresh+access token bound to the OLDEST existing user with that
-install_id (the one with the longest write history). This honours
-the npm CLI's documented "klio init is idempotent — re-running gets
-the same user back" contract. Pre-0.5.2 silently violated it,
-creating a new anonymous user every run; users observed it as "all
-my memories are gone".
+refresh+access token bound to the existing user with that install_id
+that has the most entries (with oldest-`created_at` as the tie-break).
+This honours the npm CLI's documented "klio init is idempotent —
+re-running gets the same user back" contract.
+
+Pre-0.5.2 silently violated the contract, creating a new anonymous
+user every run; users observed it as "all my memories are gone".
+0.5.2 introduced re-find-by-install_id but used `created_at ASC` as
+the tiebreaker for the (rare but real) case where multiple users
+share an install_id from earlier broken-init runs — which is the
+WRONG signal: the oldest user is often a stale misconfigured account
+(e.g. one whose Default Space got pinned to
+`openrouter/openai/text-embedding-3-small` from compose.ts's
+hardcoded fallback before the picker was correctly threaded
+through), and re-binding the bridge to it loops users back into the
+500 they just upgraded to escape. 0.5.3 follows the data instead:
+"the user with the most accumulated history is who this install_id
+'really' belongs to."
 """
 import hashlib
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from klio_engine.audit.writer import write_audit_event
@@ -32,6 +44,7 @@ from klio_engine.auth.refresh import issue_refresh_token
 from klio_engine.config import Settings
 from klio_engine.crypto.kms_client import KMSClient
 from klio_engine.models.agent import Agent, AgentKind
+from klio_engine.models.entry import Entry
 from klio_engine.models.permission import Permission, PermissionScope
 from klio_engine.models.space import Space
 from klio_engine.models.user import User
@@ -61,20 +74,40 @@ async def provision_user(
     """Run the full provisioning flow.
 
     If `install_id` already exists in the agents table, the existing
-    user (oldest by `agents.created_at`) is re-bound to a fresh
-    refresh token and returned. No new User/Agent/Space rows are
-    created in that case.
+    user with the highest entry count (tie-break: oldest by
+    `agents.created_at`) is re-bound to a fresh refresh token and
+    returned. No new User/Agent/Space rows are created in that case.
     """
     # 0. Idempotency: if this install_id has been seen before, return
-    # the oldest existing user as a fresh session. The bridge always
-    # calls with agent_kind="klio-bridge", and that's the only code
-    # path that exercises this re-find today, so we key on
+    # the user with the most entries as a fresh session. The bridge
+    # always calls with agent_kind="klio-bridge", and that's the only
+    # code path that exercises this re-find today, so we key on
     # install_id alone. (A defensive future tightening could add
     # `Agent.kind == agent_kind` to the WHERE clause.)
+    #
+    # Ordering rationale (0.5.3): the highest entry count is the
+    # closest signal to "the user whose memories this install_id
+    # actually owns." Pre-0.5.3 we ordered by `created_at ASC`, but
+    # in production a single install_id sometimes had multiple users
+    # — e.g. the user re-ran `klio init` after an earlier broken
+    # init pinned the Default Space to an unreachable embedding
+    # model, then accumulated memories under the recovered (newer)
+    # user. Picking the oldest re-credentialed the bridge against
+    # the broken pin and recall/write 500'd. Picking the
+    # most-entries user instead lets the bridge follow the data.
+    # `created_at ASC` is retained only as the tie-break, which
+    # collapses to the trivial 0.5.2 behaviour when both users have
+    # zero entries (the fresh-install case).
+    entry_count = (
+        select(func.count(Entry.id))
+        .where(Entry.user_id == Agent.user_id)
+        .correlate(Agent)
+        .scalar_subquery()
+    )
     existing = await session.execute(
         select(Agent)
         .where(Agent.install_id == install_id)
-        .order_by(Agent.created_at.asc())
+        .order_by(entry_count.desc(), Agent.created_at.asc())
         .limit(1)
     )
     existing_agent = existing.scalar_one_or_none()

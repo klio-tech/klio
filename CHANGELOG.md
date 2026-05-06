@@ -4,6 +4,29 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.3] — 2026-05-07
+
+### Fixed
+
+- **`klio init` dedup tiebreaker now picks the user with the most
+  entries, not the oldest by `created_at`.** 0.5.2's dedup landed
+  the right CONCEPT (re-find by install_id instead of always
+  inserting) but the wrong tiebreaker for the recovery path: the
+  oldest user with a given install_id is often a stale broken
+  account from an early init run (e.g., one whose Default Space
+  got pinned to `openrouter/openai/text-embedding-3-small` from
+  compose.ts's hardcoded fallback before the picker was properly
+  threaded through). Picking that user re-credentialed the bridge
+  against an unreachable embedding pin and every subsequent recall
+  / write 500'd.
+- 0.5.3 picks the user with the highest entry count, falling back
+  to oldest `created_at` for the trivial zero-entry tie. This
+  follows the data: "the user with the most accumulated history is
+  who this install_id 'really' belongs to."
+- For users on 0.5.2 who hit the openrouter-pinned-stale-space
+  500 loop on the bridge: just upgrade and re-run `klio init`.
+  No SQL surgery needed.
+
 ## [0.5.2] — 2026-05-07
 
 ### Fixed
