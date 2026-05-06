@@ -1,18 +1,18 @@
-// `klio init` — the immersive 5-phase onboarding flow.
+// `klio init` — the immersive 6-phase onboarding flow.
 //
 // Phases (left-to-right is strict; each phase depends on the
 // artifacts of the one before):
 //
-//   Phase 1 / 5  ·  Preflight
+//   Phase 1 / 6  ·  Preflight
 //     - Check Docker is installed and running.
 //
-//   Phase 2 / 5  ·  Connect a model
+//   Phase 2 / 6  ·  Connect a model
 //     - Provider menu (OpenRouter / Ollama / Custom).
 //     - Provider-specific setup loop (key + model picks + probes).
 //     - The Ollama branch may fall back to OpenRouter on detection
 //       failure; the fallback is a control-flow signal, not an error.
 //
-//   Phase 3 / 5  ·  Bring up your stack
+//   Phase 3 / 6  ·  Bring up your stack
 //     - Generate ~/.klio/runtime/{docker-compose.yml, .env}.
 //     - Pull container images.
 //     - Start postgres + redis + engine + bridge.
@@ -20,14 +20,21 @@
 //     - Provision an account against the local engine (HTTP).
 //     - Persist credentials inside the bridge container.
 //
-//   Phase 4 / 5  ·  Wire your AI agents
+//   Phase 4 / 6  ·  Wire your AI agents
 //     - Detect installed agents; explicit [Y/n] confirm.
 //     - Patch Claude Code + Cursor + Codex configs (if confirmed).
 //     - Refresh env file with the user/agent IDs (so trust-app's
 //       auto-login works on first boot).
 //     - Bring up the trust-app dashboard.
 //
-//   Phase 5 / 5  ·  Prove it works
+//   Phase 5 / 6  ·  Memory curator
+//     - One yes/no prompt with sane defaults (enabled, hourly,
+//       model inherits from extraction). The new phase slots in
+//       BEFORE the wow moment so the very first observations the
+//       user creates in Phase 6 are already eligible for curation.
+//     - Persist KLIO_CURATOR_* env vars into ~/.klio/.env.
+//
+//   Phase 6 / 6  ·  Prove it works
 //     - Wow moment — write a memory + recall it back to prove the loop.
 //
 //   (post) Community asks — star + Discord.
@@ -42,7 +49,7 @@
 // steps and stall the long compose-pull behind an interactive prompt
 // the user can't see coming.
 
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { renderBanner } from "../banner.js";
@@ -103,6 +110,10 @@ import { runWowMoment } from "../wow.js";
 import { runCommunityAsks } from "../community.js";
 import { openUrl } from "../openUrl.js";
 import { spawn } from "node:child_process";
+import {
+  curatorEnvLines,
+  type CuratorConfig,
+} from "../curatorConfig.js";
 
 const ENGINE_URL = "http://127.0.0.1:8000";
 const TRUST_APP_URL = "http://127.0.0.1:3000";
@@ -123,6 +134,33 @@ const BRIDGE_SERVICE = "bridge";
 // daemon container is what actually performs reads/writes; the
 // npm package is just the orchestrator that put it there.
 const PROVISION_AGENT_KIND = "klio-bridge";
+
+/**
+ * Phase 5 default — what `klio init` writes when the user hits
+ * Enter at the curator prompt. Hourly cadence is the design
+ * default, and an empty model string tells the engine to fall
+ * back to whichever extraction model the user picked in Phase 2.
+ *
+ * Held as a const so a future flag (e.g. --curator-cadence) can
+ * override the default without diverging from the prompt UI.
+ */
+const DEFAULT_CURATOR_CONFIG: CuratorConfig = {
+  enabled: true,
+  cadence: "hourly",
+  model: "",
+};
+
+/**
+ * Phase 5 disabled — what `klio init` writes when the user
+ * answers "n" at the curator prompt. The cadence slug "disabled"
+ * is the recognized off state; `klio update curator` reading this
+ * later will surface "off" in its picker.
+ */
+const DISABLED_CURATOR_CONFIG: CuratorConfig = {
+  enabled: false,
+  cadence: "disabled",
+  model: "",
+};
 
 export type InitOptions = {
   /**
@@ -218,7 +256,7 @@ export async function init(opts: InitOptions): Promise<void> {
     refreshToken?: string;
     /**
      * JWT access token minted by the immediate-after-provision
-     * exchange. Used by Phase 5's wow-moment HTTP calls
+     * exchange. Used by Phase 6's wow-moment HTTP calls
      * (`/v1/spaces/<id>/entries`, `/v1/spaces/<id>/recall`) which
      * `require_auth` on the engine side decodes as a JWT.
      */
@@ -227,20 +265,29 @@ export async function init(opts: InitOptions): Promise<void> {
     adaptersConfigured: string[];
     adaptersErrored: string[];
     adaptersSkipped: boolean;
+    /**
+     * Phase 5 / Memory curator. Set after the user answers the one
+     * yes/no prompt. Read by the Phase 5 env-refresh step (it appends
+     * the curator block to ~/.klio/.env via `curatorEnvLines`).
+     * Defaults baked in so a user who hits Enter gets curator on +
+     * hourly + extraction-model fallback — see DEFAULT_CURATOR_CONFIG.
+     */
+    curatorConfig: CuratorConfig;
   } = {
     signingKey: existingSigningKey(envFile) ?? generateSigningKey(),
     detectedAdapters: [],
     adaptersConfigured: [],
     adaptersErrored: [],
     adaptersSkipped: false,
+    curatorConfig: { ...DEFAULT_CURATOR_CONFIG },
   };
 
   const installID = getOrCreateInstallId();
 
   // -----------------------------------------------------------------
-  // Phase 1 / 5 · Preflight
+  // Phase 1 / 6 · Preflight
   // -----------------------------------------------------------------
-  phaseHeader(1, 5, "Preflight");
+  phaseHeader(1, 6, "Preflight");
   await runSteps([
     {
       title: "Checking Docker is installed and running",
@@ -257,27 +304,27 @@ export async function init(opts: InitOptions): Promise<void> {
   phaseRecap("Phase 1 done.");
 
   // -----------------------------------------------------------------
-  // Phase 2 / 5 · Connect a model
+  // Phase 2 / 6 · Connect a model
   // -----------------------------------------------------------------
-  phaseHeader(2, 5, "Connect a model");
+  phaseHeader(2, 6, "Connect a model");
   if (!opts.skipProvider) {
     state.provider = await runProviderPhase();
   }
   phaseRecap("Phase 2 done.");
 
   // -----------------------------------------------------------------
-  // Phase 3 / 5 · Bring up your stack
+  // Phase 3 / 6 · Bring up your stack
   // -----------------------------------------------------------------
-  phaseHeader(3, 5, "Bring up your stack");
+  phaseHeader(3, 6, "Bring up your stack");
   await runSteps(buildStackSteps(opts, state, engineURL, composeFile, installID));
   phaseRecap(
     "Phase 3 done — engine, bridge, postgres, redis all running.",
   );
 
   // -----------------------------------------------------------------
-  // Phase 4 / 5 · Wire your AI agents
+  // Phase 4 / 6 · Wire your AI agents
   // -----------------------------------------------------------------
-  phaseHeader(4, 5, "Wire your AI agents");
+  phaseHeader(4, 6, "Wire your AI agents");
   await runAdapterStep(state);
   await runSteps(buildPostWireSteps(state, envFile));
   for (const e of state.adaptersErrored) {
@@ -286,9 +333,23 @@ export async function init(opts: InitOptions): Promise<void> {
   phaseRecap("Phase 4 done — your agents are now talking to Klio.");
 
   // -----------------------------------------------------------------
-  // Phase 5 / 5 · Prove it works
+  // Phase 5 / 6 · Memory curator
   // -----------------------------------------------------------------
-  phaseHeader(5, 5, "Prove it works");
+  // ONE yes/no prompt — defaults baked in (enabled, hourly,
+  // extraction-model fallback). The cadence + model picker lives
+  // behind `klio update curator`, called out in the intro copy so
+  // a power-user knows where to find it.
+  //
+  // Slots in BEFORE the wow moment so the very first observation
+  // the user creates in Phase 6 is already eligible for curation.
+  phaseHeader(5, 6, "Memory curator");
+  await runCuratorStep(state, envFile);
+  phaseRecap("Phase 5 done.");
+
+  // -----------------------------------------------------------------
+  // Phase 6 / 6 · Prove it works
+  // -----------------------------------------------------------------
+  phaseHeader(6, 6, "Prove it works");
   if (!opts.skipWow && state.accessToken && state.defaultSpaceID) {
     await runWowStep({
       engineURL,
@@ -296,7 +357,7 @@ export async function init(opts: InitOptions): Promise<void> {
       spaceID: state.defaultSpaceID,
     });
   }
-  phaseRecap("Phase 5 done.");
+  phaseRecap("Phase 6 done.");
 
   // Community asks — runs after the wow moment, when the user has
   // just experienced the value, so a Yes is meaningful.
@@ -328,7 +389,8 @@ function writeWelcomePreview(): void {
   process.stdout.write("    2) Connect a model      — pick OpenRouter / Ollama / Custom\n");
   process.stdout.write("    3) Bring up your stack  — pull images, start services\n");
   process.stdout.write("    4) Wire your AI agents  — Claude Code / Cursor / Codex\n");
-  process.stdout.write("    5) Prove it works       — write a memory, recall it back\n");
+  process.stdout.write("    5) Memory curator       — turn observations into durable memories\n");
+  process.stdout.write("    6) Prove it works       — write a memory, recall it back\n");
   process.stdout.write("\n");
 }
 
@@ -679,6 +741,74 @@ async function runAdapterStep(state: {
     writeLine(
       `  ✓ ${state.adaptersConfigured.join(" + ")} connected`,
     );
+  }
+}
+
+/**
+ * Phase 5 — Memory curator. ONE yes/no prompt with sane defaults
+ * baked in. Persists the chosen `CuratorConfig` into `state` and
+ * appends the matching env block to ~/.klio/.env so the engine
+ * picks it up on its next start.
+ *
+ * The full cadence + model picker lives behind
+ * `klio update curator` — keeping init.ts a single prompt avoids
+ * onboarding fatigue.
+ *
+ * Defaults: enabled, hourly, model inherits from extraction.
+ *
+ * Re-prompts on garbage input via `askConfirm` (the 0.4.2 hardening
+ * that protects against the "user typed memory text at the prompt"
+ * class of bug).
+ */
+async function runCuratorStep(
+  state: { curatorConfig: CuratorConfig },
+  envFile: string,
+): Promise<void> {
+  process.stdout.write("\n");
+  narrate(
+    "Klio's curator reads your observations every hour and turns durable facts into proper memories — so recall keeps working even when agents forget to save things explicitly.",
+  );
+  writeLine("");
+  writeLine("    Defaults: every hour · uses your extraction model.");
+  writeLine("    Run `klio update curator` to change.");
+  writeLine("");
+
+  const enable = await askConfirm(
+    prompt,
+    "Enable?",
+    true,
+    writeLine,
+  );
+
+  state.curatorConfig = enable
+    ? { ...DEFAULT_CURATOR_CONFIG }
+    : { ...DISABLED_CURATOR_CONFIG };
+
+  // Append the curator env block to ~/.klio/.env. Phase 4's
+  // env-refresh step already (over)wrote the file with the
+  // provider + identity lines via `writeEnvFile`; here we
+  // append-only so a re-run of init re-emits a single curator
+  // block at the bottom (the previous block is overwritten by
+  // Phase 4's full re-write at the start, so we can't accumulate
+  // duplicates across runs).
+  appendFileSyncSafe(envFile, curatorEnvLines(state.curatorConfig));
+
+  writeLine(enable ? "    ✓ enabled" : "    ✓ skipped");
+}
+
+/**
+ * Append text to an env file, creating the file with mode 0600 if
+ * it doesn't yet exist. The file is written by `writeEnvFile`
+ * earlier in the flow (Phase 3 + Phase 4), so under normal init
+ * conditions it always exists when we get here — but the safety
+ * net keeps the helper independent of upstream order so a
+ * future repair flow can call Phase 5 in isolation.
+ */
+function appendFileSyncSafe(path: string, content: string): void {
+  if (existsSync(path)) {
+    appendFileSync(path, content, { mode: 0o600 });
+  } else {
+    writeFileSync(path, content, { mode: 0o600 });
   }
 }
 

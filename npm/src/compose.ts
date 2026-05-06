@@ -249,6 +249,14 @@ services:
       # a registry-known model — the engine resolves the dim from its
       # static EMBEDDING_MODELS table in that case.
       KLIO_EMBEDDING_DIM: \${KLIO_EMBEDDING_DIM}
+      # Memory curator — Phase 6 of \`klio init\` writes these into
+      # ~/.klio/.env. The defaults (\`:-true\`, \`:-3600\`, \`:-\`) keep
+      # the engine sensible even when an older install's env file
+      # predates Phase 6 (curator on, hourly cadence, falls back to
+      # the extraction model). Run \`klio update curator\` to change.
+      KLIO_CURATOR_ENABLED: \${KLIO_CURATOR_ENABLED:-true}
+      KLIO_CURATOR_INTERVAL_SECS: \${KLIO_CURATOR_INTERVAL_SECS:-3600}
+      KLIO_CURATOR_MODEL: \${KLIO_CURATOR_MODEL:-}
       KLIO_DEV_KMS_PATH: /var/lib/klio/dev-kms.key
       KLIO_LOG_LEVEL: \${KLIO_LOG_LEVEL:-INFO}
     volumes:
