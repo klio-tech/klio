@@ -16,6 +16,7 @@ import {
 } from "../src/curatorConfig.js";
 import { askConfirm } from "../src/confirm.js";
 import { renderComposeBody } from "../src/compose.js";
+import { runEmailClaim } from "../src/email.js";
 
 test("init is exported as a callable", () => {
   assert.equal(typeof init, "function");
@@ -177,4 +178,191 @@ test("compose body declares KLIO_CURATOR_* env vars on the engine service", () =
     /KLIO_CURATOR_MODEL:\s*\$\{KLIO_CURATOR_MODEL:-\}/,
     "curator-model defaults to blank (engine falls back to extraction model)",
   );
+});
+
+// ---------------------------------------------------------------------
+// Phase 6 / 6 · Email-claim sub-step (D2)
+// ---------------------------------------------------------------------
+//
+// The Phase 6 email-claim sub-prompt runs at the very end of init —
+// after the wow-moment's recall confirms. The user can hit Enter to
+// skip, or type an email which triggers POST /v1/auth/login-link.
+// The sub-step is non-blocking: any failure path (skip, garbage,
+// HTTP 5xx) returns control cleanly to init without aborting.
+//
+// We test the orchestrator (`runEmailClaim` in `src/email.ts`) rather
+// than driving `init()` end-to-end. Driving init() would require a
+// live Docker stack + engine; the orchestrator carries every behaviour
+// the new sub-step is responsible for (header copy, prompt, validate,
+// POST, retry-on-garbage). Mirrors the wow.test.ts pattern, where the
+// `runWowMoment` orchestrator is the unit under test rather than the
+// init.ts caller.
+
+test("init Phase 6 email sub-step: skip (empty input) completes init cleanly", async () => {
+  // User just hits enter. The prompt module substitutes the default
+  // ("skip") on empty input, but we simulate the full empty-string
+  // path here — the orchestrator must treat both the same way.
+  let fetchCalls = 0;
+  const fetchFn = (async () => {
+    fetchCalls += 1;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  const result = await runEmailClaim({
+    engineURL: "http://127.0.0.1:8000",
+    promptFn: async () => "",
+    log: () => {},
+    fetchFn,
+  });
+
+  assert.equal(result.kind, "skipped");
+  assert.equal(fetchCalls, 0, "no /v1/auth/login-link POST on skip");
+});
+
+test("init Phase 6 email sub-step: literal 'skip' input is treated as a skip", async () => {
+  // The default placeholder is the word "skip" — a curious user who
+  // types it literally must land on the same no-op path. Belt-and-
+  // braces against a future change to the prompt's default-handling
+  // semantics.
+  let fetchCalls = 0;
+  const fetchFn = (async () => {
+    fetchCalls += 1;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  const result = await runEmailClaim({
+    engineURL: "http://127.0.0.1:8000",
+    promptFn: async () => "skip",
+    log: () => {},
+    fetchFn,
+  });
+
+  assert.equal(result.kind, "skipped");
+  assert.equal(fetchCalls, 0);
+});
+
+test("init Phase 6 email sub-step: valid email triggers POST /v1/auth/login-link", async () => {
+  const captured: { url?: string; body?: string; method?: string } = {};
+  const fetchFn = (async (
+    input: RequestInfo | URL,
+    initOpts?: RequestInit,
+  ): Promise<Response> => {
+    captured.url = String(input);
+    captured.body = String(initOpts?.body ?? "");
+    captured.method = initOpts?.method;
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  const result = await runEmailClaim({
+    engineURL: "http://127.0.0.1:8000",
+    promptFn: async () => "abhi@example.com",
+    log: () => {},
+    fetchFn,
+  });
+
+  assert.equal(result.kind, "sent");
+  assert.equal(captured.url, "http://127.0.0.1:8000/v1/auth/login-link");
+  assert.equal(captured.method, "POST");
+  assert.match(captured.body || "", /"email":\s*"abhi@example\.com"/);
+});
+
+test("init Phase 6 email sub-step: garbage input re-prompts up to 3 times then skips", async () => {
+  // User types non-emails three times in a row. The orchestrator
+  // must (a) call promptFn three times, (b) emit a hint between
+  // attempts, (c) NEVER call fetch, and (d) return skipped so init
+  // can continue.
+  const replies = ["foo", "bar", "baz"];
+  let promptCalls = 0;
+  let fetchCalls = 0;
+  const promptFn = async () => {
+    const r = replies[promptCalls];
+    promptCalls += 1;
+    return r ?? "";
+  };
+  const fetchFn = (async () => {
+    fetchCalls += 1;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const lines: string[] = [];
+
+  const result = await runEmailClaim({
+    engineURL: "http://127.0.0.1:8000",
+    promptFn,
+    log: (line) => lines.push(line),
+    fetchFn,
+  });
+
+  assert.equal(result.kind, "skipped");
+  assert.equal(promptCalls, 3, "must re-prompt up to the 3-retry cap");
+  assert.equal(fetchCalls, 0, "no POST on garbage-only input");
+  // At least one hint line must reference the "email or skip" guidance
+  // so the user knows how to opt out without typing more garbage.
+  const hint = lines.find((l) => /email or \[skip\]/.test(l));
+  assert.ok(hint, "must emit the email-or-skip hint at least once");
+});
+
+test("init Phase 6 email sub-step: HTTP failure during link send doesn't abort init", async () => {
+  // Engine returns 500. The orchestrator must surface a clean
+  // diagnostic (no stack trace, no throw) and return so init can
+  // print "Klio is ready." regardless. Email is OPTIONAL — never a
+  // gating step.
+  const fetchFn = (async () => {
+    return new Response("internal error", { status: 500 });
+  }) as typeof fetch;
+  const lines: string[] = [];
+
+  const result = await runEmailClaim({
+    engineURL: "http://127.0.0.1:8000",
+    promptFn: async () => "abhi@example.com",
+    log: (l) => lines.push(l),
+    fetchFn,
+  });
+
+  assert.equal(result.kind, "send_failed");
+  if (result.kind === "send_failed") {
+    assert.equal(result.status, 500);
+    assert.equal(result.email, "abhi@example.com");
+  }
+  // The user-facing message must reference the fallback (configure
+  // email) so the user knows they can retry later, plus the HTTP
+  // status so a power-user can diagnose.
+  const joined = lines.join("\n");
+  assert.match(joined, /500/);
+  assert.match(joined, /klio configure email/);
+});
+
+test("init Phase 6 email sub-step: trailing slashes on engineURL are stripped", async () => {
+  // Defensive: callers may pass either http://host:8000 or
+  // http://host:8000/ — both must produce the same login-link URL.
+  let url: string | undefined;
+  const fetchFn = (async (input: RequestInfo | URL): Promise<Response> => {
+    url = String(input);
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  await runEmailClaim({
+    engineURL: "http://127.0.0.1:8000///",
+    promptFn: async () => "user@example.com",
+    log: () => {},
+    fetchFn,
+  });
+
+  assert.equal(url, "http://127.0.0.1:8000/v1/auth/login-link");
+});
+
+test("InitOptions accepts emailPromptFn + emailFetchFn DI seams", () => {
+  // Compile-time assertion: tests + future repair flows wire fakes
+  // through the InitOptions struct. If either field disappears or
+  // changes shape, the type system will fail this build.
+  const opts: InitOptions = {
+    imageTag: "0.6.0",
+    skipProvider: true,
+    skipWow: true,
+    skipCommunity: true,
+    emailPromptFn: async () => "",
+    emailFetchFn: (async () =>
+      new Response("{}", { status: 200 })) as typeof fetch,
+  };
+  assert.equal(typeof opts.emailPromptFn, "function");
+  assert.equal(typeof opts.emailFetchFn, "function");
 });

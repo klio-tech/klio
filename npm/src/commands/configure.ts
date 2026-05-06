@@ -21,6 +21,7 @@
 import { join } from "node:path";
 
 import { runtimeDir } from "../compose.js";
+import { looksLikeEmail, sendLoginLink } from "../email.js";
 import { mergeEnvFile } from "../envFile.js";
 
 
@@ -154,6 +155,13 @@ function isValidMode(s: unknown): s is AutoUpdateMode {
  * round-trip. The engine's pydantic[email] validator is the source
  * of truth — anything that passes our regex still gets re-validated
  * server-side.
+ *
+ * Both `looksLikeEmail` and the underlying POST helper live in
+ * `../email.js` because `klio init` Phase 6's email-claim sub-step
+ * shares the same wire format and the same client-side validator.
+ * Keeping a single source of truth for the regex + URL shape means
+ * a future tweak (e.g. an additional engine endpoint, a different
+ * validator) lands in both flows together.
  */
 async function runConfigureEmail(opts: ConfigureOptions): Promise<void> {
   const email = opts.args[1];
@@ -166,16 +174,10 @@ async function runConfigureEmail(opts: ConfigureOptions): Promise<void> {
   }
   const engineURL = opts.engineURL ?? DEFAULT_ENGINE_URL;
   const fetchImpl = opts.fetchFn ?? fetch;
-  const url = engineURL.replace(/\/+$/, "") + "/v1/auth/login-link";
-  const res = await fetchImpl(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email }),
-  });
+  const res = await sendLoginLink(email, engineURL, fetchImpl);
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
     process.stderr.write(
-      `klio configure email: HTTP ${res.status} from engine\n${text.trim()}\n`,
+      `klio configure email: HTTP ${res.status} from engine\n${res.text.trim()}\n`,
     );
     process.exit(1);
     return;
@@ -183,15 +185,4 @@ async function runConfigureEmail(opts: ConfigureOptions): Promise<void> {
   process.stdout.write(
     `✓ Magic link sent to ${email}. Click it to claim your account.\n`,
   );
-}
-
-
-/**
- * Permissive email shape check — catches obvious typos so the user
- * gets a fast local error rather than a 422 round-trip. The engine's
- * pydantic[email] validator runs server-side and is the source of
- * truth for what's actually accepted.
- */
-function looksLikeEmail(s: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }

@@ -88,6 +88,7 @@ import { prompt } from "../prompt.js";
 import { prefixModel, prefixEmbeddingModel } from "../modelRouting.js";
 import { askConfirm } from "../confirm.js";
 import { runWowMoment } from "../wow.js";
+import { runEmailClaim } from "../email.js";
 import { runCommunityAsks } from "../community.js";
 import { openUrl } from "../openUrl.js";
 import {
@@ -180,6 +181,34 @@ export type InitOptions = {
    * need the explanatory text. Defaults to false.
    */
   quiet?: boolean;
+  /**
+   * Skip the Phase 6 email-claim sub-prompt entirely. Provided so
+   * non-interactive runs (CI smoke tests) don't hang on the
+   * email/skip prompt when stdin isn't a TTY. The default
+   * onboarding flow always runs the sub-step — email is optional,
+   * never blocking, so leaving it on by default costs nothing for
+   * a real user and gives them the chance to opt in.
+   */
+  skipEmailClaim?: boolean;
+  /**
+   * Override the readline-backed prompt for Phase 6's email
+   * sub-step. Tests inject a scripted async function; production
+   * leaves this undefined and falls back to the standard `prompt`
+   * helper. Mirrors the DI shape used by `runWowStep`.
+   */
+  emailPromptFn?: (opts: {
+    message: string;
+    default?: string;
+  }) => Promise<string>;
+  /**
+   * Override the global `fetch` used by the Phase 6 email sub-step
+   * to call `/v1/auth/login-link`. Production leaves this undefined
+   * and uses the runtime fetch; tests pass a recording stub. Note
+   * that this is a separate seam from the wow-moment's fetch — the
+   * two HTTP surfaces are independent and a test that wants to drive
+   * both must wire each one.
+   */
+  emailFetchFn?: typeof fetch;
 };
 
 /**
@@ -328,6 +357,21 @@ export async function init(opts: InitOptions): Promise<void> {
       engineURL,
       accessToken: state.accessToken,
       spaceID: state.defaultSpaceID,
+    });
+  }
+
+  // Email-claim sub-step (D2). Slots in at the END of Phase 6 so the
+  // user has just experienced the wow moment when we ask — at which
+  // point the value proposition is concrete enough that "stay in the
+  // loop" is a meaningful ask, not a cold sign-up form. The sub-step
+  // is non-blocking: skip / garbage / 5xx all return cleanly without
+  // aborting init. Email is OPTIONAL and asynchronous (link
+  // verification happens whenever the user clicks the magic link).
+  if (!opts.skipEmailClaim) {
+    await runEmailClaimStep({
+      engineURL,
+      promptFn: opts.emailPromptFn,
+      fetchFn: opts.emailFetchFn,
     });
   }
   phaseRecap("Phase 6 done.");
@@ -731,6 +775,51 @@ async function runWowStep(args: {
       await prompt({ message: "", default: " " });
     },
   });
+}
+
+/**
+ * Run the Phase 6 email-claim sub-prompt. Wraps the readline-backed
+ * `prompt` helper so `runEmailClaim` doesn't have to know about the
+ * underlying I/O machinery. Tests bypass this wrapper and call
+ * `runEmailClaim` directly with scripted promptFn + fetchFn (see
+ * init.test.ts).
+ *
+ * The promptFn / fetchFn overrides on `InitOptions` exist so a
+ * future repair flow that drives `init()` end-to-end (without a
+ * TTY but with a populated stack) can still feed the sub-step
+ * without touching the real readline stream. Production leaves both
+ * undefined and gets the standard interactive flow.
+ *
+ * The sub-step is wrapped in a try/catch as a final safety net: a
+ * truly unexpected throw out of `runEmailClaim` (e.g. fetch dies
+ * because the engine container crashed mid-prompt) MUST NOT abort
+ * init. Email is optional. We surface the error inline and continue.
+ */
+async function runEmailClaimStep(args: {
+  engineURL: string;
+  promptFn?: (opts: { message: string; default?: string }) => Promise<string>;
+  fetchFn?: typeof fetch;
+}): Promise<void> {
+  const promptFn =
+    args.promptFn ??
+    ((o: { message: string; default?: string }) =>
+      prompt({ message: o.message, default: o.default }));
+  try {
+    await runEmailClaim({
+      engineURL: args.engineURL,
+      promptFn,
+      log: writeLine,
+      fetchFn: args.fetchFn,
+    });
+  } catch (err) {
+    // Final safety net — `runEmailClaim` is designed to never throw
+    // on user-input branches, but a hard fetch failure (DNS, ECONNREFUSED)
+    // can still propagate. We log + continue rather than aborting init.
+    const message = err instanceof Error ? err.message : String(err);
+    writeLine(
+      `  ! Email claim skipped (${message}) — try \`klio configure email <addr>\` later.`,
+    );
+  }
 }
 
 // `isYes` was the v0.4.1 single-shot helper that collapsed any
