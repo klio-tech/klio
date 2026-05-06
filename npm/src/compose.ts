@@ -286,6 +286,11 @@ services:
       # ~/.claude is read-only because the daemon only walks session
       # JSONL files for backfill — no writes to host config.
       - \${HOME}/.claude:/host/.claude:ro
+      # NEW v0.6.0 — bridge writes ~/.klio/update-state.json from the
+      # auto-updater ticker (~/.klio is the host's klio runtime dir,
+      # already used for the compose file and .env). Engine + trust-app
+      # read the same file via the same mount.
+      - \${HOME}/.klio:/host/.klio:rw
     restart: unless-stopped
 
   trust-app:
@@ -303,6 +308,11 @@ services:
       KLIO_LOCAL_DEV: "1"
       KLIO_LOCAL_USER_ID: \${KLIO_LOCAL_USER_ID}
       KLIO_LOCAL_AGENT_ID: \${KLIO_LOCAL_AGENT_ID}
+    volumes:
+      # NEW v0.6.0 — read-only mount of ~/.klio so the dashboard's
+      # server-side handler can read update-state.json for the
+      # update-status surface.
+      - \${HOME}/.klio:/host/.klio:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

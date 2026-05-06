@@ -129,3 +129,32 @@ test("compose body's KLIO_OLLAMA_API_BASE is overridable by the operator", () =>
     "default must be expressed as ${KLIO_OLLAMA_API_BASE:-...} so an operator can override",
   );
 });
+
+test("compose body mounts ~/.klio rw into bridge so the updater can write update-state.json", () => {
+  const body = renderComposeBody({
+    imageTag: "0.6.0",
+    jwtSigningKey: "k",
+    embeddingModel: "ollama/nomic-embed-text",
+    extractionModel: "ollama/qwen2.5:7b-instruct",
+  });
+  // Bridge service block must mount the host's ~/.klio at /host/.klio.
+  // Use a multi-line regex: the ~/.klio mount must appear inside the
+  // bridge: service block specifically, not somewhere unrelated.
+  assert.match(
+    body,
+    /bridge:[\s\S]*?volumes:[\s\S]*?\$\{HOME\}\/\.klio:\/host\/\.klio:rw/,
+  );
+});
+
+test("compose body mounts ~/.klio ro into trust-app so the dashboard can read update-state.json", () => {
+  const body = renderComposeBody({
+    imageTag: "0.6.0",
+    jwtSigningKey: "k",
+    embeddingModel: "ollama/nomic-embed-text",
+    extractionModel: "ollama/qwen2.5:7b-instruct",
+  });
+  assert.match(
+    body,
+    /trust-app:[\s\S]*?volumes:[\s\S]*?\$\{HOME\}\/\.klio:\/host\/\.klio:ro/,
+  );
+});
