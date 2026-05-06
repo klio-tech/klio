@@ -198,7 +198,7 @@ you through provider + model selection, detects every supported AI
 agent on your machine, and patches each one's MCP config. ~30 seconds
 on a warm Docker, ~2 min on a cold first run.
 
-The five interactive phases:
+The six interactive phases:
 
 | Phase                     | What happens                                                       |
 |---------------------------|--------------------------------------------------------------------|
@@ -206,7 +206,21 @@ The five interactive phases:
 | 2. Provider pick          | OpenRouter (recommended), Ollama (fully local), or custom OpenAI-compatible. |
 | 3. Model probe            | One-token test request validates the key + model before committing. |
 | 4. Agent wiring           | All six adapters detect → backup → patch each agent's MCP config.   |
-| 5. Wow moment             | You type one memory, the CLI proves recall before exiting.          |
+| 5. Memory curator         | One Y/n prompt enables the background synthesis job (defaults: on, hourly). |
+| 6. Wow moment             | You type one memory, the CLI proves recall before exiting.          |
+
+After install, you can change any of these settings without re-running
+`init`:
+
+```bash
+npx @klio-tech/klio update            # four-option picker
+npx @klio-tech/klio update curator    # re-prompt schedule + model only
+npx @klio-tech/klio update agents     # re-run adapter detection + wiring
+npx @klio-tech/klio update provider   # change LLM provider / model
+```
+
+Each block re-prompts only its own slice and restarts only the
+engine container.
 
 Open any patched agent (Claude Code, Claude Desktop, Cursor, Codex,
 OpenCode, OpenClaw) and ask:
@@ -266,6 +280,26 @@ exposes a stable hook surface.
 | `SubagentStop`     | Collects the subagent's final output for cross-agent recall. |
 | `Stop`             | Marks session end, flushes anything still in flight.          |
 
+### The memory curator (background synthesis)
+
+Mechanical capture (Claude Code's PostToolUse hook) is great at
+recording what happened, but it produces a stream of `observation`
+entries — raw tool calls — not the durable preferences, decisions, or
+plans that make recall valuable downstream. Historically that gap was
+filled by the user explicitly calling `remember` / `decide` / `plan`,
+which most users forget to do.
+
+The **Klio curator** closes that gap. It's a background async job
+inside `klio-engine` that wakes up on a schedule (hourly by default),
+reads the recent `kind=observation` entries for each user, hands them
+to the existing `FactExtractor`, and writes the synthesised
+`memory` / `decision` / `plan` / `note` entries back into the same
+default space. Per-user single-flight prevents overlap; the cursor is
+durably persisted in Postgres so a restart never re-processes the same
+window. Off-by-default in earlier versions, **on by default from 0.5.0
+onward** — the `klio init` flow now includes a one-keypress prompt to
+confirm. Tune later via `klio update curator`.
+
 ### Architecture at a glance
 
 ```
@@ -297,6 +331,7 @@ Postgres + pgvector                       entries (encrypted)
                                           users (envelope-key-wrapped)
                                           agents, permissions, access_requests
                                           audit_notarizations (OpenTimestamps proofs)
+                                          curator_state (per-user cursor + counters)
 
 Ollama (native or docker)                nomic-embed-text + qwen2.5:7b-instruct
 
@@ -378,10 +413,10 @@ deployment.
 
 | Component                  | State                                       |
 |----------------------------|---------------------------------------------|
-| Engine (FastAPI)           | ✅ 130 tests passing                         |
+| Engine (FastAPI)           | ✅ 178 tests passing                         |
 | Bridge daemon (Go)         | ✅ 14 packages, all tests passing            |
 | Trust-app (landing + dash) | ✅ typecheck + dual-target build green       |
-| `@klio-tech/klio` (npm)    | ✅ published; ~190 tests passing             |
+| `@klio-tech/klio` (npm)    | ✅ published; 256 tests passing              |
 | Claude Code adapter        | ✅ live in author's daily use                |
 | Claude Desktop adapter     | ✅ Chat + Cowork variants                    |
 | Cursor adapter             | ✅ shipped                                   |
@@ -393,6 +428,8 @@ deployment.
 | Pluggable embeddings       | ✅ 7 models supported, runtime-switch        |
 | Encrypted-at-rest          | ✅ AES-256-GCM + persistent local KMS        |
 | Audit hash chain           | ✅ tamper-evident                            |
+| Background curator         | ✅ shipped (0.5.0)                           |
+| `klio update` subcommand   | ✅ shipped (0.5.0)                           |
 | GitHub Actions CI          | ✅ engine + npm + container images           |
 | Klio Cloud (multi-tenant)  | ❌ private repo, planned                     |
 
@@ -407,6 +444,13 @@ deployment.
 - Windows-native adapter paths (today the adapters assume macOS / Linux
   XDG conventions; Windows users run via WSL2)
 - Per-project space auto-routing (cwd → space)
+- **Curator follow-ups:**
+  - `klio curator run-now` subcommand on the Go bridge (today the
+    `klio update curator --run-now` flag degrades gracefully when the
+    bridge is too old — see `CHANGELOG.md` Known limitations)
+  - Curator timeline view in the trust-app dashboard (per-tick stats,
+    last synthesised entries, quick re-run)
+  - Per-space curator config (different cadence + model per space)
 
 **v1.0 — public launch**
 
