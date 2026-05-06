@@ -223,3 +223,37 @@ async def test_curator_batch_size_limits_observation_read() -> None:
     assert reader.calls[0][2] == 25
     # Cursor advanced to the 25th observation's timestamp, NOT the 100th.
     assert store.cursors[user] == _ts(24)
+
+
+@pytest.mark.asyncio
+async def test_curator_single_flight_under_high_concurrency() -> None:
+    """50 concurrent run_once invocations for the same user must
+    result in exactly one extract+write pass. Empirical validation
+    that the per-user lock is race-free under realistic asyncio
+    scheduling, not just timing luck."""
+    import asyncio
+
+    user = uuid.uuid4()
+    obs = [_Obs(id=uuid.uuid4(), content="x", created_at=_ts(10))]
+    reader = _FakeObservationReader(obs)
+
+    class _SlowExtractor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def extract(self, transcript: str) -> list[ExtractedEntry]:
+            self.calls += 1
+            await asyncio.sleep(0.02)
+            return [ExtractedEntry(kind="memory", content="z", confidence=1)]
+
+    extractor = _SlowExtractor()
+    writer = _FakeWriter()
+    store = _FakeCursorStore()
+
+    c = Curator(reader=reader, extractor=extractor, writer=writer, store=store)
+    await asyncio.gather(*(
+        c.run_once(user_id=user, batch_size=10) for _ in range(50)
+    ))
+
+    assert extractor.calls == 1
+    assert len(writer.writes) == 1

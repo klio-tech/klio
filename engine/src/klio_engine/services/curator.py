@@ -97,6 +97,17 @@ class Curator:
         self, *, user_id: uuid.UUID, batch_size: int
     ) -> None:
         lock = self._lock_for(user_id)
+        # Single-flight per user: a tick that fires while a previous
+        # tick for the same user is still in flight is a no-op.
+        #
+        # The `if lock.locked(): return` pattern is TOCTOU-safe under
+        # asyncio because the event loop is single-threaded: there is
+        # no `await` between the `locked()` check and the `async with
+        # lock` acquire, so no other coroutine can run between them.
+        # A concurrent `run_once` for the same user enters this method
+        # only AFTER the first one has already entered the locked
+        # block (and hit its first await), at which point `locked()`
+        # returns True and the second call exits cleanly.
         if lock.locked():
             logger.info(
                 "curator.skip_concurrent", user_id=str(user_id)
