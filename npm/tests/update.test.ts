@@ -327,3 +327,245 @@ test(
     );
   },
 );
+
+
+// --- Provider-block tests -----------------------------------------
+
+
+test(
+  "runUpdate provider prints the re-run prologue (regression: not the stub)",
+  async () => {
+    // The most important guarantee for E4: the stub message
+    // "klio update provider: not yet implemented" no longer ships.
+    // Anyone reverting `runUpdateProvider` to the stub flunks this
+    // test immediately. We don't drive the picker here — the
+    // prologue prints BEFORE any prompt, so we can interrupt the
+    // flow at the first prompt by ending stdin (which causes the
+    // injected provider hook to throw a recognizable error we
+    // ignore in this regression assertion).
+    const envPath = tmpEnvFile(
+      [
+        "KLIO_JWT_SIGNING_KEY=sentinel-jwt",
+        "KLIO_OPENROUTER_API_KEY=sk-or-existing",
+        "",
+      ].join("\n"),
+    );
+
+    const { stdout, chunks } = captureStdout();
+    const stdin = new Readable({ read() {} });
+    stdin.push(null);
+
+    let restartCalls = 0;
+    try {
+      await runUpdate({
+        args: ["provider"],
+        envPath,
+        stdin,
+        stdout,
+        // Inject a stub that simulates the user cancelling at the
+        // very first menu — the prologue must already have printed
+        // by the time our hook is invoked.
+        runProviderStep: async () => {
+          throw new Error("test-cancel");
+        },
+        restartEngine: async () => {
+          restartCalls += 1;
+        },
+      });
+    } catch (err) {
+      // Swallow the synthetic cancellation — this test only cares
+      // about the prologue copy, not the full happy path.
+      assert.equal((err as Error).message, "test-cancel");
+    }
+
+    const out = chunks.join("");
+    assert.ok(
+      out.includes("Re-running provider setup"),
+      `expected the provider prologue, got:\n${out}`,
+    );
+    assert.ok(
+      !out.includes("not yet implemented"),
+      `runUpdateProvider must no longer print the v0.4.x stub:\n${out}`,
+    );
+    // Restart must NOT fire when the picker bails — the env wasn't
+    // rewritten, so a restart would only churn the engine for nothing.
+    assert.equal(restartCalls, 0);
+  },
+);
+
+
+test(
+  "runUpdate provider persists openrouter env vars and clears stale custom keys",
+  async () => {
+    // Seed a .env that LOOKS like a prior `klio init` left a custom
+    // endpoint configured. The provider re-run should overwrite the
+    // openrouter slot AND blank the now-stale custom slot so the
+    // engine doesn't keep dispatching custom requests.
+    const envPath = tmpEnvFile(
+      [
+        "KLIO_JWT_SIGNING_KEY=sentinel-jwt",
+        "KLIO_LOCAL_USER_ID=00000000-0000-0000-0000-000000000001",
+        "KLIO_OPENROUTER_API_KEY=",
+        "KLIO_CUSTOM_BASE_URL=https://stale.example.com/v1",
+        "KLIO_CUSTOM_API_KEY=stale-key",
+        "KLIO_EMBEDDING_MODEL=custom/old-embed",
+        "KLIO_EXTRACTION_MODEL=custom/old-chat",
+        "KLIO_EMBEDDING_DIM=512",
+        "",
+      ].join("\n"),
+    );
+
+    const { stdout } = captureStdout();
+    const stdin = new Readable({ read() {} });
+    stdin.push(null);
+
+    let restartCalls = 0;
+    await runUpdate({
+      args: ["provider"],
+      envPath,
+      stdin,
+      stdout,
+      runProviderStep: async () => ({
+        kind: "openrouter",
+        config: {
+          openrouterKey: "sk-or-new",
+          embeddingModel: "openai/text-embedding-3-small",
+          embeddingDim: 1536,
+          extractionModel: "anthropic/claude-3-5-haiku",
+          totalTestTokens: 42,
+        },
+      }),
+      restartEngine: async () => {
+        restartCalls += 1;
+      },
+    });
+
+    const after = parseEnvFile(envPath);
+    // OpenRouter slot populated:
+    assert.equal(after.KLIO_OPENROUTER_API_KEY, "sk-or-new");
+    assert.equal(
+      after.KLIO_EMBEDDING_MODEL,
+      "openrouter/openai/text-embedding-3-small",
+    );
+    assert.equal(
+      after.KLIO_EXTRACTION_MODEL,
+      "openrouter/anthropic/claude-3-5-haiku",
+    );
+    assert.equal(after.KLIO_EMBEDDING_DIM, "1536");
+    // Stale custom-endpoint creds blanked:
+    assert.equal(after.KLIO_CUSTOM_BASE_URL, "");
+    assert.equal(after.KLIO_CUSTOM_API_KEY, "");
+    // Unrelated keys preserved:
+    assert.equal(after.KLIO_JWT_SIGNING_KEY, "sentinel-jwt");
+    assert.equal(
+      after.KLIO_LOCAL_USER_ID,
+      "00000000-0000-0000-0000-000000000001",
+    );
+    assert.equal(restartCalls, 1);
+  },
+);
+
+
+test(
+  "runUpdate provider persists ollama env vars and clears upstream keys",
+  async () => {
+    // Switching from openrouter → ollama must blank
+    // KLIO_OPENROUTER_API_KEY so the engine can't keep using a
+    // stale cloud key. Embedding model loses its tag (registry
+    // resolution); extraction model keeps its tag (chat dispatch
+    // depends on it).
+    const envPath = tmpEnvFile(
+      [
+        "KLIO_OPENROUTER_API_KEY=sk-or-stale",
+        "KLIO_CUSTOM_BASE_URL=",
+        "KLIO_CUSTOM_API_KEY=",
+        "KLIO_EMBEDDING_MODEL=openrouter/openai/text-embedding-3-small",
+        "KLIO_EXTRACTION_MODEL=openrouter/anthropic/claude-3-5-haiku",
+        "KLIO_EMBEDDING_DIM=1536",
+        "",
+      ].join("\n"),
+    );
+
+    const { stdout } = captureStdout();
+    const stdin = new Readable({ read() {} });
+    stdin.push(null);
+
+    await runUpdate({
+      args: ["provider"],
+      envPath,
+      stdin,
+      stdout,
+      runProviderStep: async () => ({
+        kind: "ollama",
+        config: {
+          kind: "ollama",
+          embeddingModel: "nomic-embed-text:latest",
+          embeddingDim: 768,
+          extractionModel: "qwen2.5:7b-instruct",
+        },
+      }),
+      restartEngine: async () => {},
+    });
+
+    const after = parseEnvFile(envPath);
+    // Stale cloud key blanked:
+    assert.equal(after.KLIO_OPENROUTER_API_KEY, "");
+    // Embedding bare (tag stripped):
+    assert.equal(after.KLIO_EMBEDDING_MODEL, "ollama/nomic-embed-text");
+    // Extraction keeps its tag:
+    assert.equal(
+      after.KLIO_EXTRACTION_MODEL,
+      "ollama/qwen2.5:7b-instruct",
+    );
+    assert.equal(after.KLIO_EMBEDDING_DIM, "768");
+  },
+);
+
+
+test(
+  "runUpdate provider persists custom env vars and clears stale openrouter key",
+  async () => {
+    const envPath = tmpEnvFile(
+      [
+        "KLIO_OPENROUTER_API_KEY=sk-or-stale",
+        "KLIO_CUSTOM_BASE_URL=",
+        "KLIO_CUSTOM_API_KEY=",
+        "",
+      ].join("\n"),
+    );
+
+    const { stdout } = captureStdout();
+    const stdin = new Readable({ read() {} });
+    stdin.push(null);
+
+    await runUpdate({
+      args: ["provider"],
+      envPath,
+      stdin,
+      stdout,
+      runProviderStep: async () => ({
+        kind: "custom",
+        config: {
+          kind: "custom",
+          baseUrl: "https://litellm.example.com/v1",
+          apiKey: "custom-secret",
+          embeddingModel: "litellm-embed",
+          embeddingDim: 1024,
+          extractionModel: "litellm-chat",
+        },
+      }),
+      restartEngine: async () => {},
+    });
+
+    const after = parseEnvFile(envPath);
+    assert.equal(after.KLIO_OPENROUTER_API_KEY, "");
+    assert.equal(
+      after.KLIO_CUSTOM_BASE_URL,
+      "https://litellm.example.com/v1",
+    );
+    assert.equal(after.KLIO_CUSTOM_API_KEY, "custom-secret");
+    assert.equal(after.KLIO_EMBEDDING_MODEL, "custom/litellm-embed");
+    assert.equal(after.KLIO_EXTRACTION_MODEL, "custom/litellm-chat");
+    assert.equal(after.KLIO_EMBEDDING_DIM, "1024");
+  },
+);

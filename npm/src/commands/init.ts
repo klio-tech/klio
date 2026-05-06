@@ -83,34 +83,13 @@ import {
 import { generateSigningKey, getOrCreateInstallId } from "../installId.js";
 import { allAdapters, type Adapter } from "../adapters/types.js";
 import { wireDetectedAgents } from "./wireAgents.js";
+import { runProviderStep, type ProviderResult } from "./providerStep.js";
 import { prompt } from "../prompt.js";
-import {
-  setupProvider,
-  setupOllama,
-  setupCustom,
-  type ProviderConfig,
-  type OllamaConfig,
-  type CustomConfig,
-} from "../providerSetup.js";
-import { selectProvider } from "../providerMenu.js";
 import { prefixModel, prefixEmbeddingModel } from "../modelRouting.js";
 import { askConfirm } from "../confirm.js";
-import {
-  probeKey,
-  probeEmbeddingModel,
-  probeChatModel,
-} from "../openrouter.js";
-import {
-  isOllamaRunning,
-  listInstalledModels,
-  pullOllamaModel,
-  getEmbedDim,
-  filterToSupportedEmbed,
-} from "../ollama.js";
 import { runWowMoment } from "../wow.js";
 import { runCommunityAsks } from "../community.js";
 import { openUrl } from "../openUrl.js";
-import { spawn } from "node:child_process";
 import {
   curatorEnvLines,
   type CuratorConfig,
@@ -204,19 +183,12 @@ export type InitOptions = {
 };
 
 /**
- * Tagged union threading the picked provider's config through Phase 3.
- * The `kind` discriminator drives compose-env-var assembly + model-name
- * prefixing. Each variant carries the shape produced by its own setup
- * helper:
- *
- *   - openrouter: validated API key + chosen embed/extract models.
- *   - ollama:     local-only; no key, just model names + dim.
- *   - custom:     user-supplied base URL + key + model names.
+ * Re-export `ProviderResult` from the shared provider-step module
+ * so existing imports of `commands/init.js` (tests, future callers)
+ * keep working after the v0.5.0 extraction. The canonical home is
+ * `commands/providerStep.ts`; this re-export is a stable seam.
  */
-export type ProviderResult =
-  | { kind: "openrouter"; config: ProviderConfig }
-  | { kind: "ollama"; config: OllamaConfig }
-  | { kind: "custom"; config: CustomConfig };
+export type { ProviderResult } from "./providerStep.js";
 
 export async function init(opts: InitOptions): Promise<void> {
   process.stdout.write(renderBanner("init") + "\n");
@@ -397,76 +369,13 @@ function writeWelcomePreview(): void {
 
 /**
  * Drive Phase 2's provider menu + the matching setup branch. Returns
- * a fully-formed `ProviderResult`. Lives outside `runSteps` because
- * every branch issues interactive prompts that drive their own
- * readline cycle; the spinner-style step UI would conflict with line
- * input.
- *
- * The Ollama branch may return a `fallback` sentinel, in which case
- * we re-enter the OpenRouter setup automatically — the user already
- * told the inner prompt they want to fall back, so we don't ask again.
+ * a fully-formed `ProviderResult`. Delegates to the shared
+ * `runProviderStep` (also used by `klio update provider`) so future
+ * hardening — new probe diagnostics, additional model curators —
+ * lands in both entry points without duplication.
  */
 async function runProviderPhase(): Promise<ProviderResult> {
-  const kind = await selectProvider({
-    promptFn: (o) => prompt({ message: o.message, default: o.default }),
-    log: writeLine,
-  });
-
-  if (kind === "openrouter") {
-    return { kind: "openrouter", config: await runOpenRouterSetup() };
-  }
-
-  if (kind === "ollama") {
-    const result = await setupOllama({
-      promptFn: (o) => prompt({ message: o.message, default: o.default }),
-      log: writeLine,
-      isRunning: isOllamaRunning,
-      hasOllamaCli: hasOllamaCli,
-      listModels: listInstalledModels,
-      pullModel: pullOllamaModel,
-      getEmbedDim: getEmbedDim,
-      filterEmbed: filterToSupportedEmbed,
-    });
-    if (result.kind === "ollama") {
-      return { kind: "ollama", config: result };
-    }
-    // Fallback — user opted into OpenRouter inside setupOllama.
-    writeLine(`      · ${result.reason} Falling back to OpenRouter.`);
-    return { kind: "openrouter", config: await runOpenRouterSetup() };
-  }
-
-  // kind === "custom"
-  const config = await setupCustom({
-    promptFn: (o) =>
-      prompt({ message: o.message, default: o.default, mask: o.mask }),
-    log: writeLine,
-  });
-  return { kind: "custom", config };
-}
-
-/**
- * Drive the OpenRouter provider setup. Prints a section header so
- * the user knows we've left the menu and entered the interactive
- * key + model loop. The actual prompt loop lives in `providerSetup.ts`.
- */
-async function runOpenRouterSetup(): Promise<ProviderConfig> {
-  process.stdout.write("\n");
-  process.stdout.write("▸ Connect your LLM provider (OpenRouter)\n");
-  process.stdout.write(
-    "    Klio uses OpenRouter to route embedding + extraction\n",
-  );
-  process.stdout.write(
-    "    calls to the model of your choice. Get a key at\n",
-  );
-  process.stdout.write("    https://openrouter.ai/keys\n\n");
-  return setupProvider({
-    promptFn: (o) =>
-      prompt({ message: o.message, default: o.default, mask: o.mask }),
-    probeKey,
-    probeEmbedding: probeEmbeddingModel,
-    probeChat: probeChatModel,
-    log: writeLine,
-  });
+  return runProviderStep({ log: writeLine });
 }
 
 /**
@@ -916,26 +825,6 @@ function providerExtractModel(
 // `../modelRouting.ts` so the routing-shape logic can be unit-tested
 // independently of the orchestration in this file. Imports at the
 // top of the file pull both helpers in.
-
-/**
- * `which ollama` test. We need a CLI presence check separate from the
- * daemon liveness check (`isOllamaRunning`) so we can give the user a
- * precise diagnostic — "install Ollama" vs "start the daemon" — instead
- * of lumping them together.
- *
- * Resolves true on exit code 0, false on any other exit or a spawn
- * error (e.g. ENOENT). Stdout/stderr are silenced to avoid polluting
- * the onboarding UI on systems without `which`.
- */
-function hasOllamaCli(): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    const child = spawn("which", ["ollama"], {
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    child.on("error", () => resolve(false));
-    child.on("exit", (code) => resolve(code === 0));
-  });
-}
 
 /**
  * If a previous `klio init` already wrote a JWT key, reuse it so

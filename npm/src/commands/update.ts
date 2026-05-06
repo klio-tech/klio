@@ -27,7 +27,12 @@ import {
 } from "../docker.js";
 import { allAdapters } from "../adapters/types.js";
 import { mergeEnvFile, parseEnvFile } from "../envFile.js";
+import { prefixEmbeddingModel, prefixModel } from "../modelRouting.js";
 import { prompt } from "../prompt.js";
+import {
+  runProviderStep as defaultRunProviderStep,
+  type ProviderResult,
+} from "./providerStep.js";
 import {
   wireDetectedAgents,
   type WireAgentsResult,
@@ -86,6 +91,15 @@ export type UpdateOptions = {
    * pass a no-op so they don't shell out to docker.
    */
   restartEngine?: () => Promise<void>;
+  /**
+   * Override the provider-selection step. Defaults to the shared
+   * `runProviderStep` from `./providerStep.js`, which drives the
+   * full provider menu + setup loop (network probes, Ollama
+   * detection, custom-endpoint validation). Tests inject a stub
+   * that returns a synthetic `ProviderResult` so the suite never
+   * touches readline or the network.
+   */
+  runProviderStep?: () => Promise<ProviderResult>;
 };
 
 
@@ -384,10 +398,116 @@ function allAdaptersUndetected(_: WireAgentsResult): boolean {
 }
 
 
-async function runUpdateProvider(_opts: UpdateOptions): Promise<void> {
-  process.stdout.write(
-    "klio update provider: not yet implemented (lands in v0.5.0 / Task E4).\n",
+/**
+ * `klio update provider` — re-run the provider-selection flow init's
+ * Phase 2 uses, persist the new env values, and restart the engine
+ * so the new model picks take effect.
+ *
+ * Flow:
+ *   1. Prologue copy so the user knows the existing model picks are
+ *      about to be replaced.
+ *   2. Drive `runProviderStep` (shared with init Phase 2) — full
+ *      menu + provider-specific setup loop with live probes.
+ *   3. Translate the resulting `ProviderResult` into the engine's
+ *      env-var shape via `buildProviderEnvUpdates`. The shape mirrors
+ *      what init.ts's `buildEnvVars` writes:
+ *        - openrouter → KLIO_OPENROUTER_API_KEY filled, other
+ *          provider keys blanked.
+ *        - ollama     → no upstream key needed; OPENROUTER + CUSTOM
+ *          slots blanked so a previous provider's stale creds don't
+ *          ride along.
+ *        - custom     → KLIO_CUSTOM_BASE_URL + KLIO_CUSTOM_API_KEY
+ *          filled, OPENROUTER blanked.
+ *   4. `mergeEnvFile` preserves every non-provider key (JWT, user/
+ *      agent UUIDs, curator block, etc.) and surgically replaces
+ *      the provider slot.
+ *   5. Restart the engine via the shared compose-up hook so the new
+ *      env vars take effect — `restart` doesn't re-read .env, only
+ *      `up -d` does.
+ *
+ * The Ollama branch's setup helper may return a fallback sentinel
+ * (no daemon, no embed model, etc.); that recovery path is fully
+ * handled inside `runProviderStep`, so this function's contract is
+ * "always returns a populated ProviderResult or throws". Throws
+ * propagate to the CLI top-level handler.
+ */
+async function runUpdateProvider(opts: UpdateOptions): Promise<void> {
+  const out = opts.stdout ?? process.stdout;
+  const log = (line: string): void => {
+    out.write(line + "\n");
+  };
+
+  out.write(
+    "\nRe-running provider setup. Existing model picks will be replaced.\n",
   );
+
+  const stepFn = opts.runProviderStep ?? (() => defaultRunProviderStep({ log }));
+  const provider = await stepFn();
+
+  const envPath = opts.envPath ?? join(runtimeDir(), ".env");
+  const updates = buildProviderEnvUpdates(provider);
+
+  // Targeted-replace: every non-provider key (JWT signing key, user/
+  // agent UUIDs, curator block, log level) is preserved by
+  // `mergeEnvFile`. Stale provider keys belonging to the OLD provider
+  // are blanked here (rather than left dangling) so a switch from
+  // openrouter → ollama doesn't leave the engine with a hot OpenRouter
+  // key it can't actually reach the chosen Ollama model with.
+  mergeEnvFile(envPath, updates);
+
+  out.write("\n  ✓ Saved. Restarting engine to apply…\n");
+
+  const restart = opts.restartEngine ?? defaultRestartEngine(opts);
+  await restart();
+}
+
+
+/**
+ * Translate a `ProviderResult` into the engine's env-var shape. The
+ * caller hands the result to `mergeEnvFile`, so every key here lands
+ * verbatim into ~/.klio/.env.
+ *
+ * Three slots always get a value (possibly the empty string):
+ *   - KLIO_OPENROUTER_API_KEY — only populated for openrouter.
+ *   - KLIO_CUSTOM_BASE_URL    — only populated for custom.
+ *   - KLIO_CUSTOM_API_KEY     — only populated for custom.
+ *
+ * Empty-string writes (rather than key omission) are deliberate: they
+ * blank stale credentials from a previous provider so the engine
+ * can't dispatch to an upstream the user just abandoned. The engine's
+ * router treats an empty `KLIO_OPENROUTER_API_KEY` as "OpenRouter
+ * disabled", same as the absent-key case.
+ *
+ * `KLIO_EMBEDDING_MODEL` goes through `prefixEmbeddingModel` (strips
+ * Ollama tags — the engine's embedding registry keys by bare name);
+ * `KLIO_EXTRACTION_MODEL` keeps its tag because chat dispatch passes
+ * the tag straight to the upstream backend (qwen2.5:7b-instruct vs
+ * qwen2.5:1.5b are different model weights).
+ */
+export function buildProviderEnvUpdates(
+  provider: ProviderResult,
+): Record<string, string> {
+  const updates: Record<string, string> = {
+    KLIO_OPENROUTER_API_KEY: "",
+    KLIO_CUSTOM_BASE_URL: "",
+    KLIO_CUSTOM_API_KEY: "",
+    KLIO_EMBEDDING_MODEL:
+      prefixEmbeddingModel(provider.kind, provider.config.embeddingModel) ?? "",
+    KLIO_EXTRACTION_MODEL:
+      prefixModel(provider.kind, provider.config.extractionModel) ?? "",
+    KLIO_EMBEDDING_DIM: String(provider.config.embeddingDim),
+  };
+
+  if (provider.kind === "openrouter") {
+    updates.KLIO_OPENROUTER_API_KEY = provider.config.openrouterKey;
+  } else if (provider.kind === "custom") {
+    updates.KLIO_CUSTOM_BASE_URL = provider.config.baseUrl;
+    updates.KLIO_CUSTOM_API_KEY = provider.config.apiKey;
+  }
+  // ollama: nothing else to inject — host-network access via
+  // host.docker.internal is configured by the compose template.
+
+  return updates;
 }
 
 
