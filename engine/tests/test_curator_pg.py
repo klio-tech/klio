@@ -134,6 +134,7 @@ async def test_cursor_write_failure_does_not_advance_cursor(
 
     await store.write_failure(seed_user, "ollama unreachable")
     await session.flush()
+    session.expire_all()  # NEW — drop ORM cache so the next select hits Postgres
 
     row = (
         await session.execute(
@@ -214,3 +215,25 @@ async def test_observation_reader_excludes_other_kinds(
     )
     assert len(rows) == 1
     assert rows[0].kind == EntryKind.OBSERVATION
+
+
+async def test_write_failure_on_never_existed_row_uses_epoch_default(
+    session, seed_user
+) -> None:
+    """First-ever tick fails for a user — `write_failure` must
+    INSERT the row, and the `last_cursor_at` column's server_default
+    of '1970-01-01' must kick in. The next tick (if it succeeds)
+    will then process every observation the user owns."""
+    store = PgCursorStore(session=session)
+    await store.write_failure(seed_user, "first tick blew up")
+    await session.flush()
+    session.expire_all()
+
+    row = (
+        await session.execute(
+            select(CuratorState).where(CuratorState.user_id == seed_user)
+        )
+    ).scalar_one()
+    assert row.last_cursor_at == datetime(1970, 1, 1, tzinfo=timezone.utc)
+    assert row.last_error == "first tick blew up"
+    assert row.runs_count == 1
