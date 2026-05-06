@@ -9,3 +9,6 @@ from __future__ import annotations
 def test_apscheduler_is_importable() -> None:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler  # noqa: F401
     from apscheduler.triggers.interval import IntervalTrigger  # noqa: F401
+
+    assert AsyncIOScheduler is not None
+    assert IntervalTrigger is not None
