@@ -89,3 +89,43 @@ test("compose body no longer emits dead OPENROUTER_API_KEY env", () => {
   assert.match(body, /KLIO_OPENROUTER_API_KEY: \$\{KLIO_OPENROUTER_API_KEY\}/);
   assert.doesNotMatch(body, /^\s*OPENROUTER_API_KEY:/m);
 });
+
+test("compose body sets KLIO_OLLAMA_API_BASE so the engine can reach the host's Ollama", () => {
+  // 0.4.1 production bug: when the user picks Ollama, the engine
+  // container defaults to `http://127.0.0.1:11434` (the engine's OWN
+  // loopback), not the host's. The host has the user's native
+  // Ollama daemon. The compose template must thread
+  // `host.docker.internal:11434` through so the engine can talk to
+  // the host (the `extra_hosts: host.docker.internal:host-gateway`
+  // mapping above this env block makes that work on Linux too).
+  const body = renderComposeBody({
+    imageTag: "0.4.2",
+    jwtSigningKey: "k",
+    embeddingModel: "ollama/nomic-embed-text",
+    extractionModel: "ollama/qwen2.5:7b-instruct",
+  });
+  assert.match(
+    body,
+    /KLIO_OLLAMA_API_BASE:.*host\.docker\.internal:11434/,
+    "engine env must reference the host gateway by default",
+  );
+});
+
+test("compose body's KLIO_OLLAMA_API_BASE is overridable by the operator", () => {
+  // The default must be a default — not a hardcoded value — so an
+  // operator who runs Ollama on a different host or port can
+  // override via `~/.klio/.env` without re-rendering compose.
+  const body = renderComposeBody({
+    imageTag: "0.4.2",
+    jwtSigningKey: "k",
+    embeddingModel: "ollama/nomic-embed-text",
+    extractionModel: "ollama/qwen2.5:7b-instruct",
+  });
+  // `${VAR:-default}` is the compose-spec form for "use VAR if set,
+  // else fall back". Either side of the `:-` is acceptable.
+  assert.match(
+    body,
+    /KLIO_OLLAMA_API_BASE:\s*\$\{KLIO_OLLAMA_API_BASE:-/,
+    "default must be expressed as ${KLIO_OLLAMA_API_BASE:-...} so an operator can override",
+  );
+});

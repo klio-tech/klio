@@ -232,6 +232,16 @@ services:
       KLIO_CUSTOM_API_KEY: \${KLIO_CUSTOM_API_KEY}
       KLIO_EMBEDDING_MODEL: ${embedModel}
       KLIO_EXTRACTION_MODEL: ${extractModel}
+      # Reach the host's native Ollama daemon from inside the engine
+      # container. The default targets the host gateway (Docker
+      # Desktop on macOS / Windows resolves it automatically; the
+      # extra_hosts entry below maps it to host-gateway on Linux).
+      # Override via \`~/.klio/.env\` if Ollama runs on a non-default
+      # port or a different host. The engine ignores this var when
+      # the picked provider is OpenRouter or Custom because dispatch
+      # routes by model-name prefix, not by env presence — but
+      # leaving it set is harmless.
+      KLIO_OLLAMA_API_BASE: \${KLIO_OLLAMA_API_BASE:-http://host.docker.internal:11434}
       # Native output dim of the chosen embedding model. Only used
       # for non-registry models (custom/* and escape-hatch openrouter/*
       # the engine doesn't know natively); the npm probe reads it back

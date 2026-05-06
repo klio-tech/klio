@@ -34,6 +34,7 @@ import {
   probeCustomEndpoint as defaultProbeCustomEndpoint,
 } from "./customEndpoint.js";
 import type { OllamaModel } from "./ollama.js";
+import { askConfirm } from "./confirm.js";
 
 export type ProviderConfig = {
   /** Validated OpenRouter API key. Sensitive — masked at prompt time. */
@@ -457,10 +458,11 @@ export async function setupOllama(
   let installed = await deps.listModels();
   let embedSupported = deps.filterEmbed(installed);
   if (embedSupported.length === 0) {
-    const consent = await askYesNo(
-      deps,
+    const consent = await askConfirm(
+      deps.promptFn,
       `Pull \`${DEFAULT_OLLAMA_EMBED}\` (${DEFAULT_OLLAMA_EMBED_SIZE})?`,
       true,
+      deps.log,
     );
     if (!consent) {
       return {
@@ -501,10 +503,11 @@ export async function setupOllama(
   // pull dance because you can't run extraction off an embedder.
   let chatCandidates = nonEmbedModels(installed, embedSupported);
   if (chatCandidates.length === 0) {
-    const consent = await askYesNo(
-      deps,
+    const consent = await askConfirm(
+      deps.promptFn,
       `Pull \`${DEFAULT_OLLAMA_CHAT}\` (${DEFAULT_OLLAMA_CHAT_SIZE} — large download)?`,
       true,
+      deps.log,
     );
     if (!consent) {
       return {
@@ -548,10 +551,11 @@ async function offerFallback(
 ): Promise<OllamaSetupResult> {
   deps.log(`      · ${headline}`);
   deps.log(hint);
-  const useOpenRouter = await askYesNo(
-    deps,
+  const useOpenRouter = await askConfirm(
+    deps.promptFn,
     "Use OpenRouter for now?",
     true,
+    deps.log,
   );
   if (useOpenRouter) {
     return { kind: "fallback", reason: headline };
@@ -561,25 +565,11 @@ async function offerFallback(
   );
 }
 
-/**
- * Yes/no prompt with a default answer. Returns true for affirmative
- * input or empty input when the default is yes; false otherwise.
- * Tolerates "Y", "yes", "n", "no", and any case combination.
- */
-async function askYesNo(
-  deps: Pick<OllamaSetupDeps, "promptFn">,
-  message: string,
-  defaultYes: boolean,
-): Promise<boolean> {
-  const suffix = defaultYes ? "[Y/n]" : "[y/N]";
-  const answer = await deps.promptFn({
-    message: `${message} ${suffix}`,
-    default: defaultYes ? "Y" : "N",
-  });
-  const trimmed = answer.trim().toLowerCase();
-  if (trimmed === "") return defaultYes;
-  return trimmed === "y" || trimmed === "yes";
-}
+// `askYesNo` was the v0.4.1 single-shot helper that collapsed any
+// non-y answer into "no". The three call sites above now use the
+// shared `askConfirm` from `./confirm.ts`, which re-prompts on
+// unrecognized input so a typo at the wrong prompt doesn't silently
+// progress the flow.
 
 /**
  * Render a numbered picker for an Ollama model list. Mirrors

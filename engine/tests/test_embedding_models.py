@@ -108,3 +108,83 @@ def test_resolve_or_synthesize_raises_when_unknown_and_no_override():
     from klio_engine.services.embedding_models import resolve_or_synthesize
     with pytest.raises(ValueError, match="Unknown embedding model"):
         resolve_or_synthesize("custom/anything", override_dim=None)
+
+
+# ----------------------------------------------------------------
+# Tag-suffix tolerance
+#
+# `npx @klio-tech/klio init` 0.4.1 wrote `ollama/nomic-embed-text:latest`
+# into KLIO_EMBEDDING_MODEL because Ollama's `/api/tags` endpoint
+# reports installed models with a `:latest` suffix and the npm picker
+# round-tripped the full name. The engine's registry keys by bare model
+# name (the embed dim is determined by the base architecture, not the
+# tag) so the `:latest` form raised ValueError on every entries / recall
+# request — HTTP 500 mid-onboarding.
+#
+# These tests pin the engine-side defense in depth: any caller who
+# passes a tagged Ollama name (`ollama/<model>:tag`) gets the same
+# registry hit as the bare form. The fix is also belt-and-suspenders
+# for anyone hand-editing `~/.klio/.env` against an older registry.
+# ----------------------------------------------------------------
+
+
+def test_resolve_strips_ollama_latest_tag() -> None:
+    """The exact production crash from 0.4.1: Ollama-listed name with
+    `:latest` arrives at the registry. Must resolve to the same spec
+    as the bare name."""
+    spec = resolve("ollama/nomic-embed-text:latest")
+    assert spec.name == "ollama/nomic-embed-text"
+    assert spec.dim == 768
+    assert spec.provider == "ollama"
+
+
+def test_resolve_strips_arbitrary_ollama_tag() -> None:
+    """Tag stripping is not `:latest`-specific. Any colon-suffixed
+    tag (`:8b`, `:q4_K_M`, `:v1.5`) on a known Ollama embedding model
+    must resolve to the registered bare spec, because the embed dim
+    is a property of the base model architecture, not the tag."""
+    for tag in ("v1.5", "q4_K_M", "8b", "fp16"):
+        spec = resolve(f"ollama/mxbai-embed-large:{tag}")
+        assert spec.name == "ollama/mxbai-embed-large"
+        assert spec.dim == 1024
+
+
+def test_resolve_unknown_bare_with_tag_still_raises() -> None:
+    """The fix MUST NOT mask typos. An unknown bare name with a tag
+    should raise ValueError pointing at the bare form so the operator
+    sees the real error rather than `unknown ollama/foo:latest`."""
+    with pytest.raises(ValueError, match="ollama/totally-bogus"):
+        resolve("ollama/totally-bogus:latest")
+
+
+def test_resolve_no_tag_unchanged() -> None:
+    """Stripping is a no-op when there is no tag. Cover the hot path
+    (every existing user with a bare name) explicitly so we know the
+    new branch doesn't accidentally mangle the common case."""
+    spec = resolve("ollama/nomic-embed-text")
+    assert spec.name == "ollama/nomic-embed-text"
+    assert spec.dim == 768
+
+
+def test_resolve_openrouter_with_internal_slash_unchanged() -> None:
+    """OpenRouter ids carry slashes (`openrouter/<vendor>/<model>`)
+    and never carry colons. Tag stripping operates on the LAST path
+    segment only, so an openrouter id is untouched."""
+    spec = resolve("openrouter/openai/text-embedding-3-small")
+    assert spec.name == "openrouter/openai/text-embedding-3-small"
+    assert spec.dim == 1536
+
+
+def test_resolve_or_synthesize_strips_ollama_tag_for_registry_hit() -> None:
+    """`resolve_or_synthesize` is the space-creation path. Same fix
+    must apply: a tagged Ollama name resolves to the registry spec
+    (override_dim ignored, because the registry remains authoritative
+    for canonical models)."""
+    from klio_engine.services.embedding_models import resolve_or_synthesize
+
+    spec = resolve_or_synthesize(
+        "ollama/nomic-embed-text:latest", override_dim=999
+    )
+    # Registry wins — override is ignored when the bare form is known.
+    assert spec.name == "ollama/nomic-embed-text"
+    assert spec.dim == 768

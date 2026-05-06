@@ -91,18 +91,59 @@ def default_model() -> EmbeddingModelSpec:
     return EMBEDDING_MODELS[0]
 
 
+def _normalize_for_lookup(model_name: str) -> str:
+    """Strip a `:tag` suffix from the last path segment of `model_name`.
+
+    Why: Ollama's `/api/tags` endpoint reports installed models with a
+    `:tag` suffix (`nomic-embed-text:latest`, `mxbai-embed-large:v1.5`,
+    `nomic-embed-text:8b-q4_K_M`). The npm onboarding flow round-trips
+    that full name, so `KLIO_EMBEDDING_MODEL` arrives at the engine as
+    `ollama/nomic-embed-text:latest`. The registry keys by bare model
+    name because the embed dim is determined by the base model
+    architecture, not the tag — `nomic-embed-text:latest`,
+    `nomic-embed-text:v1.5`, and bare `nomic-embed-text` all emit
+    768-dim vectors.
+
+    Without this normalization the registry lookup misses, `resolve`
+    raises ValueError, and every entries / recall request 500s
+    mid-onboarding (the production bug fixed in 0.4.2).
+
+    Stripping operates on the LAST path segment so OpenRouter ids
+    like `openrouter/openai/text-embedding-3-small` (which carry
+    slashes but never colons) are untouched. Bare names without a
+    slash (e.g. `stub`) are also handled correctly.
+
+    The function is internal — callers go through `resolve()` /
+    `resolve_or_synthesize()` which apply it consistently.
+    """
+    slash = model_name.rfind("/")
+    seg_start = slash + 1  # 0 when no slash present
+    colon = model_name.find(":", seg_start)
+    if colon < 0:
+        return model_name
+    return model_name[:colon]
+
+
 def resolve(model_name: str | None) -> EmbeddingModelSpec:
     """Return the spec for `model_name`, or the default if `None`/unknown.
 
-    Unknown models raise ValueError so the caller (write path) fails fast
-    instead of silently storing vectors with the wrong dim.
+    Tag-tolerant: an Ollama-style `:tag` suffix on the last path
+    segment is stripped before lookup so callers can pass either the
+    bare form (`ollama/nomic-embed-text`) or the `/api/tags`-reported
+    form (`ollama/nomic-embed-text:latest`) and reach the same spec.
+
+    Unknown bare models raise ValueError so the caller (write path)
+    fails fast instead of silently storing vectors with the wrong dim.
+    The error message references the bare form so a typo'd name
+    surfaces clearly even when the input had a tag attached.
     """
     if model_name is None:
         return default_model()
-    spec = _BY_NAME.get(model_name)
+    normalized = _normalize_for_lookup(model_name)
+    spec = _BY_NAME.get(normalized)
     if spec is None:
         raise ValueError(
-            f"Unknown embedding model {model_name!r}. "
+            f"Unknown embedding model {normalized!r}. "
             f"Add a row to EMBEDDING_MODELS or use one of: "
             f"{', '.join(m.name for m in EMBEDDING_MODELS)}"
         )
@@ -152,16 +193,30 @@ def resolve_or_synthesize(
     used here: `resolve_or_synthesize` is only called by the
     space-creation path, which needs a real dim to pin.
     """
-    spec = _BY_NAME.get(model_name) if model_name is not None else None
+    # Tag-tolerant lookup: see _normalize_for_lookup for the rationale.
+    # The space-creation path takes the same Ollama-suffixed input
+    # shape as the request-time path, so the same normalization belongs
+    # here.
+    normalized = (
+        _normalize_for_lookup(model_name) if model_name is not None else None
+    )
+    spec = _BY_NAME.get(normalized) if normalized is not None else None
     if spec is not None:
         return spec
     if override_dim is None:
         names = ", ".join(m.name for m in EMBEDDING_MODELS)
+        # Surface the normalized form in the error so a typo'd bare
+        # name is obvious even when the caller passed a tagged name.
+        shown = normalized if normalized is not None else model_name
         raise ValueError(
-            f"Unknown embedding model {model_name!r}. "
+            f"Unknown embedding model {shown!r}. "
             f"Add a row to EMBEDDING_MODELS, set KLIO_EMBEDDING_DIM "
             f"to the model's native dim, or use one of: {names}"
         )
+    # Custom / unknown-openrouter path: preserve the input verbatim
+    # (tag and all) — the dispatch layer in services/embeddings.py
+    # forwards this string to the upstream backend, which may
+    # legitimately use the tag (Ollama-flavoured custom proxies).
     return EmbeddingModelSpec(
         name=model_name or "",
         dim=override_dim,

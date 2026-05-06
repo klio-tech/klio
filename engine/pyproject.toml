@@ -29,13 +29,6 @@ classifiers = [
     "Topic :: Database",
 ]
 requires-python = ">=3.12"
-
-[project.urls]
-Homepage      = "https://klio.tech"
-Repository    = "https://github.com/klio-tech/klio"
-Documentation = "https://github.com/klio-tech/klio#readme"
-Issues        = "https://github.com/klio-tech/klio/issues"
-Changelog     = "https://github.com/klio-tech/klio/releases"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -51,6 +44,13 @@ dependencies = [
     "redis>=5",
     "python-jose[cryptography]>=3.3",
 ]
+
+[project.urls]
+Homepage      = "https://klio.tech"
+Repository    = "https://github.com/klio-tech/klio"
+Documentation = "https://github.com/klio-tech/klio#readme"
+Issues        = "https://github.com/klio-tech/klio/issues"
+Changelog     = "https://github.com/klio-tech/klio/releases"
 
 [project.optional-dependencies]
 dev = [

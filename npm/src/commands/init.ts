@@ -84,7 +84,9 @@ import {
   type OllamaConfig,
   type CustomConfig,
 } from "../providerSetup.js";
-import { selectProvider, type ProviderKind } from "../providerMenu.js";
+import { selectProvider } from "../providerMenu.js";
+import { prefixModel, prefixEmbeddingModel } from "../modelRouting.js";
+import { askConfirm } from "../confirm.js";
 import {
   probeKey,
   probeEmbeddingModel,
@@ -436,7 +438,18 @@ function buildStackSteps(
         writeComposeFile({
           imageTag: opts.imageTag,
           jwtSigningKey: state.signingKey,
-          embeddingModel: prefixModel(kind, providerEmbedModel(provider)),
+          // Embedding goes through prefixEmbeddingModel — strips
+          // Ollama-style `:tag` suffixes that the engine's embedding
+          // registry can't resolve. The 0.4.1 production bug was
+          // sending `ollama/nomic-embed-text:latest` here, which 500'd
+          // every Phase 5 entries / recall call. See modelRouting.ts.
+          embeddingModel: prefixEmbeddingModel(
+            kind,
+            providerEmbedModel(provider),
+          ),
+          // Extraction keeps tags — chat model identity DOES depend on
+          // them (`qwen2.5:7b-instruct` vs `qwen2.5:1.5b`), and the
+          // engine's chat dispatch passes them straight to Ollama.
           extractionModel: prefixModel(kind, providerExtractModel(provider)),
         });
         // Minimum env needed for compose's variable interpolation.
@@ -631,11 +644,19 @@ async function runAdapterStep(state: {
   }
   writeLine("");
 
-  const answer = await prompt({
-    message: "Wire all detected tools?",
-    default: "Y",
-  });
-  if (!isYes(answer)) {
+  // Use the re-prompting confirm (askConfirm) instead of a single
+  // shot prompt + isYes check. The 0.4.1 production bug let a user's
+  // memory text ("Abhishek Singh is good") get parsed as "no" and
+  // silently skip every adapter; askConfirm re-prompts on
+  // unrecognized input with a "please answer yes or no" hint so the
+  // user notices they typed at the wrong prompt.
+  const wireAll = await askConfirm(
+    prompt,
+    "Wire all detected tools?",
+    true,
+    writeLine,
+  );
+  if (!wireAll) {
     state.adaptersSkipped = true;
     writeLine("    Skipped — re-run `klio init` to wire them.");
     return;
@@ -687,15 +708,13 @@ async function runWowStep(args: {
   });
 }
 
-/**
- * Treats empty / "y" / "yes" (any case, with surrounding whitespace)
- * as acceptance. Mirrors the rule in `community.ts` so the two
- * y/n prompts behave consistently.
- */
-function isYes(answer: string): boolean {
-  const t = answer.trim().toLowerCase();
-  return t === "" || t === "y" || t === "yes";
-}
+// `isYes` was the v0.4.1 single-shot helper that collapsed any
+// non-y answer into "no" (the wire-tools-skip bug). The wire-tools
+// prompt now uses the re-prompting `askConfirm` from
+// `../confirm.ts`. The community-step prompts in `community.ts`
+// keep their own one-shot behaviour intentionally — they're
+// post-completion satisfaction asks where re-prompting on "no
+// thanks" would feel naggy.
 
 function writeLine(line: string): void {
   process.stdout.write(line + "\n");
@@ -777,29 +796,10 @@ function providerExtractModel(
   return p.config.extractionModel;
 }
 
-/**
- * Translate a user-supplied bare model name into the prefixed routing
- * shape the engine expects in KLIO_EMBEDDING_MODEL / KLIO_EXTRACTION_MODEL
- * (e.g. "openrouter/openai/text-embedding-3-small",
- * "ollama/nomic-embed-text", "custom/llama-3.1-70b").
- *
- * The engine's direct-httpx dispatch reads the leading prefix to pick
- * an upstream provider. Without the prefix, dispatch raises with an
- * "unsupported model" error — there's no implicit fallback to a
- * native-vendor SDK (the LiteLLM dependency that previously provided
- * that fallback was removed in 0.3.0).
- *
- * Idempotent: returns the input unchanged if the prefix is already
- * present, so users who type "openrouter/openai/text-embedding-3-small"
- * by hand also work.
- */
-function prefixModel(
-  kind: ProviderKind,
-  name: string | undefined,
-): string | undefined {
-  if (!name) return name;
-  return name.startsWith(`${kind}/`) ? name : `${kind}/${name}`;
-}
+// `prefixModel` and `prefixEmbeddingModel` now live in
+// `../modelRouting.ts` so the routing-shape logic can be unit-tested
+// independently of the orchestration in this file. Imports at the
+// top of the file pull both helpers in.
 
 /**
  * `which ollama` test. We need a CLI presence check separate from the
