@@ -36,6 +36,11 @@ import {
   type ProviderResult,
 } from "./providerStep.js";
 import {
+  runUpdateCheck,
+  runUpdateToLatest,
+  runUpdateToVersion,
+} from "./update-stack.js";
+import {
   wireDetectedAgents,
   type WireAgentsResult,
 } from "./wireAgents.js";
@@ -123,6 +128,29 @@ export type UpdateOptions = {
    * needs the captured-streams shape, not the throw-on-failure one.
    */
   runNowExec?: (argv: readonly string[]) => Promise<RunNowResult>;
+  /**
+   * Test override for `fetch`. v0.6.0 `--check` / `--to-latest` hit
+   * the npm registry; production uses the global `fetch`, tests
+   * inject a stub that returns a canned `{ version }` payload so
+   * the suite never touches the network.
+   */
+  fetchFn?: typeof fetch;
+  /**
+   * Test override for the path to the bridge-written update-state
+   * file. Defaults to `<runtimeDir()>/update-state.json` (i.e.
+   * ~/.klio/update-state.json on the host, mounted at /host/.klio
+   * inside the bridge container). The npm CLI only READS this file
+   * — the bridge ticker is the sole writer.
+   */
+  statePath?: string;
+  /**
+   * Test override for the stack-wide compose driver used by
+   * `--to-version` / `--to-latest`. Production shells out to
+   * `docker compose -f <file> <args...>`. Tests inject a stub that
+   * records the argv so we can assert on `pull` + `up -d --no-deps
+   * engine bridge trust-app` without touching the user's daemon.
+   */
+  composeApply?: (args: readonly string[]) => Promise<void>;
 };
 
 
@@ -142,6 +170,31 @@ export type RunNowResult = {
 
 
 export async function runUpdate(opts: UpdateOptions): Promise<void> {
+  // v0.6.0 stack-wide flags. These short-circuit the curator/agents/
+  // provider menu — they upgrade the whole stack, not a single slice,
+  // so they're conceptually distinct from the per-slice subtargets
+  // even though they share the `klio update` verb. The flags must
+  // be intercepted BEFORE `parseUpdateTarget`, which would otherwise
+  // reject them as "unknown" subtargets.
+  const args = opts.args;
+  if (args.includes("--check")) {
+    return runUpdateCheck(opts);
+  }
+  if (args.includes("--to-latest")) {
+    return runUpdateToLatest(opts);
+  }
+  const toVersionIdx = args.indexOf("--to-version");
+  if (toVersionIdx >= 0) {
+    const version = args[toVersionIdx + 1];
+    if (version === undefined || version.startsWith("--")) {
+      process.stderr.write(
+        "klio update --to-version: missing version argument\n",
+      );
+      process.exit(2);
+    }
+    return runUpdateToVersion(opts, version as string);
+  }
+
   const target = parseUpdateTarget(opts.args);
 
   if (target === "unknown") {

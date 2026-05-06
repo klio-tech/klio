@@ -702,3 +702,198 @@ test(
     assert.equal(after.KLIO_EMBEDDING_DIM, "1024");
   },
 );
+
+
+// --- v0.6.0: --check / --to-latest / --to-version ----------------
+//
+// D3 layers three new flags on top of the existing 0.5.0 dispatcher.
+// The flags short-circuit the curator/agents/provider menu — they're
+// stack-wide upgrade affordances, not per-slice updates.
+//
+// All three tests inject hook seams (`fetchFn`, `statePath`,
+// `composeApply`) so the suite never touches the real npm registry,
+// the user's docker daemon, or the user's ~/.klio runtime dir.
+
+
+/**
+ * Build a minimal `fetch`-compatible response for the npm registry's
+ * `latest` endpoint. The CLI only reads `.ok`, `.status`, and `.json()`,
+ * so we satisfy that surface without pulling in undici's Response class.
+ */
+function fakeNpmFetch(version: string): typeof fetch {
+  const fn = (async (_url: string | URL | Request, _init?: RequestInit) => {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ version }),
+    } as unknown as Response;
+  }) as typeof fetch;
+  return fn;
+}
+
+
+function tmpStateFile(currentVersion: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "klio-updatestate-"));
+  const path = join(dir, "update-state.json");
+  writeFileSync(path, JSON.stringify({ current_version: currentVersion }));
+  return path;
+}
+
+
+test("runUpdate --check prints current vs latest and a 'newer available' hint", async () => {
+  const statePath = tmpStateFile("0.6.0");
+  const { stdout, chunks } = captureStdout();
+
+  await runUpdate({
+    args: ["--check"],
+    stdin: new Readable({ read() {} }),
+    stdout,
+    statePath,
+    fetchFn: fakeNpmFetch("0.6.1"),
+  });
+
+  const out = chunks.join("");
+  assert.ok(out.includes("0.6.0"), `expected current version in output: ${out}`);
+  assert.ok(out.includes("0.6.1"), `expected latest version in output: ${out}`);
+  assert.ok(
+    out.includes("klio update --to-latest"),
+    `expected the apply hint when a newer version is available: ${out}`,
+  );
+});
+
+
+test("runUpdate --check reports 'on the latest' when versions match", async () => {
+  const statePath = tmpStateFile("0.6.1");
+  const { stdout, chunks } = captureStdout();
+
+  await runUpdate({
+    args: ["--check"],
+    stdin: new Readable({ read() {} }),
+    stdout,
+    statePath,
+    fetchFn: fakeNpmFetch("0.6.1"),
+  });
+
+  const out = chunks.join("");
+  assert.ok(
+    out.includes("latest"),
+    `expected the up-to-date message in output: ${out}`,
+  );
+  assert.ok(
+    !out.includes("--to-latest"),
+    `must not advertise the apply hint when already current: ${out}`,
+  );
+});
+
+
+test(
+  "runUpdate --to-version <X> validates X then re-renders compose with the new tag",
+  async (t) => {
+    // Drive the full --to-version flow into a fake $HOME so we can
+    // assert the rendered docker-compose.yml without touching the
+    // developer's real runtime dir.
+    const home = withFakeHome(t);
+    const klioDir = join(home, ".klio");
+    // Ensure parent dir exists for the .env we seed below.
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(klioDir, { recursive: true, mode: 0o700 });
+    const envPath = join(klioDir, ".env");
+    writeFileSync(
+      envPath,
+      "KLIO_JWT_SIGNING_KEY=sentinel-jwt\nKLIO_OPENROUTER_API_KEY=sk-or-existing\n",
+    );
+
+    const { stdout } = captureStdout();
+    const composeCalls: { args: string[][] } = { args: [] };
+
+    await runUpdate({
+      args: ["--to-version", "9.9.9"],
+      stdin: new Readable({ read() {} }),
+      stdout,
+      composeApply: async (args) => {
+        composeCalls.args.push([...args]);
+      },
+    });
+
+    // Compose template was re-rendered with the new tag. Read it
+    // back from the runtime dir (which we just redirected to $HOME).
+    const { readFileSync } = await import("node:fs");
+    const composePath = join(klioDir, "docker-compose.yml");
+    const body = readFileSync(composePath, "utf8");
+    assert.ok(
+      body.includes("klio-engine:9.9.9"),
+      `expected the rendered compose to pin engine to 9.9.9, got:\n${body.slice(0, 400)}`,
+    );
+    assert.ok(
+      body.includes("klio-bridge:9.9.9"),
+      `expected the rendered compose to pin bridge to 9.9.9: ${body.slice(0, 400)}`,
+    );
+
+    // The compose-apply hook fires twice: once for `pull` and once
+    // for `up -d --no-deps engine bridge trust-app`.
+    assert.equal(composeCalls.args.length, 2, "expected pull + up");
+    assert.ok(
+      composeCalls.args[0].includes("pull"),
+      `first compose call must be pull, got: ${JSON.stringify(composeCalls.args[0])}`,
+    );
+    const upArgs = composeCalls.args[1];
+    assert.ok(upArgs.includes("up") && upArgs.includes("-d"), `expected up -d in second call, got: ${JSON.stringify(upArgs)}`);
+    assert.ok(
+      upArgs.includes("engine") && upArgs.includes("bridge") && upArgs.includes("trust-app"),
+      `expected all three klio services in up call, got: ${JSON.stringify(upArgs)}`,
+    );
+
+    // Sanity: the env's existing JWT survived the round-trip
+    // (writeComposeFile shouldn't touch the .env, but if a future
+    // refactor added a write path, this assertion catches it).
+    const after = parseEnvFile(envPath);
+    assert.equal(after.KLIO_JWT_SIGNING_KEY, "sentinel-jwt");
+    assert.equal(after.KLIO_OPENROUTER_API_KEY, "sk-or-existing");
+  },
+);
+
+
+test(
+  "runUpdate --to-version with a non-semver argument refuses and never re-renders",
+  async (t) => {
+    // We use a child process to capture process.exit cleanly.
+    // Driving runUpdate directly would kill the test runner because
+    // the bad-arg path calls process.exit(2). Instead we fork a tsx
+    // subprocess that imports runUpdate and observe its exit code.
+    const home = withFakeHome(t);
+    const klioDir = join(home, ".klio");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(klioDir, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(klioDir, ".env"),
+      "KLIO_JWT_SIGNING_KEY=sentinel-jwt\n",
+    );
+
+    const { spawnSync } = await import("node:child_process");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname: dn } = await import("node:path");
+    const here = dn(fileURLToPath(import.meta.url));
+    const script = [
+      "import { runUpdate } from '../src/commands/update.js';",
+      "await runUpdate({",
+      "  args: ['--to-version', 'not-a-version; rm -rf /'],",
+      "  composeApply: async () => {},",
+      "});",
+    ].join("\n");
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", script],
+      { cwd: here, env: { ...process.env, HOME: home }, encoding: "utf8" },
+    );
+
+    assert.notEqual(
+      result.status,
+      0,
+      `expected non-zero exit on bogus version, got: ${result.status}\nstdout=${result.stdout}\nstderr=${result.stderr}`,
+    );
+    assert.ok(
+      result.stderr.includes("not a valid semver"),
+      `expected a semver validation error on stderr, got: ${result.stderr}`,
+    );
+  },
+);
