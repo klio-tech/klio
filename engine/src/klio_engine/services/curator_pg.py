@@ -11,14 +11,31 @@ against the engine's primary AsyncSession.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from klio_engine.crypto.envelope import EnvelopeEncrypter
+from klio_engine.crypto.kms_client import KMSClient
 from klio_engine.models.curator_state import CuratorState
 from klio_engine.models.entry import Entry, EntryKind
+from klio_engine.models.user import User
+
+
+@dataclass(frozen=True)
+class Observation:
+    """Decrypted observation handed to the Curator's `_render_transcript`.
+
+    The Curator only needs `id`, `content`, `created_at`. We freeze the
+    dataclass so a tick can pass observations around without the
+    accidental-mutation footgun that comes with raw ORM rows."""
+
+    id: uuid.UUID
+    content: str
+    created_at: datetime
 
 
 class PgCursorStore:
@@ -109,7 +126,16 @@ class PgCursorStore:
 
 
 class PgObservationReader:
-    """Reads recent kind=observation entries for one user."""
+    """Reads recent kind=observation entries for one user.
+
+    Returns raw `Entry` rows with encrypted `content_ciphertext`. The
+    Curator's `_render_transcript` requires plaintext on `.content`, so
+    a downstream consumer must decrypt before rendering — see
+    `DecryptingObservationReader` for the production wiring used by
+    `services.curator_scheduler`. This class stays content-agnostic so
+    SQL-only tests (test_curator_pg.py) can exercise the filter and
+    ordering semantics without standing up an envelope-key fixture.
+    """
 
     def __init__(self, *, session: AsyncSession) -> None:
         self._session = session
@@ -130,3 +156,58 @@ class PgObservationReader:
             .limit(limit)
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+
+class DecryptingObservationReader:
+    """Curator-facing ObservationReader that yields plaintext rows.
+
+    Wraps `PgObservationReader` (raw encrypted Entry rows) + the user's
+    envelope key (unwrapped via KMS) and returns lightweight
+    `Observation` dataclasses that satisfy the Curator's contract:
+    `.id`, `.content`, `.created_at`.
+
+    Decryption is per-batch, not per-row: the envelope key is unwrapped
+    once per `read` call and reused across the batch's rows. This keeps
+    KMS calls bounded — at most one per tick per user — while still
+    handing the Curator plaintext content for the LLM-facing transcript.
+    """
+
+    def __init__(self, *, session: AsyncSession, kms: KMSClient) -> None:
+        self._inner = PgObservationReader(session=session)
+        self._session = session
+        self._kms = kms
+
+    async def read(
+        self, *, user_id: uuid.UUID, since: datetime, limit: int
+    ) -> list[Observation]:
+        rows = await self._inner.read(
+            user_id=user_id, since=since, limit=limit
+        )
+        if not rows:
+            return []
+        envelope = await self._envelope_for(user_id)
+        return [
+            Observation(
+                id=r.id,
+                content=envelope.decrypt(
+                    r.content_nonce, r.content_ciphertext
+                ).decode("utf-8"),
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+
+    async def _envelope_for(self, user_id: uuid.UUID) -> EnvelopeEncrypter:
+        """Unwrap the user's envelope key once per tick. Mirrors the
+        helper in `EntryService._envelope` rather than reusing it
+        directly to keep the curator path free of `EntryService`'s
+        embedding/dedup dependencies."""
+        u = await self._session.get(User, user_id)
+        if u is None or u.wrapped_envelope_key is None:
+            raise ValueError(
+                f"user {user_id} has no envelope key — curator cannot "
+                "decrypt observations without one; provision the user "
+                "via services.user_keys before enabling the curator"
+            )
+        plaintext_key = self._kms.unwrap_envelope_key(u.wrapped_envelope_key)
+        return EnvelopeEncrypter(envelope_key=plaintext_key)

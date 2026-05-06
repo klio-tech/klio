@@ -23,8 +23,8 @@ from klio_engine.config import Settings
 from klio_engine.dependencies import KMSBackend
 from klio_engine.services.curator import Curator
 from klio_engine.services.curator_pg import (
+    DecryptingObservationReader,
     PgCursorStore,
-    PgObservationReader,
 )
 from klio_engine.services.curator_writer import CuratorWriter
 from klio_engine.services.extractor import FactExtractor
@@ -69,7 +69,9 @@ def register_user_job(
         # exception, etc. Cheap to open per tick, predictable.
         async with session_factory() as session:
             try:
-                reader = PgObservationReader(session=session)
+                reader = DecryptingObservationReader(
+                    session=session, kms=kms
+                )
                 extractor = FactExtractor(
                     model=settings.effective_curator_model
                 )
