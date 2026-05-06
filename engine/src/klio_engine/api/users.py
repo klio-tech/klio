@@ -27,6 +27,7 @@ from klio_engine.schemas.users import (
     VerifyRequest,
     VerifyResponse,
 )
+from klio_engine.services.curator_scheduler import register_user_job
 from klio_engine.services.provisioning import provision_user
 
 router = APIRouter(prefix="/v1/users", tags=["users"])
@@ -39,6 +40,7 @@ router = APIRouter(prefix="/v1/users", tags=["users"])
 )
 async def provision(
     body: ProvisionRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     kms: KMSClient = Depends(get_kms),
 ) -> ProvisionResponse:
@@ -54,6 +56,30 @@ async def provision(
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     await session.commit()
+
+    # C2: register a curator job for the new user immediately so they
+    # don't have to wait for the next engine restart to get curated.
+    # `register_user_job` is idempotent, so even if a previous request
+    # already registered this user (e.g., a re-provisioning race) the
+    # call is a no-op.
+    #
+    # When the curator is disabled (KLIO_CURATOR_ENABLED=false), the
+    # lifespan never attaches a scheduler to app.state — we read
+    # defensively via getattr and skip registration in that case. The
+    # provisioning route must remain functional even when curation is
+    # off; this keeps that decoupling explicit.
+    scheduler = getattr(request.app.state, "curator_scheduler", None)
+    session_factory = getattr(request.app.state, "curator_session_factory", None)
+    curator_kms = getattr(request.app.state, "curator_kms", None)
+    if scheduler is not None and session_factory is not None and curator_kms is not None:
+        register_user_job(
+            scheduler=scheduler,
+            user_id=result.user_id,
+            settings=Settings(),
+            session_factory=session_factory,
+            kms=curator_kms,
+        )
+
     return ProvisionResponse(
         user_id=result.user_id,
         agent_id=result.agent_id,
