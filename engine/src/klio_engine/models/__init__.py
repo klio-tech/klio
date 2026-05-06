@@ -3,6 +3,7 @@ from klio_engine.models.access_request import AccessRequest, AccessRequestStatus
 from klio_engine.models.agent import Agent, AgentKind
 from klio_engine.models.audit import AuditLogEntry
 from klio_engine.models.base import Base
+from klio_engine.models.curator_state import CuratorState  # noqa: F401
 from klio_engine.models.entry import Entry, EntryKind
 from klio_engine.models.entry_embedding import (
     SHADOW_BY_DIM,
