@@ -14,6 +14,11 @@ from klio_engine.config import Settings
 
 
 def test_curator_defaults_when_no_env() -> None:
+    # `database_url` is the only currently-required field on Settings,
+    # so we hardcode it here and let `clear=True` strip every other
+    # KLIO_* env. If a future required field is added, this test will
+    # fail with a clear "field X required" Pydantic error — that's
+    # the desired signal, not a regression of curator-config tests.
     with mock.patch.dict(os.environ, {}, clear=True):
         s = Settings(database_url="postgresql+asyncpg://x")
     assert s.curator_enabled is True
@@ -64,3 +69,40 @@ def test_curator_model_override_wins() -> None:
     ):
         s = Settings(database_url="postgresql+asyncpg://x")
     assert s.effective_curator_model == "openrouter/openai/gpt-4o-mini"
+
+
+def test_curator_interval_zero_is_rejected() -> None:
+    """A 0-second interval would tight-loop APScheduler. Pydantic
+    must surface that as a config error at engine startup, not let
+    it through to runtime."""
+    with mock.patch.dict(
+        os.environ, {"KLIO_CURATOR_INTERVAL_SECS": "0"}, clear=True
+    ):
+        with pytest.raises(Exception):  # ValidationError or ValueError
+            Settings(database_url="postgresql+asyncpg://x")
+
+
+def test_curator_interval_negative_is_rejected() -> None:
+    with mock.patch.dict(
+        os.environ, {"KLIO_CURATOR_INTERVAL_SECS": "-60"}, clear=True
+    ):
+        with pytest.raises(Exception):
+            Settings(database_url="postgresql+asyncpg://x")
+
+
+def test_curator_batch_size_zero_is_rejected() -> None:
+    """A 0-batch SQL LIMIT either no-ops the read or 500s downstream;
+    fail at config-load instead."""
+    with mock.patch.dict(
+        os.environ, {"KLIO_CURATOR_BATCH_SIZE": "0"}, clear=True
+    ):
+        with pytest.raises(Exception):
+            Settings(database_url="postgresql+asyncpg://x")
+
+
+def test_curator_batch_size_negative_is_rejected() -> None:
+    with mock.patch.dict(
+        os.environ, {"KLIO_CURATOR_BATCH_SIZE": "-1"}, clear=True
+    ):
+        with pytest.raises(Exception):
+            Settings(database_url="postgresql+asyncpg://x")

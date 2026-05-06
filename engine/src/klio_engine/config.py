@@ -1,4 +1,5 @@
 """Application settings — loaded from env, validated by pydantic."""
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,7 +48,7 @@ class Settings(BaseSettings):
     curator_enabled: bool = True
     # Tick interval. Default 1 hour; the npm `klio update curator`
     # picker offers 1h / 4h / 24h / on-demand-only / disable.
-    curator_interval_secs: int = 3600
+    curator_interval_secs: int = Field(default=3600, gt=0)
     # Empty string means "fall back to extraction_model". The
     # `effective_curator_model` property below resolves the fallback
     # so call sites don't have to.
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
     # How many observations the curator hands to FactExtractor per
     # tick. Capped to keep LLM context reasonable; oversized backlogs
     # drain over multiple ticks.
-    curator_batch_size: int = 50
+    curator_batch_size: int = Field(default=50, gt=0)
 
     @property
     def effective_curator_model(self) -> str:
