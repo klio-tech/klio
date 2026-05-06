@@ -40,7 +40,11 @@ def test_last_synthesized_default_is_zero() -> None:
 
 def test_last_cursor_at_has_epoch_default() -> None:
     """Default '1970-01-01' so a brand-new user picks up every
-    observation they own on the first tick. The migration sets the
-    server-side default; this test pins the SQLAlchemy mapping."""
+    observation they own on the first tick. Pin the actual default
+    text so a future refactor can't silently swap the sentinel."""
     col = CuratorState.__table__.columns["last_cursor_at"]
     assert col.server_default is not None
+    # SQLAlchemy stores the text() default behind .arg.
+    # Use str() to handle TextClause's __str__ contract regardless
+    # of SA version.
+    assert "1970-01-01" in str(col.server_default.arg)

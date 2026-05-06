@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, text
+from sqlalchemy import DateTime, ForeignKey, Integer, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -39,6 +39,7 @@ class CuratorState(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("'1970-01-01 00:00:00+00'::timestamptz"),
+        index=True,
     )
     runs_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
