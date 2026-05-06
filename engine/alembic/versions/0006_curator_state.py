@@ -40,7 +40,9 @@ def upgrade() -> None:
                 DEFAULT '1970-01-01 00:00:00+00'::timestamptz,
             runs_count INTEGER NOT NULL DEFAULT 0,
             last_error TEXT,
-            last_synthesized INTEGER NOT NULL DEFAULT 0
+            last_synthesized INTEGER NOT NULL DEFAULT 0,
+            CONSTRAINT runs_count_non_negative CHECK (runs_count >= 0),
+            CONSTRAINT last_synthesized_non_negative CHECK (last_synthesized >= 0)
         )
         """
     )
