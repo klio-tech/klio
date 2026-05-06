@@ -38,14 +38,23 @@ RUN pip install --no-cache-dir --upgrade pip \
         "alembic>=1.13" \
         "pydantic[email]>=2.9" \
         "pydantic-settings>=2.5" \
-        "litellm>=1.50" \
         "boto3>=1.35" \
         "moto[kms,s3]>=5.0" \
         "cryptography>=43" \
         "structlog>=24" \
         "redis>=5" \
+        "apscheduler>=3.10,<4" \
         "python-jose[cryptography]>=3.3" \
         "httpx>=0.27"
+# This list is hand-maintained to mirror the runtime deps in
+# `pyproject.toml`. Keep them in sync — a dep missing here will
+# crash the engine on startup with ModuleNotFoundError even though
+# the same dep tree resolves cleanly under local `uv run`.
+#   - `litellm` was dropped in 0.3.0 (engine routes via direct
+#     httpx now). Do not add it back.
+#   - `apscheduler` was added in 0.5.0 for the background curator
+#     job (klio_engine/services/curator.py). Required at import
+#     time of klio_engine.api.main.
 
 
 FROM python:3.12-slim AS runtime

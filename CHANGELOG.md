@@ -4,6 +4,39 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — 2026-05-07
+
+### Fixed
+
+- **`klio-engine` container 0.5.0 was missing `apscheduler` at runtime.**
+  The engine Dockerfile maintains its own hand-typed pip-install list
+  (parallel to the runtime deps in `engine/pyproject.toml`); when
+  `apscheduler` was added to `pyproject.toml` for the curator, the
+  Dockerfile was not updated to match. The published `:0.5.0` image
+  crashed on startup with
+  `ModuleNotFoundError: No module named 'apscheduler'` the moment
+  `klio_engine.api.main` was imported. **0.5.1 republishes the engine
+  image with `apscheduler>=3.10,<4` in the runtime layer.**
+- Cleaned up a long-standing piece of dead weight: the Dockerfile's
+  pip list still installed `litellm>=1.50` even though the engine
+  dropped LiteLLM in 0.3.0 (the engine routes via direct httpx now).
+  Removing it shaves ~30 MB off the runtime image and removes an
+  attack surface that was never exercised.
+- Added a load-bearing comment in the Dockerfile explaining that the
+  pip list is hand-maintained in parallel to `pyproject.toml` and
+  must be kept in sync. A future migration to `pip install .` (driven
+  by the pyproject's `[build-system]`) would eliminate the drift
+  surface entirely; tracked as a follow-up.
+
+### Why this is a separate release rather than a re-tag of 0.5.0
+
+The compose template uses `pull_policy: missing`, so a user who
+already pulled the broken `:0.5.0` image keeps running it on every
+subsequent `docker compose up` even after the registry has the fix.
+Bumping to `:0.5.1` is the only way to give every user a clean image
+without telling each one to manually `docker image rm` the broken
+copy.
+
 ## [0.5.0] — 2026-05-06
 
 ### Added — Klio Curator
