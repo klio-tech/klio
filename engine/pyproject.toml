@@ -42,6 +42,7 @@ dependencies = [
     "cryptography>=43",
     "structlog>=24",
     "redis>=5",
+    "apscheduler>=3.10",
     "python-jose[cryptography]>=3.3",
 ]
 
