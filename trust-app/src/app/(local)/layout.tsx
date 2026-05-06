@@ -1,7 +1,13 @@
 import Link from "next/link";
 
 import { getSession } from "@/lib/session";
+import { fetchBanners } from "@/lib/system-banners";
 import { KlioMark } from "@/components/landing/KlioMark";
+import { ClaimEmailBanner } from "@/components/banners/ClaimEmailBanner";
+
+// Engine base URL — matches the resolution used elsewhere in
+// trust-app (see src/lib/api.ts). Kept in lockstep with that file.
+const ENGINE_URL = process.env.KLIO_ENGINE_URL ?? "http://127.0.0.1:8000";
 
 export default async function AppLayout({
   children,
@@ -9,8 +15,19 @@ export default async function AppLayout({
   children: React.ReactNode;
 }) {
   const session = await getSession();
+  // Banner data is fetched server-side so the initial HTML already
+  // includes the (small) banner markup — no client-side flash. We
+  // expose the engine URL to the banner so its in-banner POST to
+  // /v1/auth/login-link reaches the same engine the layout queried.
+  const banners = session
+    ? await fetchBanners(ENGINE_URL, session.accessToken)
+    : [];
+  const claimEmailBanner = banners.find((b) => b.kind === "claim_email");
   return (
     <>
+      {claimEmailBanner && (
+        <ClaimEmailBanner banner={claimEmailBanner} engineURL={ENGINE_URL} />
+      )}
       <header
         style={{
           display: "flex",
