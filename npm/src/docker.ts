@@ -153,6 +153,28 @@ export async function composeRestart(
 }
 
 /**
+ * `docker compose up -d --no-deps <service>` — re-create a single
+ * service so it picks up env-var changes from the sibling .env
+ * file, WITHOUT touching its dependencies. Plain `restart` would
+ * be cheaper, but it does NOT re-read the .env file: compose
+ * resolves env interpolation at container-create time, so a value
+ * that changed in .env only takes effect when the container is
+ * re-created.
+ *
+ * Used by `klio update curator` (and other slice-update flows) to
+ * apply new env settings to the engine without bouncing postgres /
+ * redis / trust-app / bridge.
+ */
+export async function composeUpService(
+  bin: ComposeBin,
+  cwd: string,
+  service: string,
+): Promise<void> {
+  const argv = [...bin.prefix, "up", "-d", "--no-deps", service];
+  await streamCommand(bin.cmd, argv, cwd);
+}
+
+/**
  * `docker exec -i <container> <argv...>` with optional stdin.
  * Returns combined stdout. Throws on non-zero exit.
  *
