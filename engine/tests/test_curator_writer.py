@@ -21,17 +21,11 @@ to invent it).
 """
 from __future__ import annotations
 
-import os
 import uuid
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
-
-# Ensure deterministic embeddings before EmbeddingService imports the
-# Settings cache. Without this the writer would try to talk to Ollama
-# during dedup-embedding inside EntryService.write.
-os.environ.setdefault("KLIO_EMBEDDING_MODEL", "stub")
 
 from klio_engine.crypto.kms_client import KMSClient
 from klio_engine.models.agent import Agent
@@ -43,6 +37,32 @@ from klio_engine.services.user_keys import UserKeyService
 
 
 pytestmark = pytest.mark.asyncio
+
+
+# --- Hermetic env ---------------------------------------------------
+#
+# CuratorWriter constructs an EntryService, which in turn instantiates
+# Settings (pydantic-settings) and EmbeddingService. Without ambient
+# env this would fail with `Settings.database_url Field required` and
+# would attempt to talk to Ollama for embeddings. The autouse fixture
+# below pins the env vars deterministically per-test so the suite runs
+# under bare `pytest tests/test_curator_writer.py` with no shell setup
+# and `monkeypatch.setenv` auto-restores at teardown.
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auto-applied to every test in this file. The real Settings
+    instance constructed by CuratorWriter requires KLIO_DATABASE_URL
+    and reads KLIO_EMBEDDING_MODEL for the EmbeddingService inside
+    EntryService. Set both to predictable hermetic values so the
+    suite runs under bare `pytest` without ambient env."""
+    monkeypatch.setenv(
+        "KLIO_DATABASE_URL",
+        "postgresql+asyncpg://klio:klio_dev_password@127.0.0.1:5433/klio",
+    )
+    monkeypatch.setenv("KLIO_EMBEDDING_MODEL", "stub")
+    monkeypatch.setenv("KLIO_EXTRACTION_MODEL", "stub")
 
 
 # --- Local fixtures -------------------------------------------------
