@@ -6,6 +6,19 @@ import (
 	"strings"
 )
 
+// maxObservationFieldChars caps each tool I/O field independently in the
+// observation summary. The total per-observation budget is therefore
+// roughly 2 * maxObservationFieldChars plus framing.
+//
+// Why 2000: large enough to carry a typical bash stdin/stdout, an Edit
+// patch, or a Write payload in one piece — the things that the curator's
+// FactExtractor needs full context to reason about. Small enough that
+// the eventual ciphertext stays well under typical request limits.
+//
+// Bumping this requires no schema change — the bridge writes plain
+// observation `content` strings; the engine encrypts opaquely.
+const maxObservationFieldChars = 2000
+
 // SessionStart hooks: pull recent context for the active space and emit it
 // as additionalContext that Claude Code prepends to its system prompt.
 func SessionStart(b Backend, _ Payload) (Response, error) {
@@ -95,19 +108,49 @@ func PreToolUse(b Backend, p Payload) (Response, error) {
 
 // PostToolUse: log an observation entry for cross-agent visibility.
 // Best-effort, async; never blocks the user's session.
+//
+// The observation captures BOTH the tool input and the tool response,
+// each independently truncated to maxObservationFieldChars. This is the
+// upstream signal the curator's FactExtractor consumes — losing it
+// (which pre-0.5.4 silently did for any input >= 400 bytes, and for
+// every tool response unconditionally) starves extraction.
 func PostToolUse(b Backend, p Payload) (Response, error) {
 	if p.ToolName == "" {
 		return Response{}, nil
 	}
-	summary := fmt.Sprintf("Used tool %s", p.ToolName)
-	if len(p.ToolInput) > 0 && len(p.ToolInput) < 400 {
-		summary += " input=" + string(p.ToolInput)
-	}
-	_, _ = b.WriteEntry("observe", summary, map[string]any{
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Used tool %s\n", p.ToolName))
+	sb.WriteString("input: ")
+	sb.WriteString(formatObservationField(p.ToolInput))
+	sb.WriteString("\nresponse: ")
+	sb.WriteString(formatObservationField(p.ToolResponse))
+	_, _ = b.WriteEntry("observe", sb.String(), map[string]any{
 		"tool":       p.ToolName,
 		"session_id": p.SessionID,
 	})
 	return Response{}, nil
+}
+
+// formatObservationField renders one tool I/O field for the observation
+// summary. Empty/nil fields render as the literal "(none)" so downstream
+// consumers can distinguish "absent" from "truncated to nothing".
+//
+// Truncation is byte-naive on purpose: the LLM-backed extractor handles
+// partial JSON well, and the regex-stub fallback doesn't care about
+// JSON shape. We always append a marker recording the original size so
+// future readers (and the curator) can tell signal was dropped.
+func formatObservationField(raw []byte) string {
+	if len(raw) == 0 {
+		return "(none)"
+	}
+	if len(raw) <= maxObservationFieldChars {
+		return string(raw)
+	}
+	return fmt.Sprintf(
+		"%s... (truncated, original %d bytes)",
+		string(raw[:maxObservationFieldChars]),
+		len(raw),
+	)
 }
 
 // SubagentStop: capture subagent's final report as an observation.

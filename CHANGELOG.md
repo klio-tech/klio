@@ -4,6 +4,78 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.4] — 2026-05-07
+
+### Added — full request + response capture in observations
+
+`bridge/internal/hooks/handlers.go:PostToolUse` now records both
+`ToolInput` and `ToolResponse` from every PostToolUse hook event.
+Pre-0.5.4 it only captured `ToolInput`, *and only if under 400 bytes*
+— anything bigger (multi-line bash stdin, large edits, bulk reads)
+silently became "Used tool Edit" with zero context. The curator's
+`FactExtractor` had no signal to extract from, so synthesised
+memories were thin and the tool had little to chew on.
+
+The new format:
+
+```
+Used tool {ToolName}
+input: {ToolInput, truncated to 2000 chars}
+response: {ToolResponse, truncated to 2000 chars}
+```
+
+Truncation appends `... (truncated, original N bytes)` so the
+extractor can see when it got a partial view. Total observation
+content capped at ~4 KB to keep embedding contexts reasonable.
+
+Three new tests in `bridge/internal/hooks/handlers_test.go` pin the
+contract: input + response both captured, large fields truncated
+with the suffix marker, missing-response payloads handled cleanly.
+
+### Fixed — test isolation guardrail (the 0.5.3 incident)
+
+A test subagent's setup ran `TRUNCATE public.users CASCADE` against
+the user's PRODUCTION Postgres while trying to clean up "stale test
+data," wiping ~29 real users + 1304 entries. The conftest's safety
+model failed: it expected an isolated test DB at
+`127.0.0.1:5433` but didn't fail-fast when the actually-targeted DB
+looked production-shaped.
+
+`engine/tests/conftest.py` now exports `_refuse_if_production_db`,
+which queries the `users` table (resolved via `search_path` so the
+guardrail also catches misconfigured per-test schemas) and aborts
+the run with a clear refusal if there are more than 5 rows. The
+threshold is generous for stale-fixture leakage but catches anything
+an order of magnitude beyond a clean test DB. The 0.5.3-incident DB
+had ~29 users — would have tripped the guardrail at 6.
+
+`engine/tests/test_conftest_guardrail.py` is the self-defending
+test for the guardrail itself. If anyone in the future loosens or
+removes the check, this file fails — making the bug self-defending.
+
+### Fixed — pytest unqualified-resolution
+
+The guardrail intentionally uses unqualified `to_regclass('users')`
++ `SELECT count(*) FROM users` rather than `public.users`, so it
+resolves via the connection's `search_path`. Production callers
+default to `search_path=public` (catches real prod data); test
+callers run with `search_path=<isolated_schema>` (the per-test
+schema's empty users table). A qualified `public.users` lookup
+would short-circuit search_path resolution and break the
+guardrail's own self-tests.
+
+### Known follow-ups (not in 0.5.4)
+
+- `klio curator run-now` Go subcommand on the bridge — still
+  outstanding from 0.5.0. Without it, the npm CLI's `--run-now`
+  flag prints a graceful "bridge does not yet support this
+  subcommand" message rather than triggering an immediate pass.
+- A `engine/CLAUDE.md` "database safety rules" section explicitly
+  warning subagents not to `docker exec klio-postgres psql ...`
+  for destructive SQL. The guardrail prevents the worst case at
+  runtime; the docs would prevent it at the brain-of-future-agent
+  level.
+
 ## [0.5.3] — 2026-05-07
 
 ### Fixed

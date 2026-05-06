@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -81,9 +82,10 @@ func TestUserPromptIgnoresNonTrigger(t *testing.T) {
 func TestPostToolLogsObservation(t *testing.T) {
 	b := &fakeBackend{}
 	_, _ = PostToolUse(b, Payload{
-		ToolName:   "Edit",
-		SessionID:  "abc",
-		ToolInput:  []byte(`{"file":"x.ts"}`),
+		ToolName:     "Edit",
+		SessionID:    "abc",
+		ToolInput:    []byte(`{"file":"x.ts"}`),
+		ToolResponse: []byte(`{"ok":true}`),
 	})
 	if len(b.written) != 1 {
 		t.Fatalf("expected 1 observation")
@@ -93,6 +95,99 @@ func TestPostToolLogsObservation(t *testing.T) {
 	}
 	if !strings.Contains(b.written[0], "Edit") {
 		t.Fatal("tool name missing")
+	}
+}
+
+// TestPostToolUseCapturesBothInputAndResponse pins the contract that
+// observations carry the full tool I/O — anything less starves the
+// curator's FactExtractor of signal.
+func TestPostToolUseCapturesBothInputAndResponse(t *testing.T) {
+	b := &fakeBackend{}
+	_, _ = PostToolUse(b, Payload{
+		ToolName:     "Bash",
+		SessionID:    "s1",
+		ToolInput:    []byte(`{"command":"ls -la","description":"list files"}`),
+		ToolResponse: []byte(`{"stdout":"file1\nfile2\n","exit_code":0}`),
+	})
+	if len(b.written) != 1 {
+		t.Fatalf("expected 1 observation, got %d", len(b.written))
+	}
+	got := b.written[0]
+	if !strings.Contains(got, "Used tool Bash") {
+		t.Fatalf("missing tool name header: %s", got)
+	}
+	if !strings.Contains(got, "input:") {
+		t.Fatalf("missing input: line: %s", got)
+	}
+	if !strings.Contains(got, `"command":"ls -la"`) {
+		t.Fatalf("missing input payload: %s", got)
+	}
+	if !strings.Contains(got, "response:") {
+		t.Fatalf("missing response: line: %s", got)
+	}
+	if !strings.Contains(got, `"exit_code":0`) {
+		t.Fatalf("missing response payload: %s", got)
+	}
+}
+
+// TestPostToolUseTruncatesLargeFields asserts each field is truncated
+// independently to the per-field cap with a clear "(truncated, original
+// N bytes)" suffix — this is what made the < 400-byte silent drop in
+// pre-0.5.4 so harmful: there was no signal that data was lost.
+func TestPostToolUseTruncatesLargeFields(t *testing.T) {
+	b := &fakeBackend{}
+	bigPayload := make([]byte, 5000)
+	for i := range bigPayload {
+		bigPayload[i] = 'a'
+	}
+	_, _ = PostToolUse(b, Payload{
+		ToolName:     "Bash",
+		SessionID:    "s2",
+		ToolInput:    bigPayload,
+		ToolResponse: []byte(`{"ok":true}`),
+	})
+	if len(b.written) != 1 {
+		t.Fatalf("expected 1 observation, got %d", len(b.written))
+	}
+	got := b.written[0]
+	// First 2000 chars of the input should appear.
+	if !strings.Contains(got, strings.Repeat("a", maxObservationFieldChars)) {
+		t.Fatalf("expected first %d bytes of input, got: %s",
+			maxObservationFieldChars, got[:200])
+	}
+	// More than 2000 'a's would mean we didn't truncate. Allow exactly
+	// the cap, never more.
+	if strings.Contains(got, strings.Repeat("a", maxObservationFieldChars+1)) {
+		t.Fatalf("input exceeded truncation cap of %d", maxObservationFieldChars)
+	}
+	// Truncation marker must call out the original size honestly.
+	expectedMarker := fmt.Sprintf("(truncated, original %d bytes)", len(bigPayload))
+	if !strings.Contains(got, expectedMarker) {
+		t.Fatalf("missing truncation marker %q in: %s", expectedMarker, got)
+	}
+}
+
+// TestPostToolUseHandlesEmptyResponse covers the rare-but-real case
+// where a tool errors before producing output. We must still emit an
+// observation, with a clear `response: (none)` placeholder, never a
+// panic and never a missing line.
+func TestPostToolUseHandlesEmptyResponse(t *testing.T) {
+	b := &fakeBackend{}
+	_, _ = PostToolUse(b, Payload{
+		ToolName:  "Edit",
+		SessionID: "s3",
+		ToolInput: []byte(`{"file":"x.ts"}`),
+		// ToolResponse intentionally nil
+	})
+	if len(b.written) != 1 {
+		t.Fatalf("expected 1 observation, got %d", len(b.written))
+	}
+	got := b.written[0]
+	if !strings.Contains(got, "input:") {
+		t.Fatalf("missing input: line: %s", got)
+	}
+	if !strings.Contains(got, "response: (none)") {
+		t.Fatalf("expected explicit (none) placeholder, got: %s", got)
 	}
 }
 
