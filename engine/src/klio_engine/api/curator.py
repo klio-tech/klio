@@ -12,17 +12,15 @@ response carries `skipped_concurrent` so the caller could one day
 surface that distinction; v1 always returns `false` (see TODO inside
 the handler).
 
-Why a fresh Curator instance per request rather than a long-lived one
-on `app.state`: the scheduler-side Curator owns its own per-user lock
-table; we don't want a run-now call's lock to cross-contaminate with
-the scheduled tick's lock. Every run-now is its own single-flight
-domain — duplicate run-now requests serialise inside one handler
-chain via the asyncio Lock, but never against a scheduled tick
-running in parallel.
+The lock registry is shared (via `app.state.curator_locks`) with the
+scheduler-side Curator so a scheduled tick and a run-now for the
+same user serialise correctly. Without sharing, each surface owned
+its own private lock table and a tick + run-now overlap could
+double-issue the LLM call over the same observation window.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +43,7 @@ router = APIRouter(prefix="/v1/curator", tags=["curator"])
 
 @router.post("/run-now")
 async def run_now(
+    request: Request,
     ctx: RequestContext = Depends(require_auth),
     session: AsyncSession = Depends(get_session),
     kms: KMSBackend = Depends(get_kms),
@@ -60,7 +59,13 @@ async def run_now(
     `curator_state` row; this handler still returns 200 with that
     error string in the body so the CLI can surface it.
     """
-    settings = Settings()
+    # Re-use the lifespan-built Settings instance when present so we
+    # don't re-parse the env on every request. Falls back to a fresh
+    # Settings() only when the lifespan never ran (e.g., a test that
+    # skips lifespan_context entirely).
+    settings = getattr(
+        request.app.state, "curator_settings", None
+    ) or Settings()
     if not settings.curator_enabled:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -68,10 +73,7 @@ async def run_now(
         )
 
     # Same collaborator wiring as the scheduler's tick (see
-    # services.curator_scheduler.register_user_job._tick). Building it
-    # here rather than borrowing from app.state keeps the run-now path
-    # self-contained — and means run-now still works on a future engine
-    # build that disables the scheduler but keeps the route enabled.
+    # services.curator_scheduler.register_user_job._tick).
     #
     # The KMSBackend Protocol covers both `KMSClient` (AWS) and
     # `LocalFileKMSClient` (dev). DecryptingObservationReader and
@@ -83,10 +85,25 @@ async def run_now(
         session=session, kms=kms  # type: ignore[arg-type]
     )
     extractor = FactExtractor(model=settings.effective_curator_model)
-    writer = CuratorWriter(session=session, kms=kms)  # type: ignore[arg-type]
+    writer = CuratorWriter(
+        session=session,
+        kms=kms,  # type: ignore[arg-type]
+        dedup_threshold=settings.dedup_cosine_threshold,
+    )
     store = PgCursorStore(session=session)
+    # Pull the lifespan-shared per-user lock registry off app.state.
+    # Without sharing, run-now would have its own private lock table
+    # and could race against a scheduled tick for the same user
+    # (the scheduler holds its lock; run-now would mint a fresh
+    # empty dict, see lock-not-held, and proceed in parallel —
+    # exactly the double LLM call we want to prevent).
+    locks = getattr(request.app.state, "curator_locks", None)
     curator = Curator(
-        reader=reader, extractor=extractor, writer=writer, store=store
+        reader=reader,
+        extractor=extractor,
+        writer=writer,
+        store=store,
+        locks=locks,
     )
 
     await curator.run_once(

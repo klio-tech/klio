@@ -71,13 +71,22 @@ async def provision(
     scheduler = getattr(request.app.state, "curator_scheduler", None)
     session_factory = getattr(request.app.state, "curator_session_factory", None)
     curator_kms = getattr(request.app.state, "curator_kms", None)
-    if scheduler is not None and session_factory is not None and curator_kms is not None:
+    curator_settings = getattr(request.app.state, "curator_settings", None)
+    curator_locks = getattr(request.app.state, "curator_locks", None)
+    if (
+        scheduler is not None
+        and session_factory is not None
+        and curator_kms is not None
+    ):
+        # Re-use the lifespan-built Settings instance when present so
+        # we don't re-parse the env per provisioning request.
         register_user_job(
             scheduler=scheduler,
             user_id=result.user_id,
-            settings=Settings(),
+            settings=curator_settings or Settings(),
             session_factory=session_factory,
             kms=curator_kms,
+            locks=curator_locks,
         )
 
     return ProvisionResponse(

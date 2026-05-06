@@ -107,7 +107,9 @@ async def test_writer_creates_curator_agent_lazily(
 ) -> None:
     """First write for a user creates the klio-curator agent.
     Second write reuses it — no duplicate agent rows."""
-    writer = CuratorWriter(session=session, kms=mock_kms)
+    writer = CuratorWriter(
+        session=session, kms=mock_kms, dedup_threshold=0.92
+    )
 
     # No agents seeded; first write must create one.
     pre = (await session.execute(select(Agent).where(Agent.user_id == seed_user))).scalars().all()
@@ -166,7 +168,9 @@ async def test_writer_pins_to_user_default_space(
         )
     ).scalar_one()
 
-    writer = CuratorWriter(session=session, kms=mock_kms)
+    writer = CuratorWriter(
+        session=session, kms=mock_kms, dedup_threshold=0.92
+    )
     await writer.write(
         user_id=seed_user,
         kind="memory",
@@ -192,7 +196,9 @@ async def test_writer_persists_kind_content_metadata(
     from klio_engine.services.embeddings import EmbeddingService
     from klio_engine.services.entries import EntryService
 
-    writer = CuratorWriter(session=session, kms=mock_kms)
+    writer = CuratorWriter(
+        session=session, kms=mock_kms, dedup_threshold=0.92
+    )
     await writer.write(
         user_id=seed_user,
         kind="decision",
@@ -221,7 +227,9 @@ async def test_writer_uses_klio_curator_display_name(
     """The auto-created agent must have display_name='klio-curator'
     so `recall` and the trust-app timeline can flag synthesised
     entries distinctly from CLAUDE_CODE / CURSOR / etc."""
-    writer = CuratorWriter(session=session, kms=mock_kms)
+    writer = CuratorWriter(
+        session=session, kms=mock_kms, dedup_threshold=0.92
+    )
     await writer.write(
         user_id=seed_user,
         kind="memory",
@@ -250,7 +258,9 @@ async def test_writer_raises_when_user_has_no_default_space(
     await keys.provision_user_key(session, u)
     # NOTE: deliberately no Space seeded.
 
-    writer = CuratorWriter(session=session, kms=mock_kms)
+    writer = CuratorWriter(
+        session=session, kms=mock_kms, dedup_threshold=0.92
+    )
     with pytest.raises(RuntimeError, match="default space"):
         await writer.write(
             user_id=u.id,

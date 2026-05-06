@@ -226,6 +226,121 @@ async def test_curator_batch_size_limits_observation_read() -> None:
 
 
 @pytest.mark.asyncio
+async def test_curator_shared_locks_serialise_across_instances() -> None:
+    """Two Curator instances handed the SAME `locks` dict must
+    observe each other's per-user locks.
+
+    This pins the production wiring where the scheduler's tick and
+    the run-now HTTP handler each construct their own Curator. They
+    share `app.state.curator_locks` so a manual run-now fired while
+    a scheduled tick is still in flight is a no-op rather than a
+    parallel duplicate LLM call.
+
+    Test design: instance A starts a slow run_once and yields. Once
+    A is provably "in flight" (its slow extractor has been entered)
+    we kick off instance B's run_once — it must see the shared lock
+    held and return immediately, without invoking its own extractor
+    or writer. Without lock sharing, B would start its own pass in
+    parallel and we'd see two extractor calls + two writes."""
+    import asyncio
+
+    user = uuid.uuid4()
+
+    # Each instance has its OWN observation reader, extractor,
+    # writer, and store — only the lock dict is shared. That's the
+    # production shape: scheduler and run-now build their own
+    # collaborator graphs, only `app.state.curator_locks` crosses.
+    obs = [_Obs(id=uuid.uuid4(), content="x", created_at=_ts(10))]
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GatedExtractor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def extract(self, transcript: str) -> list[ExtractedEntry]:
+            self.calls += 1
+            started.set()
+            await release.wait()
+            return [ExtractedEntry(kind="memory", content="z", confidence=1)]
+
+    extractor_a = _GatedExtractor()
+    extractor_b = _GatedExtractor()
+    writer_a = _FakeWriter()
+    writer_b = _FakeWriter()
+    store_a = _FakeCursorStore()
+    store_b = _FakeCursorStore()
+
+    shared_locks: dict[uuid.UUID, asyncio.Lock] = {}
+
+    a = Curator(
+        reader=_FakeObservationReader(obs),
+        extractor=extractor_a,
+        writer=writer_a,
+        store=store_a,
+        locks=shared_locks,
+    )
+    b = Curator(
+        reader=_FakeObservationReader(obs),
+        extractor=extractor_b,
+        writer=writer_b,
+        store=store_b,
+        locks=shared_locks,
+    )
+
+    # Kick off A's slow run; wait until its extractor is provably
+    # in-flight before starting B. This pins the test against
+    # scheduler-fairness flakiness — without the gate we'd be
+    # racing to make B start before A's lock is acquired.
+    a_task = asyncio.create_task(a.run_once(user_id=user, batch_size=10))
+    await started.wait()
+
+    # B's run must observe A's held lock (because they share the
+    # registry) and return as a no-op — no extractor call, no write.
+    await b.run_once(user_id=user, batch_size=10)
+    assert extractor_b.calls == 0
+    assert writer_b.writes == []
+
+    # Let A complete cleanly.
+    release.set()
+    await a_task
+    assert extractor_a.calls == 1
+    assert len(writer_a.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_curator_private_locks_default_when_none_passed() -> None:
+    """Two Curator instances with NO shared lock dict each get a
+    private one. This is the unit-test path: a fresh Curator should
+    be a complete world unto itself unless the caller opts in.
+
+    Pinning this preserves the existing test suite's hermeticity —
+    we can run unit tests against a Curator instance without having
+    to thread a lock dict through every fixture."""
+    import asyncio
+
+    user = uuid.uuid4()
+    a = Curator(
+        reader=_FakeObservationReader([]),
+        extractor=_FakeExtractor(response=[]),
+        writer=_FakeWriter(),
+        store=_FakeCursorStore(),
+    )
+    b = Curator(
+        reader=_FakeObservationReader([]),
+        extractor=_FakeExtractor(response=[]),
+        writer=_FakeWriter(),
+        store=_FakeCursorStore(),
+    )
+    # Force lock allocation for `user` on both instances.
+    lock_a = a._lock_for(user)  # type: ignore[attr-defined]
+    lock_b = b._lock_for(user)  # type: ignore[attr-defined]
+    assert isinstance(lock_a, asyncio.Lock)
+    assert lock_a is not lock_b
+
+
+@pytest.mark.asyncio
 async def test_curator_single_flight_under_high_concurrency() -> None:
     """50 concurrent run_once invocations for the same user must
     result in exactly one extract+write pass. Empirical validation

@@ -71,15 +71,21 @@ def test_curator_model_override_wins() -> None:
     assert s.effective_curator_model == "openrouter/openai/gpt-4o-mini"
 
 
-def test_curator_interval_zero_is_rejected() -> None:
-    """A 0-second interval would tight-loop APScheduler. Pydantic
-    must surface that as a config error at engine startup, not let
-    it through to runtime."""
+def test_curator_interval_zero_is_accepted_as_on_demand() -> None:
+    """`KLIO_CURATOR_INTERVAL_SECS=0` is the on-demand sentinel.
+    The lifespan registers no APScheduler jobs in this mode but
+    still spins up the scheduler + run-now plumbing so that
+    `POST /v1/curator/run-now` (and `klio update curator
+    --run-now`) remain the manual invocation surface. Pydantic
+    must accept 0 — only negative values are rejected."""
     with mock.patch.dict(
         os.environ, {"KLIO_CURATOR_INTERVAL_SECS": "0"}, clear=True
     ):
-        with pytest.raises(Exception):  # ValidationError or ValueError
-            Settings(database_url="postgresql+asyncpg://x")
+        s = Settings(database_url="postgresql+asyncpg://x")
+    assert s.curator_interval_secs == 0
+    # In on-demand mode the curator is still considered "enabled" —
+    # the run-now endpoint must remain reachable.
+    assert s.curator_enabled is True
 
 
 def test_curator_interval_negative_is_rejected() -> None:

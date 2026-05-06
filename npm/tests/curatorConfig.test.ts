@@ -53,17 +53,17 @@ test("curatorEnvLines: daily cadence", () => {
 });
 
 
-test("curatorEnvLines: on-demand cadence keeps enabled true but uses a sentinel interval", () => {
-  // On-demand mode: scheduler isn't actively running on a fixed
-  // interval, but the user can still hit `klio update curator
-  // --run-now`. The engine treats curator_enabled=true and a very
-  // large interval as "tick basically never on its own clock".
+test("curatorEnvLines: on-demand cadence keeps enabled true and uses interval=0 as the sentinel", () => {
+  // On-demand mode: the curator is reachable via `klio update
+  // curator --run-now` but no scheduled ticks fire. The engine
+  // reads `KLIO_CURATOR_INTERVAL_SECS=0` as the "skip APScheduler
+  // job registration" sentinel — the lifespan still wires up the
+  // session_factory + kms + lock-registry so the run-now endpoint
+  // works, but no clock-driven jobs run.
   const cfg: CuratorConfig = { enabled: true, cadence: "on-demand", model: "" };
   const lines = curatorEnvLines(cfg);
   assert.match(lines, /^KLIO_CURATOR_ENABLED=true$/m);
-  // Use a year in seconds (large but not Number.MAX_SAFE_INTEGER —
-  // APScheduler must accept it as a real interval).
-  assert.match(lines, /^KLIO_CURATOR_INTERVAL_SECS=\d+$/m);
+  assert.match(lines, /^KLIO_CURATOR_INTERVAL_SECS=0$/m);
 });
 
 

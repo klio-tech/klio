@@ -30,15 +30,17 @@ export const CURATOR_CADENCE_LABELS: ReadonlyArray<{
   { slug: "hourly", label: "every hour", intervalSecs: 3600 },
   { slug: "every-4h", label: "every 4 hours", intervalSecs: 14400 },
   { slug: "daily", label: "once a day", intervalSecs: 86400 },
-  // On-demand: no real periodic tick. The user runs
-  // `klio update curator --run-now` to drain. We still need an
-  // interval value to feed APScheduler — pick one year as a
-  // "basically never" sentinel.
-  { slug: "on-demand", label: "on-demand only", intervalSecs: 31536000 },
-  // Disabled: enabled flag flips false; interval value is ignored
-  // by the lifespan but we keep it consistent (1 year) for
-  // observability.
-  { slug: "disabled", label: "disable", intervalSecs: 31536000 },
+  // On-demand: no scheduled ticks at all. `KLIO_CURATOR_INTERVAL_SECS=0`
+  // is the engine-side sentinel that tells the lifespan to skip
+  // APScheduler job registration entirely while still keeping
+  // `KLIO_CURATOR_ENABLED=true` so the `POST /v1/curator/run-now`
+  // endpoint (and `klio update curator --run-now`) remain the
+  // sole invocation surface.
+  { slug: "on-demand", label: "on-demand only", intervalSecs: 0 },
+  // Disabled: enabled flag flips false. The engine short-circuits
+  // before consulting the interval, so the value here is purely
+  // cosmetic — kept at 0 for consistency with on-demand.
+  { slug: "disabled", label: "disable", intervalSecs: 0 },
 ] as const;
 
 /** A user-picked curator config. */

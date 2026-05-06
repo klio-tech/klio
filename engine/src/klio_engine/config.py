@@ -48,7 +48,13 @@ class Settings(BaseSettings):
     curator_enabled: bool = True
     # Tick interval. Default 1 hour; the npm `klio update curator`
     # picker offers 1h / 4h / 24h / on-demand-only / disable.
-    curator_interval_secs: int = Field(default=3600, gt=0)
+    #
+    # `0` is the sentinel for "on-demand mode" — `curator_enabled`
+    # stays True (so `POST /v1/curator/run-now` remains available),
+    # but the lifespan does not register any APScheduler jobs and
+    # the provisioning hook short-circuits. Negative values are
+    # rejected; only 0 and positive values are admissible.
+    curator_interval_secs: int = Field(default=3600, ge=0)
     # Empty string means "fall back to extraction_model". The
     # `effective_curator_model` property below resolves the fallback
     # so call sites don't have to.

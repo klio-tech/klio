@@ -5,6 +5,8 @@ application. They can be split into separate processes later by importing
 only the relevant routers in a new entrypoint — the routers themselves don't
 hold cross-state.
 """
+import asyncio
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -58,9 +60,21 @@ async def _curator_lifespan(app: FastAPI) -> AsyncIterator[None]:
     the curator path; it must mean *nothing happens*.
 
     On startup, the scheduler is populated with one job per existing
-    user. New users created mid-uptime get registered via the
-    provisioning hook in C2 calling `register_user_job` against the
-    same scheduler + session_factory + kms stashed on `app.state`.
+    user — UNLESS `curator_interval_secs == 0`, the on-demand-only
+    sentinel. In on-demand mode the scheduler still starts and the
+    session_factory + kms still get stashed on `app.state` (so the
+    `POST /v1/curator/run-now` endpoint and the C2 provisioning hook
+    work), but no clock-driven ticks are registered.
+
+    New users created mid-uptime get registered via the provisioning
+    hook in C2 calling `register_user_job` against the same scheduler
+    + session_factory + kms + lock-registry stashed on `app.state`.
+
+    The lock-registry (`app.state.curator_locks`) is the single
+    shared per-user `asyncio.Lock` table consulted by both the
+    scheduled tick and the run-now HTTP handler — without sharing,
+    a tick and a run-now for the same user would race and double-
+    issue the LLM call over the overlapping observation window.
     """
     settings = Settings()
     if not settings.curator_enabled:
@@ -83,9 +97,25 @@ async def _curator_lifespan(app: FastAPI) -> AsyncIterator[None]:
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     kms = _build_kms(settings)
 
+    # Per-user lock registry shared across both invocation surfaces:
+    # - the scheduler's `_tick` (via `register_user_job`)
+    # - the run-now HTTP handler (via `app.state` lookup)
+    # The Curator class consults this same dict for `run_once`, so
+    # a scheduled tick and a manual run-now for the same user
+    # serialise correctly rather than each spinning up a fresh
+    # private lock and racing past each other.
+    locks: dict[uuid.UUID, asyncio.Lock] = {}
+    app.state.curator_locks = locks
+
     # Bootstrap: register one job per existing user. We only
     # enumerate non-deleted users — `deleted_at IS NULL` keeps a
     # tombstoned user's curator from waking up.
+    #
+    # In on-demand mode (`curator_interval_secs == 0`) the call
+    # below short-circuits inside `register_user_job`, so this loop
+    # is effectively a no-op — but we still iterate so the path is
+    # uniform and any future per-user precondition checks live in
+    # one place.
     async with session_factory() as session:
         rows = (
             await session.execute(
@@ -99,14 +129,15 @@ async def _curator_lifespan(app: FastAPI) -> AsyncIterator[None]:
                 settings=settings,
                 session_factory=session_factory,
                 kms=kms,
+                locks=locks,
             )
 
     # Stash the shared infrastructure so C2's provisioning hook can
     # call `register_user_job` against the same scheduler + factory
-    # + kms. Putting them on app.state (rather than module globals)
-    # keeps the lifecycle scoped to this app instance — multiple
-    # apps in the same process (test suite) don't trample each
-    # other's curator state.
+    # + kms + locks. Putting them on app.state (rather than module
+    # globals) keeps the lifecycle scoped to this app instance —
+    # multiple apps in the same process (test suite) don't trample
+    # each other's curator state.
     app.state.curator_session_factory = session_factory
     app.state.curator_kms = kms
     app.state.curator_settings = settings

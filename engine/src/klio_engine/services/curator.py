@@ -79,12 +79,23 @@ class Curator:
         extractor: Extractor,
         writer: EntryWriter,
         store: CursorStore,
+        locks: dict[uuid.UUID, asyncio.Lock] | None = None,
     ) -> None:
+        """
+        `locks` lets the caller hand in a shared lock registry so two
+        Curator instances (e.g. the scheduler tick and the run-now
+        HTTP handler) can serialise per-user work between them. When
+        omitted, each Curator owns a private dict — preserves the
+        existing hermetic-test behaviour where unit tests want one
+        Curator instance to be a complete world unto itself.
+        """
         self._reader = reader
         self._extractor = extractor
         self._writer = writer
         self._store = store
-        self._locks: dict[uuid.UUID, asyncio.Lock] = {}
+        self._locks: dict[uuid.UUID, asyncio.Lock] = (
+            locks if locks is not None else {}
+        )
 
     def _lock_for(self, user_id: uuid.UUID) -> asyncio.Lock:
         lock = self._locks.get(user_id)

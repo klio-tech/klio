@@ -121,7 +121,9 @@ async def test_curator_end_to_end_with_stub_extractor(
     agent; the cursor advanced past the latest seeded observation."""
     reader = DecryptingObservationReader(session=session, kms=mock_kms)
     extractor = FactExtractor(model="stub")
-    writer = CuratorWriter(session=session, kms=mock_kms)
+    writer = CuratorWriter(
+        session=session, kms=mock_kms, dedup_threshold=0.92
+    )
     store = PgCursorStore(session=session)
     curator = Curator(
         reader=reader,

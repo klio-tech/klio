@@ -33,7 +33,6 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from klio_engine.config import Settings
 from klio_engine.crypto.kms_client import KMSClient
 from klio_engine.models.agent import Agent, AgentKind
 from klio_engine.models.entry import EntryKind
@@ -62,13 +61,31 @@ class CuratorWriter:
     is delegated through to the caller's session.
     """
 
-    def __init__(self, *, session: AsyncSession, kms: KMSClient) -> None:
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        kms: KMSClient,
+        dedup_threshold: float,
+        entry_service: EntryService | None = None,
+    ) -> None:
+        """
+        `dedup_threshold` is injected (rather than re-derived from
+        `Settings()` per construction) because CuratorWriter is built
+        once per scheduler tick and once per `run-now` request — re-
+        parsing the env on every tick was a measurable hot path.
+        Callers pass `settings.dedup_cosine_threshold` from a single
+        Settings instance constructed at lifespan time.
+
+        `entry_service` is overridable so tests can inject a stub
+        without standing up an EmbeddingService. In production the
+        default constructor wiring is what every call site uses.
+        """
         self._session = session
-        settings = Settings()
-        self._entry_service = EntryService(
+        self._entry_service = entry_service or EntryService(
             kms=kms,
             embeddings=EmbeddingService(),
-            dedup_threshold=settings.dedup_cosine_threshold,
+            dedup_threshold=dedup_threshold,
         )
 
     async def write(self, **kwargs: Any) -> None:

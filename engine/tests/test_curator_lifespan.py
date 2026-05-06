@@ -69,3 +69,31 @@ async def test_lifespan_shuts_scheduler_down_cleanly(monkeypatch):
         assert sched.running is True
     # After context exit, lifespan teardown ran.
     assert sched.running is False
+
+
+async def test_lifespan_on_demand_starts_scheduler_with_no_jobs(monkeypatch):
+    """`KLIO_CURATOR_INTERVAL_SECS=0` is the on-demand sentinel:
+    `curator_enabled=true` so the run-now endpoint stays reachable,
+    but `register_user_job` short-circuits so the scheduler holds
+    zero registered jobs.
+
+    This is the contract the npm `on-demand` cadence relies on:
+    no automatic ticks ever fire, but the operator can still hit
+    `POST /v1/curator/run-now` to drain the backlog manually."""
+    monkeypatch.setenv("KLIO_CURATOR_ENABLED", "true")
+    monkeypatch.setenv("KLIO_CURATOR_INTERVAL_SECS", "0")
+    from klio_engine.api.main import build_app
+    app = build_app()
+    async with app.router.lifespan_context(app):
+        sched = app.state.curator_scheduler
+        # Scheduler is up so run-now works...
+        assert sched.running is True
+        # ...but no clock-driven jobs are registered.
+        assert sched.get_jobs() == []
+        # The run-now endpoint also needs the session_factory + kms +
+        # locks stashed on app.state — assert the full plumbing is
+        # there even in on-demand mode.
+        assert hasattr(app.state, "curator_session_factory")
+        assert hasattr(app.state, "curator_kms")
+        assert hasattr(app.state, "curator_locks")
+        assert isinstance(app.state.curator_locks, dict)

@@ -13,6 +13,7 @@ gets ticked on a different cadence than an existing one.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -43,6 +44,7 @@ def register_user_job(
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
     kms: KMSBackend,
+    locks: dict[uuid.UUID, asyncio.Lock] | None = None,
 ) -> None:
     """Attach a per-user `Curator.run_once` job to `scheduler`.
 
@@ -56,7 +58,24 @@ def register_user_job(
     accepted here so the local-file dev backend is admissible. The
     curator path doesn't care which one it gets — `EntryService`
     only invokes the two methods on the Protocol.
+
+    `locks` is the lifespan-scoped lock registry shared with the
+    `run-now` HTTP handler. When provided, the per-user
+    `asyncio.Lock` for `user_id` is shared across both code paths
+    so a scheduled tick and a manual run-now serialise correctly.
+
+    On-demand mode (`settings.curator_interval_secs == 0`): no job
+    is registered. The function returns early. The scheduler is
+    still started by the lifespan so the `run-now` endpoint works,
+    but no background ticks fire on a clock. This applies both at
+    startup-time bootstrap AND when a fresh user is provisioned
+    mid-uptime via the C2 hook.
     """
+    if settings.curator_interval_secs == 0:
+        # On-demand sentinel — no scheduled ticks, ever. The run-now
+        # endpoint is the only invocation surface in this mode.
+        return
+
     job_id = _job_id_for(user_id)
     if scheduler.get_job(job_id) is not None:
         return  # already registered — idempotent re-entry.
@@ -75,13 +94,18 @@ def register_user_job(
                 extractor = FactExtractor(
                     model=settings.effective_curator_model
                 )
-                writer = CuratorWriter(session=session, kms=kms)
+                writer = CuratorWriter(
+                    session=session,
+                    kms=kms,
+                    dedup_threshold=settings.dedup_cosine_threshold,
+                )
                 store = PgCursorStore(session=session)
                 curator = Curator(
                     reader=reader,
                     extractor=extractor,
                     writer=writer,
                     store=store,
+                    locks=locks,
                 )
                 await curator.run_once(
                     user_id=user_id,

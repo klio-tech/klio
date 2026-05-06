@@ -32,9 +32,19 @@ because no one had explicitly called `remember` / `note` / `decide`.
   subcommand (see Known Limitations below).
 - **Two new env vars on the engine container**:
   `KLIO_CURATOR_ENABLED` (default `true`) and
-  `KLIO_CURATOR_INTERVAL_SECS` (default `3600`).
+  `KLIO_CURATOR_INTERVAL_SECS` (default `3600`; `0` is the on-demand
+  sentinel — see Cadences below).
   `KLIO_CURATOR_MODEL` (optional override; falls back to the user's
   extraction model when unset).
+- **Cadences (npm `klio update curator`)**:
+  - `hourly` / `every-4h` / `daily` — clock-driven APScheduler ticks
+    at 3600 / 14400 / 86400 second intervals.
+  - `on-demand` — no scheduled ticks; `--run-now` (and the
+    underlying `POST /v1/curator/run-now` endpoint) is the only
+    invocation surface. Engine maps to `KLIO_CURATOR_INTERVAL_SECS=0`,
+    which the lifespan reads as the "skip job registration" sentinel.
+  - `disabled` — `KLIO_CURATOR_ENABLED=false`. The lifespan never
+    spins up the scheduler; the run-now endpoint returns 503.
 - **One new alembic migration** (`0006_curator_state`) — adds the
   per-user cursor table. No data migration; existing users get a
   fresh `last_cursor_at = '1970-01-01'` cursor on their first tick,
@@ -63,10 +73,11 @@ flow as Phase 4, no config drift.
 - `apscheduler` pinned to `<4` in the engine — 4.x changed the
   lifespan API in a way that breaks the FastAPI integration; we'll
   migrate when the dust settles upstream.
-- Curator settings carry positive-value validation
-  (`KLIO_CURATOR_INTERVAL_SECS > 0`, `KLIO_CURATOR_BATCH_SIZE > 0`),
-  so a misconfigured value fails fast at startup with a clear
-  Pydantic error rather than producing a silently-broken scheduler.
+- Curator settings carry non-negative validation
+  (`KLIO_CURATOR_INTERVAL_SECS >= 0` — `0` is the on-demand sentinel,
+  negative values are rejected; `KLIO_CURATOR_BATCH_SIZE > 0`), so a
+  misconfigured value fails fast at startup with a clear Pydantic
+  error rather than producing a silently-broken scheduler.
 
 ### Fixed
 
