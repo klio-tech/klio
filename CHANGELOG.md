@@ -4,6 +4,94 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-05-07
+
+### Added — auto-update + email claim
+
+Two interlocking features so v0.5.x bug-of-the-week incidents don't
+strand users on broken images, and so security/breaking-change
+notifications reach the people running Klio.
+
+#### Auto-update (default ON)
+
+The bridge daemon gains a second ticker (alongside the curator) that
+runs every `KLIO_UPDATE_CHECK_INTERVAL_SECS` (default 21600 = 6h):
+
+  1. `GET https://registry.npmjs.org/@klio-tech/klio/latest`
+  2. If a newer version is found, write
+     `~/.klio/update-state.json` with the latest-known + last-check
+     timestamp.
+  3. If `KLIO_AUTO_UPDATE=apply` (the default), shell out to
+     `docker compose pull && up -d --no-deps engine bridge
+     trust-app`. The bridge container that's running this code is
+     itself one of the recreated containers — APScheduler-equivalent
+     state is persisted to disk before the recreate so the new
+     bridge starts on the new image and continues normally.
+
+Three new env vars on `~/.klio/.env`:
+
+  - `KLIO_AUTO_UPDATE=apply` (or `notify`, `off`)
+  - `KLIO_UPDATE_CHECK_INTERVAL_SECS=21600`
+  - `KLIO_UPDATE_STATE_PATH=/host/.klio/update-state.json`
+
+`klio configure auto-update {apply, notify, off}` toggles modes
+without re-running init. `klio update --check` prints the current
+vs latest version. `klio update --to-latest` and `klio update
+--to-version <X>` are manual override paths.
+
+#### Email-claim during onboarding
+
+A new sub-prompt at the end of `klio init` Phase 6 (the
+wow-moment) asks the user for an email and triggers the engine's
+existing magic-link claim flow. The user can `⏎` to skip; init
+completes either way. Garbage email re-prompts up to 3 times
+then treats as skip.
+
+A new top banner in the trust-app dashboard reminds unclaimed
+users to claim. Banner data comes from a tiny new engine endpoint
+`GET /v1/system/banners` which emits a `claim_email` banner when
+`users.claimed_at IS NULL`. The dashboard's inline form posts
+directly to `/v1/auth/login-link`.
+
+`klio configure email <addr>` is a post-install alias that re-uses
+the same magic-link path — useful if a user skipped during init
+and wants to claim later.
+
+### Added — compose volume mounts
+
+`~/.klio` is now mounted into both the bridge (rw, for the updater
+to write state) and the trust-app (ro, for the dashboard to surface
+status). Existing `klio-bridge-data:/data` and
+`${HOME}/.claude:/host/.claude:ro` mounts are unchanged.
+
+### Changed
+
+- `klio init` is now a 6-phase flow with an additional Phase 6
+  email sub-prompt (the wow-moment now sits at the end of Phase 6
+  rather than being its entirety).
+- New `npm/src/email.ts` shared helper extracted from D1 / D2 —
+  both `klio configure email` and `klio init`'s Phase 6 sub-prompt
+  use the same `looksLikeEmail` validator and `sendLoginLink` POST
+  helper.
+
+### Known follow-ups (not in 0.6.0)
+
+- **Email-on-major-version notifications.** The bridge's auto-update
+  path (C4) successfully applies a new version and persists state,
+  but the planned C5 work — sending a one-line email summary to
+  email-claimed users on major-version landings — is deferred to
+  0.6.1. Wiring point is in place
+  (`runUpdateOnce` in `bridge/internal/daemon/updater_ticker.go`);
+  v0.6.1 drops in the cloud-client call.
+- **GitHub OAuth as an alternate claim path.** Engine has no OAuth
+  flow today. Planned for v0.7 if user-pull is significant.
+- **Auto-rollback on healthcheck failure.** Watchtower-style
+  failover. Today, if a new image fails its healthcheck, compose
+  restarts 3 times then exits — operator must manually
+  `klio update --to-version <previous>` to roll back.
+
+[0.6.0]: https://github.com/klio-tech/klio/releases/tag/v0.6.0
+
 ## [0.5.4] — 2026-05-07
 
 ### Added — full request + response capture in observations

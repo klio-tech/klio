@@ -115,8 +115,11 @@ One command — `npx @klio-tech/klio init` — does the entire setup:
    - OpenClaw (`openclaw mcp set` CLI, with file-write fallback)
 4. **Asks you to type one memory** so the loop is provably wired —
    the CLI confirms recall before exiting.
-5. **Provisions an anonymous account**; claim it later via email if
-   you want to sync to Klio Cloud.
+5. **Provisions an anonymous account**, then offers a one-keypress
+   email-claim sub-prompt at the end of Phase 6 so security and
+   breaking-change notifications can reach you. `⏎` to skip — the
+   trust-app dashboard will surface a banner you can fill in later
+   (or run `klio configure email <addr>` post-install).
 
 Each adapter writes a timestamped backup of the file it modifies, so
 `npx @klio-tech/klio uninstall` is non-destructive — it restores the
@@ -207,20 +210,39 @@ The six interactive phases:
 | 3. Model probe            | One-token test request validates the key + model before committing. |
 | 4. Agent wiring           | All six adapters detect → backup → patch each agent's MCP config.   |
 | 5. Memory curator         | One Y/n prompt enables the background synthesis job (defaults: on, hourly). |
-| 6. Wow moment             | You type one memory, the CLI proves recall before exiting.          |
+| 6. Wow moment + email claim | You type one memory, the CLI proves recall, then a sub-prompt asks for an email so we can reach you for security/breaking-change notifications. `⏎` to skip. |
 
 After install, you can change any of these settings without re-running
 `init`:
 
 ```bash
-npx @klio-tech/klio update            # four-option picker
-npx @klio-tech/klio update curator    # re-prompt schedule + model only
-npx @klio-tech/klio update agents     # re-run adapter detection + wiring
-npx @klio-tech/klio update provider   # change LLM provider / model
+npx @klio-tech/klio update                 # four-option picker
+npx @klio-tech/klio update curator         # re-prompt schedule + model only
+npx @klio-tech/klio update agents          # re-run adapter detection + wiring
+npx @klio-tech/klio update provider        # change LLM provider / model
+npx @klio-tech/klio update --check         # show running vs latest npm version
+npx @klio-tech/klio update --to-latest     # pull + recreate at the latest tag
+npx @klio-tech/klio update --to-version X  # pin every klio image to tag X (rollback path)
+
+npx @klio-tech/klio configure auto-update apply   # apply | notify | off
+npx @klio-tech/klio configure email <addr>        # post-install email claim
 ```
 
-Each block re-prompts only its own slice and restarts only the
-engine container.
+Each `update <subcommand>` block re-prompts only its own slice and
+restarts only the engine container. The `--check` / `--to-latest` /
+`--to-version` flags are stack-wide and recreate engine + bridge +
+trust-app together. `configure` writes to `~/.klio/.env` without
+touching containers — the bridge daemon picks the new value up on
+its next 6-hour ticker.
+
+Auto-update is **on by default** (`KLIO_AUTO_UPDATE=apply`). The
+bridge daemon polls the npm registry every
+`KLIO_UPDATE_CHECK_INTERVAL_SECS` (default 6h) and, when a newer
+version is available, runs `docker compose pull && up -d --no-deps
+engine bridge trust-app` to roll the stack forward. State is written
+to `~/.klio/update-state.json` so the dashboard can surface it.
+Toggle to `notify` (write state, don't apply) or `off` (skip the
+ticker entirely) with `klio configure auto-update`.
 
 Open any patched agent (Claude Code, Claude Desktop, Cursor, Codex,
 OpenCode, OpenClaw) and ask:
@@ -310,6 +332,8 @@ trust-app (Next.js, container)  ◄─────►  engine (FastAPI, containe
   /security                                ├── /v1/spaces/{id}/reembed
                                            ├── /v1/auth/login-link
                                            ├── /v1/audit
+                                           ├── /v1/system/banners   (0.6.0)
+                                           ├── /v1/curator/run-now  (0.5.0)
                                            └── ...
 
 klio-bridge (Go, container)              ── packages two binaries:
@@ -319,7 +343,9 @@ klio-bridge (Go, container)              ── packages two binaries:
         ├── unix socket
         ├── SQLite cache
         ├── keychain backend
-        └── Redis subscriber
+        ├── Redis subscriber
+        └── updater ticker (0.6.0)        npm-registry poll + compose pull
+                                           ~/.klio/update-state.json
 
 bridge daemon              ◄─────────►  engine + Redis
                                            publishes + receives frames
@@ -394,7 +420,7 @@ klio/
 │   ├── src/                   # commands/init, commands/uninstall, providerSetup,
 │   │                          # adapters/{claudeCode,claudeDesktop,cursor,codex,
 │   │                          #          openCode,openClaw}.ts
-│   └── tests/                 # vitest — ~190 hermetic unit tests
+│   └── tests/                 # vitest — 275+ hermetic unit tests
 ├── claude-plugin/             # Claude Code plugin manifest + 3 skills + 4 slash commands
 ├── trust-app/                 # Next.js 16 / TypeScript / React 19 — landing + dashboard
 │   └── src/app/(local)/       # local dashboard (memories, spaces, security)
@@ -413,10 +439,10 @@ deployment.
 
 | Component                  | State                                       |
 |----------------------------|---------------------------------------------|
-| Engine (FastAPI)           | ✅ 178 tests passing                         |
-| Bridge daemon (Go)         | ✅ 14 packages, all tests passing            |
+| Engine (FastAPI)           | ✅ 180+ tests passing (curator + banners)    |
+| Bridge daemon (Go)         | ✅ 15 packages incl. updater, all green       |
 | Trust-app (landing + dash) | ✅ typecheck + dual-target build green       |
-| `@klio-tech/klio` (npm)    | ✅ published; 256 tests passing              |
+| `@klio-tech/klio` (npm)    | ✅ published; 275+ tests passing             |
 | Claude Code adapter        | ✅ live in author's daily use                |
 | Claude Desktop adapter     | ✅ Chat + Cowork variants                    |
 | Cursor adapter             | ✅ shipped                                   |
@@ -430,6 +456,9 @@ deployment.
 | Audit hash chain           | ✅ tamper-evident                            |
 | Background curator         | ✅ shipped (0.5.0)                           |
 | `klio update` subcommand   | ✅ shipped (0.5.0)                           |
+| Auto-update bridge ticker  | ✅ shipped (0.6.0)                           |
+| Email claim during init    | ✅ shipped (0.6.0)                           |
+| `klio configure` / `klio update` flags | ✅ shipped (0.6.0)                |
 | GitHub Actions CI          | ✅ engine + npm + container images           |
 | Klio Cloud (multi-tenant)  | ❌ private repo, planned                     |
 
@@ -451,6 +480,18 @@ deployment.
   - Curator timeline view in the trust-app dashboard (per-tick stats,
     last synthesised entries, quick re-run)
   - Per-space curator config (different cadence + model per space)
+- **0.6.x auto-update + claim follow-ups:**
+  - **Email-on-major-version notifications.** The 0.6.0 ticker
+    applies a new image and persists state, but the planned
+    one-line summary email to claimed users on major-version landings
+    is deferred to 0.6.1 (wiring point already exists in
+    `bridge/internal/daemon/updater_ticker.go:runUpdateOnce`).
+  - **Auto-rollback on healthcheck failure.** Today, if a new image
+    fails its healthcheck, compose restarts 3 times then exits —
+    operator must manually `klio update --to-version <previous>`
+    to roll back. Watchtower-style failover is planned.
+  - **GitHub OAuth as an alternate claim path.** Engine has no OAuth
+    flow today; planned for v0.7 if user-pull warrants it.
 
 **v1.0 — public launch**
 
