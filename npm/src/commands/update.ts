@@ -40,6 +40,7 @@ import {
   runUpdateToLatest,
   runUpdateToVersion,
 } from "./update-stack.js";
+import { runWatch, type WatchOptions } from "./updateWatch.js";
 import {
   wireDetectedAgents,
   type WireAgentsResult,
@@ -151,6 +152,18 @@ export type UpdateOptions = {
    * engine bridge trust-app` without touching the user's daemon.
    */
   composeApply?: (args: readonly string[]) => Promise<void>;
+  /**
+   * Test seam for `klio update --watch` — overrides the watcher's
+   * poll interval (default: 30s). Tests pass a tiny value so the
+   * loop ticks immediately. Production callers leave this undefined.
+   */
+  watchIntervalSecs?: number;
+  /**
+   * Test seam for `klio update --watch` — caps the watcher to N ticks
+   * then resolves. Production callers leave this undefined so the
+   * watcher runs until SIGINT.
+   */
+  watchMaxTicks?: number;
 };
 
 
@@ -182,6 +195,29 @@ export async function runUpdate(opts: UpdateOptions): Promise<void> {
   }
   if (args.includes("--to-latest")) {
     return runUpdateToLatest(opts);
+  }
+  if (args.includes("--watch")) {
+    // v0.6.1 host-side watcher. Runs until Ctrl-C. The bridge writes
+    // ~/.klio/update-pending.json; this watcher applies it. See
+    // updateWatch.ts for the lifecycle and the rationale for not
+    // letting the bridge run docker itself.
+    //
+    // We map the relevant UpdateOptions fields onto WatchOptions
+    // explicitly rather than casting, because the two option shapes
+    // diverge (UpdateOptions carries `args`, `runNowExec`, etc. that
+    // the watcher doesn't consume; WatchOptions carries `intervalSecs`,
+    // `maxTicks` that aren't on UpdateOptions). An explicit map makes
+    // the dependency direction obvious to a future maintainer.
+    const watchOpts: WatchOptions = {
+      envPath: opts.envPath,
+      composeFilePath: opts.composeFilePath,
+      stdout: opts.stdout,
+      statePath: opts.statePath,
+      composeApply: opts.composeApply,
+      intervalSecs: opts.watchIntervalSecs,
+      maxTicks: opts.watchMaxTicks,
+    };
+    return runWatch(watchOpts);
   }
   const toVersionIdx = args.indexOf("--to-version");
   if (toVersionIdx >= 0) {

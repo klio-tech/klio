@@ -124,6 +124,11 @@ usage: klio <command> [options]
 commands:
   init        Set up the local stack and wire your AI agents (Claude Code, Cursor)
   status      Show what's running, where, and as whom
+  update      Re-prompt provider/curator/agents, OR upgrade the stack to a new release.
+              Stack-wide flags: --check, --to-latest, --to-version <X>, --watch.
+              --watch runs a long-lived host-side process that applies background
+              auto-updates the bridge has detected (no docker-in-docker needed).
+  configure   Tweak runtime settings (auto-update mode, claim email, etc.)
   down        Stop the stack (data is preserved)
   uninstall   Stop and delete all data; restore agent configs from backup
   version     Print the package version

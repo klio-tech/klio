@@ -28,6 +28,15 @@ const defaultUpdateCheckIntervalSecs = 21600 // 6 hours
 // here on every tick.
 const defaultUpdateStatePath = "/host/.klio/update-state.json"
 
+// pendingFilename is the sibling-of-update-state.json sentinel the
+// bridge writes when an apply-eligible update is detected. The host's
+// `klio update --watch` polls for this filename; both the bridge
+// (writer) and the host watcher (reader/deleter) MUST agree on it.
+//
+// Centralised here so a future rename can't drift the two surfaces
+// apart.
+const pendingFilename = "update-pending.json"
+
 // updateTickerDeps factors out the side-effect surfaces so tests can
 // stub them. Production wires httpClient = updater.DefaultClient(),
 // runner = updater.ExecRunner{}, log = a slog-bound writer.
@@ -178,22 +187,58 @@ func runUpdateOnce(ctx context.Context, deps *updateTickerDeps) {
 		return
 	}
 
-	// 3. Apply mode: shell out to compose.
-	if err := updater.Apply(ctx, deps.runner, deps.composePath, deps.log); err != nil {
-		state.LastApplyError = err.Error()
-		_ = updater.Write(deps.statePath, state)
-		slog.Warn("updater: apply failed", "err", err)
-		return
+	// 3. Apply mode: write update-pending.json so the host's
+	//    `klio update --watch` can run `docker compose pull && up -d`
+	//    on the host. The bridge cannot do this itself — its
+	//    container has no docker CLI, and giving it one would force
+	//    docker-in-docker or a privileged docker.sock mount, both of
+	//    which are unacceptable security postures.
+	//
+	//    We write the sentinel ONLY when its target_version differs
+	//    from what's already on disk: rewriting on every tick would
+	//    bump requested_at and confuse audit logs (and race with the
+	//    watcher that's about to delete the sentinel after a
+	//    successful apply).
+	pendingPath := pendingPathFromState(deps.statePath)
+	existing, _ := updater.ReadPending(pendingPath)
+	if existing == nil || existing.TargetVersion != latest {
+		pending := updater.Pending{
+			TargetVersion: latest,
+			RequestedAt:   time.Now().UTC(),
+			RequestedBy:   "bridge-auto-update",
+			ComposePath:   deps.composePath,
+		}
+		if err := updater.WritePending(pendingPath, pending); err != nil {
+			state.LastApplyError = "write pending: " + err.Error()
+			_ = updater.Write(deps.statePath, state)
+			slog.Warn("updater: write pending failed", "err", err)
+			return
+		}
+		slog.Info("updater: wrote update-pending sentinel",
+			"target_version", latest, "path", pendingPath)
 	}
 
-	// 4. Apply succeeded.
-	state.LastAppliedVersion = latest
-	state.LastAppliedAt = time.Now().UTC()
-	state.LastApplyError = "" // clear on success
+	// 4. Persist the heartbeat: latest seen, no apply-error from
+	//    the bridge's side (host-side errors are the watcher's to
+	//    surface). last_applied_* are written by the host watcher
+	//    after a successful apply, NOT here.
+	state.LastApplyError = "" // clear on success — bridge write succeeded
 	if err := updater.Write(deps.statePath, state); err != nil {
-		slog.Warn("updater: write state after apply failed", "err", err)
+		slog.Warn("updater: write state after sentinel failed", "err", err)
 	}
-	slog.Info("updater: applied", "version", latest)
+}
+
+// pendingPathFromState derives the absolute path to update-pending.json
+// from the absolute path to update-state.json. The two files live in
+// the same directory (~/.klio inside the bridge container's
+// /host/.klio mount), so they share the parent dir.
+//
+// Centralising this resolution here means the ticker AND the test
+// helpers compute the same path — a hand-spelled "/host/.klio/update-
+// pending.json" string in either side would silently drift if
+// KLIO_UPDATE_STATE_PATH ever overrode the default.
+func pendingPathFromState(statePath string) string {
+	return filepath.Join(filepath.Dir(statePath), pendingFilename)
 }
 
 // --- env readers ---

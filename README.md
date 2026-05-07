@@ -223,6 +223,7 @@ npx @klio-tech/klio update provider        # change LLM provider / model
 npx @klio-tech/klio update --check         # show running vs latest npm version
 npx @klio-tech/klio update --to-latest     # pull + recreate at the latest tag
 npx @klio-tech/klio update --to-version X  # pin every klio image to tag X (rollback path)
+npx @klio-tech/klio update --watch         # long-lived host-side updater (apply mode)
 
 npx @klio-tech/klio configure auto-update apply   # apply | notify | off
 npx @klio-tech/klio configure email <addr>        # post-install email claim
@@ -235,14 +236,44 @@ trust-app together. `configure` writes to `~/.klio/.env` without
 touching containers — the bridge daemon picks the new value up on
 its next 6-hour ticker.
 
+### Auto-update
+
 Auto-update is **on by default** (`KLIO_AUTO_UPDATE=apply`). The
 bridge daemon polls the npm registry every
 `KLIO_UPDATE_CHECK_INTERVAL_SECS` (default 6h) and, when a newer
-version is available, runs `docker compose pull && up -d --no-deps
-engine bridge trust-app` to roll the stack forward. State is written
-to `~/.klio/update-state.json` so the dashboard can surface it.
+version is available, writes a sentinel at
+`~/.klio/update-pending.json` and updates `~/.klio/update-state.json`.
 Toggle to `notify` (write state, don't apply) or `off` (skip the
 ticker entirely) with `klio configure auto-update`.
+
+The actual `docker compose pull && up -d --no-deps engine bridge
+trust-app` runs on the **host**, not inside the bridge container —
+giving the bridge a docker CLI would force docker-in-docker or a
+privileged docker.sock mount, both of which are unacceptable security
+postures. Instead, the host-side process below consumes the sentinel
+the bridge writes and applies it on the host's docker daemon.
+
+To enable apply-mode auto-update, run the watcher in a long-lived
+shell (or under launchd/systemd) on the host:
+
+```bash
+npx @klio-tech/klio update --watch
+```
+
+The watcher polls `~/.klio/update-pending.json` every 30 seconds. On
+each tick it semver-validates the target, re-renders compose pinned
+to the new tag, runs `docker compose pull && up -d --no-deps`, and
+removes the sentinel. Failures (transient docker-hub rate-limits)
+leave the sentinel in place so the next tick retries; invalid
+sentinels (bogus version strings) are removed and surfaced as
+`last_apply_error` in `~/.klio/update-state.json` so the dashboard
+shows the operator what happened.
+
+If you don't run the watcher, the bridge still notes available
+updates (`last_known_available_version` in the state file, surfaced
+in the dashboard) but no auto-apply happens — `notify` mode in
+practice. You can always force a manual apply with
+`klio update --to-latest` regardless of whether `--watch` is running.
 
 Open any patched agent (Claude Code, Claude Desktop, Cursor, Codex,
 OpenCode, OpenClaw) and ask:
@@ -490,6 +521,10 @@ deployment.
     fails its healthcheck, compose restarts 3 times then exits —
     operator must manually `klio update --to-version <previous>`
     to roll back. Watchtower-style failover is planned.
+  - **launchd / systemd unit files for the host watcher.** v0.6.1
+    ships `klio update --watch` as a long-running CLI a user runs in
+    a terminal. v0.6.x will package platform-specific service files
+    so the watcher survives reboots without a terminal session.
   - **GitHub OAuth as an alternate claim path.** Engine has no OAuth
     flow today; planned for v0.7 if user-pull warrants it.
 

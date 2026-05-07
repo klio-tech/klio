@@ -4,6 +4,58 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] — unreleased
+
+### Fixed — auto-update silently failed on every host
+
+0.6.0 shipped the bridge ticker that detected newer versions and
+attempted to apply them via `docker compose pull && up -d` from
+inside the bridge container. The bridge container has no `docker`
+CLI, so every apply failed with
+`exec: "docker": executable file not found in $PATH`, and
+`~/.klio/update-state.json` carried that error from the moment a
+newer release shipped.
+
+The fix is architectural, not a `RUN apt-get install docker` patch
+(which would have forced docker-in-docker or a privileged
+docker.sock mount — both unacceptable security postures):
+
+- The bridge ticker now writes a sentinel at
+  `~/.klio/update-pending.json` describing the target version,
+  rather than shelling out itself.
+- A new long-running host command, `klio update --watch`, polls
+  the sentinel every 30s and runs `docker compose pull && up -d
+  --no-deps engine bridge trust-app` on the host's docker daemon.
+- The watcher updates `~/.klio/update-state.json`'s
+  `last_applied_version` / `last_applied_at` after a successful
+  apply, surfaces transient docker-hub rate-limits via
+  `last_apply_error` while keeping the sentinel in place for
+  retry, and rejects bogus target versions (non-semver) with the
+  sentinel removed so the bridge gets to write a fresh one.
+
+To enable apply-mode auto-update on a host, run the watcher under
+launchd / systemd or in a long-lived terminal:
+
+```bash
+npx @klio-tech/klio update --watch
+```
+
+Without the watcher running, the bridge still surfaces
+`last_known_available_version` in the dashboard (effectively
+`notify` mode), and `klio update --to-latest` continues to work
+as a manual apply path.
+
+### Added — sentinel module + watcher tests
+
+- `bridge/internal/updater/pending.go` — atomic Read/Write/Remove
+  helpers for `update-pending.json`. Mirrors `state.go`'s
+  atomicity contract so a concurrent reader never sees a partial
+  file.
+- `npm/src/commands/updateWatch.ts` — `runWatchTick` (one-shot,
+  test-friendly) and `runWatch` (poll loop). Test seams expose
+  `composeApply`, `intervalSecs`, and `maxTicks` so the suite
+  drives the watcher without touching the user's docker daemon.
+
 ## [0.6.0] — 2026-05-07
 
 ### Added — auto-update + email claim
