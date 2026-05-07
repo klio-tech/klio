@@ -74,6 +74,17 @@ jobs:
             context: ./engine
           - name: klio-bridge
             context: ./bridge
+            # Bake the build version into /etc/klio-version inside
+            # the image. The bridge daemon reads this file first
+            # (env second, default third) so `klio status` and the
+            # auto-update ticker report the version that's actually
+            # running, regardless of whether the operator's compose
+            # template threaded KLIO_BRIDGE_VERSION through.
+            #
+            # The actual KLIO_VERSION value is appended below in the
+            # build step so we can interpolate `steps.pkg.outputs.version`
+            # — matrix-scoped expressions can't reference step outputs.
+            needs_version_arg: true
           - name: klio-trust-app
             context: ./trust-app
             build_args: |
@@ -170,7 +181,26 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: ${{ matrix.build_args }}
+          # Two sources of build-args composed into a single multiline
+          # string (docker/build-push-action concatenates lines into
+          # a list of KEY=value pairs):
+          #
+          #   1. matrix.build_args — per-image static args (e.g.
+          #      KLIO_BUILD_TARGET=local for trust-app).
+          #   2. KLIO_VERSION (bridge only) — the npm package.json
+          #      version we already resolved in the `pkg` step.
+          #      Conditional because matrix-scoped expressions cannot
+          #      reference step outputs (the matrix is materialised
+          #      before steps run), so we resolve at the step level
+          #      and emit the build-arg only for the image whose
+          #      Dockerfile declares `ARG KLIO_VERSION`.
+          #
+          # The `||  ''` branch keeps the line empty (rather than the
+          # literal text `false`) for non-bridge images, which the
+          # build-arg parser silently ignores.
+          build-args: |
+            ${{ matrix.build_args }}
+            ${{ matrix.needs_version_arg && format('KLIO_VERSION={0}', steps.pkg.outputs.version) || '' }}
           # GHA cache keeps inter-run layer cache so a rerun of the
           # workflow on the same Dockerfile completes in <1 min.
           # `mode=max` writes intermediate stage layers too, not just

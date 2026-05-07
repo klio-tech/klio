@@ -61,6 +61,20 @@ FROM alpine:3.20 AS runtime
 # but we ship the data so future versions can).
 RUN apk add --no-cache ca-certificates tzdata
 
+# Bake the build version into the image so the bridge's
+# `/internal/version` package (file → env → default resolution) can
+# report what's actually running, regardless of whether the operator
+# threaded KLIO_BRIDGE_VERSION through the compose template. The
+# default `0.0.0-dev` mirrors the Go-level fallback so a developer
+# running `docker build .` without --build-arg sees a recognisable
+# placeholder rather than an empty version field.
+#
+# Why /etc and not /usr/share or /var/lib: /etc is the conventional
+# location for image-baked, OS-style config. `cat /etc/klio-version`
+# is the same UX as `cat /etc/alpine-release`.
+ARG KLIO_VERSION=0.0.0-dev
+RUN echo "$KLIO_VERSION" > /etc/klio-version
+
 COPY --from=build /out/klio /usr/local/bin/klio
 COPY --from=build /out/klio-mcp /usr/local/bin/klio-mcp
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/klio-tech/bridge/internal/updater"
+	"github.com/klio-tech/bridge/internal/version"
 )
 
 // Updater modes — match the npm CLI's `klio configure auto-update` choices.
@@ -285,11 +286,18 @@ func readComposePath() string {
 	return filepath.Join("/host/.klio", "docker-compose.yml")
 }
 
+// readCurrentVersion delegates to the bridge's single source of truth
+// for its build version. The resolution order (file → env → default)
+// lives in `internal/version`; see that package's doc comment for the
+// rationale on why the file beats the env.
+//
+// We keep this thin wrapper rather than calling `version.Get()`
+// directly at the call site to give the test suite an obvious local
+// override seam: a future regression test of the ticker doesn't need
+// to mock /etc/klio-version, it shadows this function (or, more
+// directly, sets `deps.currentVersion` on a `newDeps` build).
 func readCurrentVersion() string {
-	if v := os.Getenv("KLIO_BRIDGE_VERSION"); v != "" {
-		return v
-	}
-	return "0.0.0-dev"
+	return version.Get()
 }
 
 // slogWriter is an io.Writer that pipes compose stdout/stderr lines

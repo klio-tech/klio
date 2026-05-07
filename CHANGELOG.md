@@ -56,6 +56,42 @@ as a manual apply path.
   `composeApply`, `intervalSecs`, and `maxTicks` so the suite
   drives the watcher without touching the user's docker daemon.
 
+### Fixed — bridge reported `0.0.0-dev` in production
+
+`klio status` and the auto-update ticker both reported
+`current_version=0.0.0-dev` in shipped images because the version
+was only resolved from `KLIO_BRIDGE_VERSION` env, which the compose
+template didn't always thread through. Compounding the issue,
+`internal/version/version.go` had a stale hardcoded `"0.0.1"` from
+an early prototype that `klio version` and `klio status` were
+reporting — independent of whatever version the npm CLI thought
+it had pulled.
+
+The fix unifies both source-of-truth points behind a new file-first
+resolver in `internal/version`:
+
+1. `/etc/klio-version` (image-baked at build time via
+   `--build-arg KLIO_VERSION=...`).
+2. `KLIO_BRIDGE_VERSION` env (the dev path: `go run ./cmd/klio` on
+   a workstation where the file doesn't exist).
+3. The literal string `0.0.0-dev` (panic button).
+
+Why the file beats the env: a misconfigured compose template that
+forgot to thread the env can't make the bridge lie about its own
+version — the file ships in the same image layer as the binary, so
+the version reported is guaranteed to match what's running.
+
+The Dockerfile now accepts `ARG KLIO_VERSION=0.0.0-dev` and writes
+it to `/etc/klio-version`. The release-images workflow passes
+`--build-arg KLIO_VERSION=<npm/package.json version>` for the
+bridge image so every published bridge image carries the right
+version regardless of compose env.
+
+`internal/daemon/updater_ticker.go::readCurrentVersion` is now a
+thin wrapper over `version.Get()` so the auto-update ticker, the
+`klio version` command, and the `klio status` JSON output all
+report the same value.
+
 ## [0.6.0] — 2026-05-07
 
 ### Added — auto-update + email claim
