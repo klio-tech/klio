@@ -14,6 +14,12 @@ class EntryWrite(BaseModel):
     content: str = Field(..., min_length=1, max_length=50_000)
     metadata: dict[str, Any] | None = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    # v0.7.0 per-project scoping: tag the entry to a project the
+    # caller has previously created (via the ingest flow or a future
+    # /v1/projects/ensure endpoint). NULL is the safe default —
+    # NULL-tagged entries surface in every project's recall (B2).
+    # No max_length needed: UUID type is bounded.
+    project_id: uuid.UUID | None = None
 
 
 class EntryResponse(BaseModel):

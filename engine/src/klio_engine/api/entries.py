@@ -73,6 +73,17 @@ async def write_entry(
         content=body.content,
         metadata=body.metadata,
         confidence=body.confidence,
+        # v0.7.0 per-project scoping. Optional; NULL is the safe
+        # default that surfaces under any project filter (B2). We do
+        # NOT validate that the project_id belongs to the caller here
+        # — the entries.project_id FK uses ON DELETE SET NULL and is
+        # not cross-tenant scoped at the DB level. Tenant ownership
+        # checks for project_id will land in F1 (the promote endpoint)
+        # when it becomes addressable from the public API. For C1, the
+        # bridge supplies project_ids it freshly resolved via the
+        # ingest flow under its own auth — there's no cross-tenant
+        # surface yet.
+        project_id=body.project_id,
     )
     await session.commit()
 

@@ -67,6 +67,7 @@ class EntryService:
         metadata: dict | None = None,
         confidence: float = 1.0,
         session_id: uuid.UUID | None = None,
+        project_id: uuid.UUID | None = None,
     ) -> Entry:
         space = await session.get(Space, space_id)
         if space is None or space.deleted_at is not None:
@@ -119,6 +120,11 @@ class EntryService:
             metadata_nonce=meta_nonce,
             confidence=confidence,
             session_id=session_id,
+            # v0.7.0 per-project scoping. NULL is the safe default —
+            # NULL-tagged entries always surface in recall regardless of
+            # the project filter (B2), so legacy + ad-hoc writes don't
+            # silently disappear.
+            project_id=project_id,
         )
         session.add(e)
         await session.flush()  # populate e.id
