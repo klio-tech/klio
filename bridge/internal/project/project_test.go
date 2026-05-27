@@ -1,6 +1,7 @@
 package project
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,7 +42,7 @@ func TestResolveGitRepoWithRemote(t *testing.T) {
 	dir := initRepo(t)
 	run(t, dir, "git", "remote", "add", "origin", "git@github.com:klio-tech/klio.git")
 
-	got, err := Resolve(dir)
+	got, err := Resolve(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("Resolve(%q) error: %v", dir, err)
 	}
@@ -76,7 +77,7 @@ func TestResolveGitRepoWithRemote(t *testing.T) {
 func TestResolveGitRepoNoRemote(t *testing.T) {
 	dir := initRepo(t)
 
-	got, err := Resolve(dir)
+	got, err := Resolve(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("Resolve(%q) error: %v", dir, err)
 	}
@@ -100,7 +101,7 @@ func TestResolveGitRepoNoRemote(t *testing.T) {
 func TestResolveNonGitDirectory(t *testing.T) {
 	dir := t.TempDir()
 
-	got, err := Resolve(dir)
+	got, err := Resolve(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("Resolve(%q) error: %v", dir, err)
 	}
@@ -125,7 +126,7 @@ func TestResolveDeriveDisplayFromHTTPSRemote(t *testing.T) {
 	dir := initRepo(t)
 	run(t, dir, "git", "remote", "add", "origin", "https://github.com/klio-tech/klio.git")
 
-	got, err := Resolve(dir)
+	got, err := Resolve(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("Resolve(%q) error: %v", dir, err)
 	}
@@ -154,11 +155,11 @@ func TestResolveWorktreeSharesRemote(t *testing.T) {
 	worktreePath := filepath.Join(worktreeBase, "wt")
 	run(t, main, "git", "worktree", "add", "-q", worktreePath)
 
-	mainKey, err := Resolve(main)
+	mainKey, err := Resolve(context.Background(), main)
 	if err != nil {
 		t.Fatalf("Resolve(main): %v", err)
 	}
-	wtKey, err := Resolve(worktreePath)
+	wtKey, err := Resolve(context.Background(), worktreePath)
 	if err != nil {
 		t.Fatalf("Resolve(worktree): %v", err)
 	}

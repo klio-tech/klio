@@ -38,7 +38,7 @@
 package project
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -91,14 +91,14 @@ type Key struct {
 // (e.g. the process's own cwd has been removed and cwd is relative).
 // Missing git, non-git directories, and repos without an `origin`
 // remote degrade through the ladder — they do not produce errors.
-func Resolve(cwd string) (Key, error) {
+func Resolve(ctx context.Context, cwd string) (Key, error) {
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
-		return Key{}, fmt.Errorf("project: filepath.Abs(%q): %w", cwd, err)
+		return Key{}, fmt.Errorf("filepath.Abs(%q): %w", cwd, err)
 	}
 
-	remote := gitRemoteOrigin(abs)
-	root := gitToplevel(abs)
+	remote := gitRemoteOrigin(ctx, abs)
+	root := gitToplevel(ctx, abs)
 	display := deriveDisplayName(remote, root, abs)
 
 	return Key{
@@ -138,6 +138,13 @@ func deriveDisplayName(remote, root, abs string) string {
 // bridge, is the source of truth for display name normalisation
 // across heterogeneous remotes. Keep parsing here minimal; defer
 // fancy cleanup to the engine when needed.
+//
+// TODO(0.7.x security follow-up): strip userinfo from HTTPS remotes
+// before returning. `https://token:secret@host/...` URLs land verbatim
+// in Key.GitRemote today, which means the engine could persist
+// credentials embedded in the user's git config. Not a v0.7 blocker
+// (most users have no credentials in their remote URL), but a real
+// privacy concern worth closing in 0.7.x.
 func displayFromRemote(remote string) string {
 	r := strings.TrimSpace(remote)
 	if r == "" {
@@ -188,8 +195,8 @@ func displayFromRemote(remote string) string {
 // stderr is suppressed: D1 has no logger context, and the
 // ladder-falls-through-on-error model means a missing remote is a
 // normal, expected outcome — not a bug surface.
-func gitRemoteOrigin(dir string) string {
-	return runGit(dir, "config", "--get", "remote.origin.url")
+func gitRemoteOrigin(ctx context.Context, dir string) string {
+	return runGit(ctx, dir, "config", "--get", "remote.origin.url")
 }
 
 // gitToplevel returns `git rev-parse --show-toplevel` for the repo
@@ -201,8 +208,8 @@ func gitRemoteOrigin(dir string) string {
 // `/private/var/folders/...`), and `--show-toplevel` returns the
 // resolved form. Callers comparing against a TempDir path must
 // `filepath.EvalSymlinks` first.
-func gitToplevel(dir string) string {
-	return runGit(dir, "rev-parse", "--show-toplevel")
+func gitToplevel(ctx context.Context, dir string) string {
+	return runGit(ctx, dir, "rev-parse", "--show-toplevel")
 }
 
 // runGit invokes `git <args...>` with cwd=dir and returns the trimmed
@@ -214,19 +221,19 @@ func gitToplevel(dir string) string {
 // /etc/gitconfig, the user's ~/.gitconfig, and a couple of decades
 // of edge cases. The git binary is the only authoritative
 // interpreter, and it's installed on every dev machine we target.
-func runGit(dir string, args ...string) string {
-	cmd := exec.Command("git", args...)
+//
+// TODO(D2): exec.Command resolves "git" via $PATH on every call.
+// For 200 hook fires per session this is wasted work. When D2's
+// LRU cache lands, resolve the absolute git path once and use it
+// for all subsequent calls.
+func runGit(ctx context.Context, dir string, args ...string) string {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	// Discard stderr explicitly so a `git: command not found` from
 	// /usr/libexec doesn't leak into the caller's stderr stream.
 	cmd.Stderr = nil
 	out, err := cmd.Output()
 	if err != nil {
-		// Sanity check: an *exec.ExitError or *exec.Error here is
-		// expected and silent. Anything else is also silent at this
-		// layer; D2's cache wrapper will own logging when it lands.
-		var exitErr *exec.ExitError
-		_ = errors.As(err, &exitErr)
 		return ""
 	}
 	return strings.TrimSpace(string(out))
