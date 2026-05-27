@@ -53,12 +53,16 @@ class EnsureRequest(BaseModel):
 
 
 class EnsureResponse(BaseModel):
-    """Project UUID as a string. Stringified rather than `uuid.UUID`
-    so the wire format is portable across the bridge's Go client
-    (`uuid.UUID` JSON decode is happy with either shape, but the
-    string is the more conservative choice)."""
+    """Project UUID.
 
-    id: str
+    Typed as `uuid.UUID` for consistency with every other engine
+    response schema (`schemas/spaces.py`, `schemas/entries.py`, etc.).
+    Pydantic serializes `uuid.UUID` to a canonical hyphenated string
+    on the wire, which the bridge's Go `uuid.UUID` decoder accepts
+    unchanged.
+    """
+
+    id: uuid.UUID
 
 
 @router.post(
@@ -83,11 +87,14 @@ async def ensure_project(
       2. This handler enforces the cross-field invariant that at
          least one of `git_remote` / `repo_root_path` is set
          (Pydantic alone cannot express "either-or-but-not-neither").
-      3. `ProjectService.ensure` enforces the same cross-field
-         invariant defensively (raises `ValueError`); on the unlikely
-         path that step 2 missed it (e.g. a future code change), we
-         convert the ValueError to a 422 for a consistent response
-         shape rather than letting it surface as a 500.
+
+    `ProjectService.ensure` also raises `ValueError` if called with
+    both keys missing, but we do NOT catch it here. The handler's
+    pre-check above produces a more specific error message for the
+    HTTP path, and a future call site of `ensure` that forgets the
+    pre-check is BETTER served by a loud 500 (with the ValueError in
+    the traceback) than a silent 422 — the 500 forces the developer
+    to find and fix the missing pre-check rather than masking it.
 
     The commit happens here, not in the service, mirroring the pattern
     in `api/ingest.py` and `api/entries.py`: services manage row
@@ -99,23 +106,12 @@ async def ensure_project(
             detail="must supply at least one of git_remote or repo_root_path",
         )
     svc = ProjectService()
-    try:
-        project = await svc.ensure(
-            session,
-            user_id=ctx.user_id,
-            git_remote=body.git_remote,
-            repo_root_path=body.repo_root_path,
-            display_name=body.display_name,
-        )
-    except ValueError as e:
-        # Defense-in-depth: the handler already rejected the both-keys-
-        # missing case above, but the service raises ValueError for the
-        # same condition. Surfacing it as 422 (not the implicit 500
-        # FastAPI would produce) keeps the API contract clean if a
-        # future refactor removes the handler-level check.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(e),
-        ) from e
+    project = await svc.ensure(
+        session,
+        user_id=ctx.user_id,
+        git_remote=body.git_remote,
+        repo_root_path=body.repo_root_path,
+        display_name=body.display_name,
+    )
     await session.commit()
-    return EnsureResponse(id=str(project.id))
+    return EnsureResponse(id=project.id)

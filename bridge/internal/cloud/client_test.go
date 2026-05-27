@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -186,6 +187,84 @@ func TestEnsureProjectOmitsEmptyOptionalFields(t *testing.T) {
 	}
 	if raw["display_name"] != "klio-detached" {
 		t.Errorf("display_name = %v", raw["display_name"])
+	}
+}
+
+// TestEnsureProjectRefreshesOn401 verifies a stale access token on the
+// EnsureProject hot path is silently refreshed and the original request
+// retried. The bridge fires this method once per hook event (≈200 per
+// Claude Code session); without refresh-on-401 coverage here, a token
+// expiring on the wrong call would silently lose the project_id
+// assignment and split that session's memory across multiple project
+// rows (or worse, write entries with project_id=NULL).
+//
+// `TestRefreshAccessTokenRetriesOn401` already covers the generic
+// refresh path via ListSpaces; this test asserts the same guarantee on
+// the specific method that runs in the hottest loop, so a future change
+// to EnsureProject (e.g. adding a custom transport or bypassing
+// `c.do`) can't silently regress the contract.
+func TestEnsureProjectRefreshesOn401(t *testing.T) {
+	var ensureCalls int32
+	var refreshCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/projects/ensure":
+			n := atomic.AddInt32(&ensureCalls, 1)
+			if n == 1 {
+				// First attempt: stale access token, 401. Mirrors the
+				// engine's behaviour when a JWT has expired mid-session.
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			// Second attempt (post-refresh): require the new bearer.
+			if r.Header.Get("Authorization") != "Bearer fresh-access" {
+				t.Errorf("retry sent stale bearer: %q", r.Header.Get("Authorization"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"11111111-2222-3333-4444-555555555555"}`))
+		case "/v1/tokens/refresh":
+			atomic.AddInt32(&refreshCalls, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token":  "fresh-access",
+				"refresh_token": "new-refresh",
+				"expires_in":    3600,
+			})
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	c.SetAccessToken("stale-access")
+	c.SetRefreshToken("old-refresh")
+
+	id, err := c.EnsureProject(
+		context.Background(),
+		"git@github.com:klio-tech/klio.git",
+		"/Users/x/klio",
+		"klio-tech/klio",
+	)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if id == uuid.Nil {
+		t.Error("zero uuid returned")
+	}
+	want := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	if id != want {
+		t.Errorf("id = %s, want %s", id, want)
+	}
+	if got := atomic.LoadInt32(&ensureCalls); got != 2 {
+		t.Errorf("expected 2 ensure calls (401 then 200); got %d", got)
+	}
+	if got := atomic.LoadInt32(&refreshCalls); got != 1 {
+		t.Errorf("expected 1 refresh call; got %d", got)
+	}
+	if c.AccessToken() != "fresh-access" {
+		t.Errorf("access token not rotated after refresh: %s", c.AccessToken())
 	}
 }
 
