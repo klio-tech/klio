@@ -30,6 +30,7 @@ in `engine/tests/api/conftest.py`.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -131,6 +132,27 @@ async def test_ingest_creates_project_on_first_observation(
     )
     assert r1.status_code == 201, r1.text
 
+    # Snapshot last_seen_at after the first ingest. Each ingest request
+    # is its own HTTP transaction, so the DB-side func.now() —
+    # transaction_timestamp() on Postgres — resolves to a distinct
+    # value between requests. We capture it here to prove the second
+    # ingest actually bumped it (vs. silently no-oping past the
+    # dedupe).
+    stmt_one = select(Project).where(
+        Project.user_id == ctx.user_id,
+        Project.git_remote == git_remote,
+    )
+    row_after_first = (await db_session.execute(stmt_one)).scalar_one()
+    first_seen_at = row_after_first.last_seen_at
+
+    # The test_projects.py precedent (test_ensure_updates_last_seen_at)
+    # sleeps 0.05s between observations so Postgres' clock visibly
+    # advances. Mirror that here: without it the two
+    # transaction_timestamp() values could fall inside the same
+    # microsecond on a fast CI host and the strict-greater-than
+    # assertion below would flake.
+    await asyncio.sleep(0.05)
+
     # Second ingest, same project context, different session.
     body2 = _ingest_body(
         cwd=repo_root_path,
@@ -146,17 +168,74 @@ async def test_ingest_creates_project_on_first_observation(
     )
     assert r2.status_code == 201, r2.text
 
+    # The SQLAlchemy identity map would otherwise hand us the cached
+    # row from the first query (with the stale last_seen_at). Expire
+    # forces a re-read of the materialized timestamp the second
+    # ingest's UPDATE committed.
+    db_session.expire_all()
+
     # Exactly one project row for this user with this git_remote.
-    stmt = select(Project).where(
-        Project.user_id == ctx.user_id,
-        Project.git_remote == git_remote,
-    )
-    rows = (await db_session.execute(stmt)).scalars().all()
+    rows = (await db_session.execute(stmt_one)).scalars().all()
     assert len(rows) == 1, (
         f"two ingests with the same git_remote must dedupe to one row; "
         f"got {len(rows)} rows"
     )
     assert rows[0].display_name == display_name
+
+    # last_seen_at must have advanced on the second observation —
+    # that's the entire point of bumping it. Without this assertion,
+    # a regression that drops the bump (e.g. a refactor that only sets
+    # last_seen_at on INSERT, not on the dedupe UPDATE path) would
+    # silently pass the row-count check above since dedupe still works.
+    second_seen_at = rows[0].last_seen_at
+    assert second_seen_at > first_seen_at, (
+        f"last_seen_at must bump on re-ingest: first={first_seen_at}, "
+        f"second={second_seen_at}"
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["git_remote", "repo_root_path", "project_display_name"],
+)
+def test_ingest_rejects_empty_string_project_fields(
+    app_client: TestClient, field: str
+) -> None:
+    """Empty strings for the project-identity fields surface as 422,
+    not silent corruption. See the comment in `schemas/ingest.py` for
+    the rationale: an empty `git_remote` would bypass the gate via the
+    other truthy field, then create a phantom project row with
+    `git_remote=""` that splits memory from the no-remote version of
+    the same project.
+    """
+    ctx: AuthCtx = provision(app_client)
+    body = _ingest_body(
+        cwd="/Users/dev/projects/klio",
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/dev/projects/klio",
+        project_display_name="klio",
+    )
+    # Force the field under test to an empty string. Pydantic's
+    # min_length=1 should reject this before the request reaches the
+    # service layer.
+    body[field] = ""
+
+    r = app_client.post(
+        f"/v1/spaces/{ctx.default_space_id}/ingest/transcript",
+        json=body,
+        headers=ctx.auth_header(),
+    )
+    assert r.status_code == 422, (
+        f"empty {field!r} must be rejected as 422; got {r.status_code}: "
+        f"{r.text}"
+    )
+    # Sanity-check that the error pointed at the field we expected,
+    # not some unrelated validation. Pydantic v2 error envelopes have
+    # `detail` as a list of error dicts with a `loc` tuple.
+    err_locs = {tuple(e.get("loc", [])) for e in r.json().get("detail", [])}
+    assert any(field in loc for loc in err_locs), (
+        f"422 response should flag {field!r}; got locs {err_locs}"
+    )
 
 
 @pytest.mark.asyncio

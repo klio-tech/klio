@@ -179,4 +179,11 @@ def _basename_from_path(path: str) -> str:
     if not path:
         return "unknown"
     stripped = path.rstrip("/")
-    return stripped.rsplit("/", 1)[-1] or path
+    basename = stripped.rsplit("/", 1)[-1] or path
+    # Truncate to match `projects.display_name`'s String(200) cap.
+    # `repo_root_path` allows up to 4096 chars (POSIX PATH_MAX) so a
+    # pathologically long last segment (e.g. a deeply-nested file with
+    # a 250-char name) would otherwise raise DBAPIError on INSERT and
+    # surface to the caller as an opaque 500. Truncating here keeps
+    # the helper's "always returns a valid display_name" contract.
+    return basename[:200]
