@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from klio_engine.api.auth import RequestContext, require_auth
+from klio_engine.audit.writer import write_audit_event
 from klio_engine.dependencies import get_session
 from klio_engine.services.projects import ProjectService
 
@@ -191,19 +192,53 @@ async def promote_project(
     project = await svc.promote(
         session,
         user_id=ctx.user_id,
+        agent_id=ctx.agent_id,
         project_id=project_id,
         space_id=body.space_id,
         embedding_model=body.embedding_model,
     )
-    await session.commit()
     # dedicated_space_id is non-None here: promote() either set it to
     # the supplied space_id or to the newly-created space's id, and
     # both code paths run BEFORE the early returns. The type-checker
     # sees `uuid.UUID | None` on the column so we narrow with an
-    # assert that doubles as a runtime invariant guard — if a future
-    # refactor introduces a path that leaves it None, this fires
-    # immediately instead of producing a confusing pydantic error.
-    assert project.dedicated_space_id is not None
+    # explicit `if`-raise that doubles as a runtime invariant guard
+    # — using `assert` would be stripped under `python -O`, which is
+    # the production runtime mode, so a future refactor that leaves
+    # the column None would silently produce a confusing pydantic
+    # error on the response. The HTTPException makes the invariant
+    # violation impossible to miss.
+    if project.dedicated_space_id is None:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "promote() returned a project without dedicated_space_id "
+            "(internal invariant violation)",
+        )
+    # Audit the promotion BEFORE commit so the audit row and the
+    # project mutation land in the same transaction — either both
+    # persist or neither does (no torn state where the project moved
+    # to a dedicated space but the audit chain has no record of it).
+    # Mirrors the audit pattern in `api/spaces.py::create_space`. The
+    # `mode` field disambiguates the two code paths so post-hoc audit
+    # consumers can tell whether a new space was minted or an existing
+    # one was reused.
+    await write_audit_event(
+        session,
+        user_id=ctx.user_id,
+        actor_type="agent",
+        actor_id=ctx.agent_id,
+        action="project.promote",
+        target_type="project",
+        target_id=project.id,
+        metadata={
+            "mode": (
+                "existing_space" if body.space_id is not None
+                else "new_space_with_embedding"
+            ),
+            "space_id": str(project.dedicated_space_id),
+            "embedding_model": body.embedding_model,
+        },
+    )
+    await session.commit()
     return PromoteResponse(
         project_id=project.id,
         dedicated_space_id=project.dedicated_space_id,

@@ -37,6 +37,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from klio_engine.models.permission import Permission, PermissionScope
 from klio_engine.models.project import Project
 from klio_engine.models.space import Space
 from klio_engine.services.embedding_models import resolve as resolve_embed_model
@@ -139,6 +140,7 @@ class ProjectService:
         session: AsyncSession,
         *,
         user_id: uuid.UUID,
+        agent_id: uuid.UUID,
         project_id: uuid.UUID,
         space_id: uuid.UUID | None,
         embedding_model: str | None,
@@ -152,11 +154,29 @@ class ProjectService:
         that forgets the pre-check gets a clear ValueError rather than
         silently writing whichever field is non-None.
 
+        `agent_id` is required so the new-space branch can grant the
+        promoting agent admin scope on the freshly-created Space. Without
+        the grant, every subsequent write tagged with that project_id
+        would be 403'd by the ACL check_permission gate (which sources
+        truth from the `permissions` table, not from `space.user_id`).
+
+        Promotion is a one-shot operation: a project already pinned to a
+        dedicated space cannot be re-promoted. Allowing it would silently
+        orphan the previous dedicated space (no caller would clean it up)
+        AND collide on the deterministic `dedicated-<project_id>` slug in
+        the new-space branch, surfacing as an IntegrityError → 500. The
+        409 surfaces the conflict to the caller so they can either accept
+        the existing dedicated_space_id or (when a future demote endpoint
+        lands) unpin first. The check runs AFTER the ownership lookup so
+        a cross-tenant probe still gets the no-leak 404.
+
         Raises (let the handler translate to HTTP):
           - HTTPException(404, "project not found") if `project_id`
             doesn't exist OR isn't owned by `user_id`. 404 not 403
             because leaking row existence across tenants is the more
             damaging failure mode.
+          - HTTPException(409, "already promoted ...") if the project
+            already has a `dedicated_space_id` set.
           - HTTPException(404, "space not found") if `space_id` is
             supplied but doesn't exist OR isn't owned by `user_id`.
           - HTTPException(422, "<reason>") if `embedding_model` is
@@ -182,6 +202,19 @@ class ProjectService:
         if project is None:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, "project not found"
+            )
+
+        # Re-promote guard. Placed AFTER the ownership lookup so a
+        # cross-tenant probe of a known-promoted project still gets
+        # the no-leak 404 rather than a 409 that confirms the project
+        # exists.
+        if project.dedicated_space_id is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                (
+                    f"project {project_id} is already promoted to "
+                    f"space {project.dedicated_space_id}"
+                ),
             )
 
         if space_id is not None:
@@ -234,6 +267,26 @@ class ProjectService:
         )
         session.add(new_space)
         await session.flush()
+
+        # Grant the promoting agent admin scope on the new space.
+        # Without this row, check_permission (services/acl.py) raises
+        # ACLDeniedError on every subsequent write to the dedicated
+        # space — the bridge would happily tag entries with the
+        # project_id, the API would 403 them, and the failure would
+        # only be visible at write time. Mirrors the create_space grant
+        # in `api/spaces.py`. `granted_by_agent_id=agent_id` records
+        # the promoting agent as the grantor (self-grant on creation,
+        # same convention as provisioning's bootstrap grant).
+        permission = Permission(
+            user_id=user_id,
+            space_id=new_space.id,
+            agent_id=agent_id,
+            scope=PermissionScope.ADMIN,
+            granted_by_agent_id=agent_id,
+        )
+        session.add(permission)
+        await session.flush()
+
         project.dedicated_space_id = new_space.id
         return project
 

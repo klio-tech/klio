@@ -632,3 +632,86 @@ async def test_promote_requires_auth(
         json={"embedding_model": "stub"},
     )
     assert resp.status_code == 401, resp.text
+
+
+@pytest.mark.asyncio
+async def test_promote_with_embedding_grants_write_permission_to_promoter(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """Regression: the new dedicated space MUST include a Permission
+    row for the promoting agent, or every subsequent write tagged with
+    that project_id is 403'd silently by `check_permission` (services/
+    acl.py).
+
+    Bug history: the F1 first-pass promote() created the Space row but
+    forgot the per-agent Permission grant — the space appeared in the
+    user's spaces list but was unwritable by the agent that minted it.
+    The defense is to assert end-to-end: promote → POST /entries on
+    the new dedicated_space_id → 201 with the correct content.
+    """
+    ctx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+
+    promote_resp = app_client.post(
+        f"/v1/projects/{project_id}/promote",
+        headers=ctx.auth_header(),
+        json={"embedding_model": "stub"},
+    )
+    assert promote_resp.status_code == 200, promote_resp.text
+    dedicated_space_id = uuid.UUID(promote_resp.json()["dedicated_space_id"])
+
+    # Load-bearing assertion: a write tagged with the new dedicated
+    # space must succeed for the promoting agent. If the Permission
+    # grant is missing, the ACL check fires and this returns 403.
+    write_resp = app_client.post(
+        f"/v1/spaces/{dedicated_space_id}/entries",
+        headers=ctx.auth_header(),
+        json={"kind": "memory", "content": "test entry on dedicated space"},
+    )
+    assert write_resp.status_code == 201, (
+        f"new dedicated space rejected the promoting agent's write: "
+        f"{write_resp.status_code} {write_resp.text}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_promote_twice_rejects_409(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """Re-promote after a successful promote returns 409 — projects
+    are promoted once. A second call would otherwise either silently
+    orphan the previous dedicated space (existing-space mode) or
+    collide on the deterministic `dedicated-<project_id>` slug
+    UniqueConstraint and surface as a 500 (new-space mode).
+
+    Demoting (clearing `dedicated_space_id`) is not a v0.7 operation;
+    when it lands, the 409 here gives the CLI a clean signal to drive
+    a demote-then-promote dance.
+    """
+    ctx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+    r1 = app_client.post(
+        f"/v1/projects/{project_id}/promote",
+        headers=ctx.auth_header(),
+        json={"embedding_model": "stub"},
+    )
+    assert r1.status_code == 200, r1.text
+    r2 = app_client.post(
+        f"/v1/projects/{project_id}/promote",
+        headers=ctx.auth_header(),
+        json={"embedding_model": "stub"},
+    )
+    assert r2.status_code == 409, r2.text
+    assert "already promoted" in r2.json()["detail"]
