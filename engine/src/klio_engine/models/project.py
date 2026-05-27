@@ -29,6 +29,7 @@ deployments would reject.
   - ix_projects_user_path    WHERE git_remote IS NULL AND
                                    repo_root_path IS NOT NULL
 """
+
 import uuid
 from datetime import datetime
 
@@ -80,4 +81,9 @@ class Project(Base):
                 "git_remote IS NULL AND repo_root_path IS NOT NULL"
             ),
         ),
+        # No plain user_id index: the two composite indexes above are
+        # left-prefix usable for the only query patterns ProjectService
+        # generates today. Add a plain `Index("ix_projects_user_id",
+        # "user_id")` here AND in a new migration if a future query
+        # needs `WHERE user_id = :uid` without further constraint.
     )
