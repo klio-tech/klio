@@ -4,6 +4,159 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-05-28
+
+### Added — per-project memory scoping
+
+Before 0.7.0, every memory captured by Klio landed in the user's
+single active space. Claude's `recall` returned the top-k
+semantically nearest entries with no project context — so when the
+user worked in Project A and asked a question, half the recalled
+entries came from Project B's unrelated work. The user's exact
+words: "Claude wants to be pushed with data from Klio, but the data
+is from a different project, so Claude rejects it." Wasted tokens
+on the good path; correctness risk on the bad one.
+
+0.7.0 adds an invisible **projects** layer underneath spaces. Every
+write is auto-tagged with a `project_id` derived from the session's
+git context. Every recall defaults to the active project. The user
+never has to think about it. Spaces stay as the user-controlled
+coarse grouping (Personal / Work / Side); projects are the
+auto-detected fine-grained layer.
+
+#### Auto-detection (bridge)
+
+`bridge/internal/project.Resolve` derives a project identity from
+each hook fire in priority order:
+
+  1. `git remote get-url origin` — the strongest stable identity
+     across machines and clones.
+  2. `git rev-parse --show-toplevel` — same repo, no remote yet.
+  3. The session's absolute `cwd` — non-git workspaces still get
+     their own bucket.
+
+The resolved identity is sent to the engine via a new
+`POST /v1/projects/ensure` endpoint that returns a stable `project_id`
+(get-or-create). A bounded LRU cache (`bridge/internal/project.Cache`)
+amortizes git/syscall cost across hook fires; cache misses concurrent
+on the same key collapse to a single resolve via a singleflight
+group.
+
+#### Recall scoping (engine + MCP)
+
+`recall` defaults to the active project's entries. The MCP tool
+schema gains a `project` parameter accepting:
+
+  - absent / null → active project (the safe default)
+  - `"any"` → cross-project, the explicit escape hatch
+  - a git remote URL (e.g. `git@github.com:klio-tech/klio.git`) →
+    a specific other project
+  - a UUID → for direct API consumers
+
+NULL-tagged entries (everything written before 0.7.0) always
+surface in every project's recall. This is deliberate: pre-0.7.0
+sessions weren't isolated, so users have a "global pool" of legacy
+memory that they would lose if NULLs were filtered out. The safe
+default preserves that value forever; there is no backfill (the
+hook payloads pre-0.7.0 didn't capture `cwd` consistently, so we
+can't reconstruct project identity for old entries).
+
+#### Promote-to-space escape valve
+
+For the rare project that needs **harder** isolation than tagging
+(different embedding model, isolated KMS key, atomic forget),
+operators can elevate it to a dedicated space:
+
+```bash
+klio project promote git@github.com:acme/secret-repo.git \
+  --embedding text-embedding-3-large
+```
+
+Or attach to an existing space:
+
+```bash
+klio project promote <project-uuid> --space <space-uuid>
+```
+
+Behind the CLI: `POST /v1/projects/{id}/promote` creates (or
+attaches) a `dedicated_space_id`, returning 409 on re-promote so
+the operator can't accidentally double-promote. The promote path
+audits via the existing audit-event stream; the ensure path does
+not (every hook fire would generate one — see deferred items).
+
+### Migration
+
+Two new alembic migrations:
+
+  - `0007_session_cwd.py` — adds `sessions.cwd TEXT NULL` so the
+    bridge can persist working-directory context.
+  - `0008_projects.py` — adds the `projects` table and
+    `entries.project_id UUID NULL` FK.
+
+The `projects` table uses two partial unique indexes (not a CHECK)
+to enforce uniqueness semantics:
+
+  - `(user_id, git_remote)` when `git_remote IS NOT NULL`
+  - `(user_id, repo_root_path)` when `git_remote IS NULL AND
+    repo_root_path IS NOT NULL`
+
+No backfill of historical entries — they stay `project_id = NULL`
+and surface globally as described above.
+
+### Schema-facing surfaces (downstream consumers)
+
+  - **Engine** — new endpoints `POST /v1/projects/ensure` and
+    `POST /v1/projects/{id}/promote`. Recall request body's
+    `project` field accepts UUID | git remote | `"any"` | absent.
+    Write endpoints (`/v1/entries`, `/v1/ingest`) accept an
+    optional `project_id` in the body.
+  - **Bridge** — new cloud-client methods `EnsureProject` and
+    `PromoteProject`. New `RecallRequest.Project` (`string`,
+    `omitempty`). Hook payloads' existing `cwd` is now consumed
+    for project detection.
+  - **MCP** — recall tool's input schema gains an LLM-actionable
+    `project` description so Claude knows when to widen via
+    `"any"` vs. a specific remote.
+
+### Known limitations / deferred to 0.7.x
+
+  - **Bridge cache lifetime.** `project.Cache` lives inside each
+    per-hook subprocess (Claude Code spawns the bridge fresh per
+    fire), so it doesn't yet amortize across hook fires within a
+    session. Moving it daemon-side via the existing socket saves
+    ~30-50ms × 200+ fires per session. Tracked for 0.7.x.
+  - **Cross-tenant validation on `entries.project_id` writes.** The
+    write path currently accepts a caller-supplied `project_id`
+    without verifying it belongs to the caller. The promote path
+    does validate. Write-side tightening is queued.
+  - **Audit events on `/v1/projects/ensure`.** Every hook fire
+    eventually resolves to a `projects` row. We do **not** audit
+    the ensure path today (it would generate one audit event per
+    hook fire — too noisy). The promote path **does** audit. The
+    right granularity is still open.
+  - **Test-DB residue.** Tests occasionally leave rows in
+    `public.users` of the test database. Worked around manually
+    per-task; structural fix queued.
+
+### Tests
+
+76 new test functions across engine (Python/pytest) and bridge
+(Go) covering: schema migrations, ORM models, services, API
+endpoints, project detection (git → fs precedence), LRU cache (LRU
+semantics + race-safe concurrency invariant), cloud-client wire
+formats, hook handlers (fail-open guarantee on detection failure),
+MCP recall-tool schema. Full sweep green at commit time.
+
+### Production-readiness
+
+The feature has been verified end-to-end via the smoke runbook at
+[`docs/runbooks/2026-05-28-project-scoping-smoke.md`](./docs/runbooks/2026-05-28-project-scoping-smoke.md)
+(two-repo smoke covering: ensure idempotency, write tagging,
+default-scoped recall, `"any"` cross-project widening, remote-URL
+targeting, promote-to-space, legacy NULL survivability).
+
+[0.7.0]: https://github.com/klio-tech/klio/releases/tag/v0.7.0
+
 ## [0.6.1] — unreleased
 
 ### Fixed — auto-update silently failed on every host
