@@ -194,13 +194,13 @@ func TestRecallForwardsProjectID(t *testing.T) {
 	}
 }
 
-// TestRecallTolereatesBadProjectID is the fail-open guarantee: an
+// TestRecallToleratesBadProjectID is the fail-open guarantee: an
 // unparseable project_id from a buggy or stale hook client must not 400
 // the call. The dispatcher silently falls back to uuid.Nil and lets the
 // recall run (cross-project scope). Surfacing a hard error here would
 // break the user's session-start context warmup on the rare day someone
 // ships a client that mangles uuid strings.
-func TestRecallTolereatesBadProjectID(t *testing.T) {
+func TestRecallToleratesBadProjectID(t *testing.T) {
 	b := &stubBackend{}
 	d := NewDispatcher(b)
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{` +

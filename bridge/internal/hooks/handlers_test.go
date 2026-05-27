@@ -412,12 +412,10 @@ func TestWriteHookWithNilCacheSkipsResolve(t *testing.T) {
 	}
 }
 
-// jsonString safely embeds a path in a JSON string literal for the
-// fixture payloads above. t.TempDir() can contain characters that
-// `fmt.Sprintf("%q", s)` doesn't always quote correctly for JSON
-// (it uses Go escape rules, which differ in edge cases for control
-// chars and Unicode). For the dir strings these tests produce, %q is
-// safe — but the named helper makes intent explicit.
+// jsonString wraps a path as a JSON string literal for embedding in
+// test fixture payloads. Distinct from fmt.Sprintf("%q", s) only in
+// that we keep the abstraction in case the test inputs ever include
+// chars that need different escaping.
 func jsonString(s string) string {
 	return fmt.Sprintf("%q", s)
 }

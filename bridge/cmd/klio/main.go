@@ -431,15 +431,17 @@ func runHook(args []string) {
 		os.Exit(2)
 	}
 	backend := hooks.NewSocketBackend()
-	// Per-process project.Cache. The hook subprocess lifecycle is one
-	// process per hook fire, so the cache amortises a single cwd's git
-	// shell-outs across the resolve + ensure pair — about half the
-	// theoretical benefit a long-lived cache would yield, but still
-	// meaningful (cuts hook latency by one `git config` call) and
-	// keeps cwd-handling logic in the same address space that owns
-	// Payload.Cwd. A future revision may push the cache into the
-	// daemon and have the hook ship cwd over the socket; doing so
-	// requires a wire-protocol change that's out of scope for E2.
+	// project.NewCache lives in the hook subprocess for now. With one
+	// Resolve call per hook fire, the cache pays for itself zero times
+	// in this configuration — but the wiring keeps the API stable for a
+	// future migration that pushes the cache (and the cwd→project_id
+	// resolution) into the long-lived daemon. See follow-up task
+	// "Move project.Cache from hook subprocess into daemon" — that
+	// change is where the cache actually pays off (~30-50ms × 200+
+	// hook fires per session of wall-clock saved).
+	//
+	// Capacity 0 → defaultCapacity (128) in the constructor; we just
+	// pick a reasonable bound here.
 	cache := project.NewCache(0)
 	exit := hooks.Run(args[0], backend, cache, os.Stdin, os.Stdout, os.Stderr)
 	os.Exit(exit)
