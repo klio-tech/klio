@@ -33,6 +33,11 @@ class RecallRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2_000)
     kind: str | None = None
     limit: int = Field(default=10, ge=1, le=100)
+    # "any" | git_remote | UUID; None == cross-project (v0.6 behaviour).
+    # Resolved to a project_id in the recall handler before being passed
+    # to RecallService. See `klio_engine.api.entries._resolve_project_arg`
+    # for the four resolution branches and why "unknown" returns 404 not 422.
+    project: str | None = None
 
 
 class AgentResponse(BaseModel):

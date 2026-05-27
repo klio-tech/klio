@@ -12,6 +12,7 @@ from klio_engine.config import Settings
 from klio_engine.crypto.kms_client import KMSClient
 from klio_engine.dependencies import get_kms, get_session
 from klio_engine.models.entry import Entry, EntryKind
+from klio_engine.models.project import Project
 from klio_engine.schemas.entries import (
     VALID_KINDS_V0,
     EntryResponse,
@@ -190,6 +191,14 @@ async def recall(
     except ACLDeniedError as e:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(e)) from e
 
+    # Resolve the optional `project` filter AFTER auth/ACL — leaks
+    # nothing about project existence to unauthorised callers. The
+    # helper returns None for "cross-project" (preserves v0.6 behaviour)
+    # and raises HTTPException(404) for anything that doesn't match a
+    # project the caller owns (never silently widens — that would be
+    # the footgun B3 is designed to prevent).
+    project_id = await _resolve_project_arg(session, ctx.user_id, body.project)
+
     embeddings = EmbeddingService()
     recall_svc = RecallService(embeddings=embeddings)
     results = await recall_svc.recall(
@@ -198,6 +207,7 @@ async def recall(
         space_id=space_id,
         query=body.query,
         kind=EntryKind(body.kind) if body.kind else None,
+        project_id=project_id,
         limit=body.limit,
     )
 
@@ -243,3 +253,70 @@ async def delete_entry(
         metadata={"space_id": str(e.space_id), "kind": e.kind.value},
     )
     await session.commit()
+
+
+async def _resolve_project_arg(
+    session: AsyncSession, user_id: uuid.UUID, raw: str | None
+) -> uuid.UUID | None:
+    """Resolve a recall request's `project` string to a project_id.
+
+    Returns None for None or "any" (cross-project recall — caller
+    passes None to RecallService). Returns a UUID for a tenant-owned
+    project matching either the raw UUID or the git_remote string.
+    Raises HTTPException(404) when a non-empty/non-"any" value
+    doesn't match any project the caller owns — 404 (not 422) because
+    the project IS a resource being addressed.
+
+    The 404-not-422 distinction is load-bearing: returning 422 ("bad
+    schema") would suggest the client can fix the body and retry,
+    when in fact the body IS well-formed — the referenced project
+    simply doesn't exist for this tenant. 404 surfaces that as
+    "addressed resource not found" so clients route the error
+    correctly. It also dodges the silent-widening footgun: a typo'd
+    project that resolved to None would quietly return cross-project
+    results (everything the user can see), the exact failure mode
+    the per-project scoping design forbids.
+    """
+    if raw is None or raw == "any":
+        return None
+
+    # UUID branch — try parsing first so a UUID-shaped `raw` is
+    # resolved against `projects.id` rather than `projects.git_remote`.
+    # ValueError from uuid.UUID() means it isn't UUID-shaped → fall
+    # through to the git_remote lookup.
+    try:
+        candidate = uuid.UUID(raw)
+    except ValueError:
+        candidate = None
+
+    if candidate is not None:
+        stmt = select(Project.id).where(
+            Project.id == candidate, Project.user_id == user_id
+        )
+        result = (await session.execute(stmt)).scalar_one_or_none()
+        if result is not None:
+            return result
+        # UUID was well-formed but didn't match any project this
+        # user owns. Don't fall through to the git_remote branch —
+        # a UUID can't be a git remote URL, so further lookup is
+        # guaranteed to miss. 404 immediately.
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"project not found: {raw}"
+        )
+
+    # git_remote branch — `raw` is a non-UUID string. Look it up in
+    # `projects.git_remote` scoped to the caller. We do NOT check
+    # `repo_root_path` here: the bridge passes the strongest
+    # identifier available, and the path-only case only occurs when
+    # there's no git remote — which means the caller can't know the
+    # path to pass anyway. If repo_root_path lookups become a
+    # use-case (e.g. CLI tools), extend this branch then.
+    stmt = select(Project.id).where(
+        Project.user_id == user_id, Project.git_remote == raw
+    )
+    result = (await session.execute(stmt)).scalar_one_or_none()
+    if result is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"project not found: {raw}"
+        )
+    return result
