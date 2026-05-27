@@ -15,15 +15,17 @@ Race handling: under concurrent writes from two bridge processes (or
 two hook fires that happen to land on the same project simultaneously),
 both may pass the `_find` check and try to INSERT. The second
 INSERT collides with the partial unique index → SQLAlchemy raises
-IntegrityError. We catch that, rollback, and re-find — guaranteed to
-succeed because the winning concurrent insert is now visible.
+IntegrityError. We wrap the flush in a SAVEPOINT (`session.begin_nested()`)
+so only the failed INSERT is rolled back; the caller's outer
+transaction stays alive. After the SAVEPOINT rollback we re-find the
+winning row — guaranteed visible because the concurrent insert
+committed before our IntegrityError fired.
 """
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,7 +74,13 @@ class ProjectService:
             repo_root_path=repo_root_path,
         )
         if existing is not None:
-            existing.last_seen_at = datetime.now(timezone.utc)
+            # DB-side now() rather than Python datetime.now(): the DB
+            # clock is the single source of truth for ordering. With
+            # Python clocks, two bridge processes on machines with NTP
+            # skew could write timestamps that go backwards relative to
+            # actual observation order — breaking any "sort by recency"
+            # UI.
+            existing.last_seen_at = func.now()
             return existing
 
         project = Project(
@@ -81,13 +89,27 @@ class ProjectService:
             repo_root_path=repo_root_path,
             display_name=display_name,
         )
-        session.add(project)
         try:
-            await session.flush()
+            # SAVEPOINT-scoped INSERT. AsyncSession.rollback() would
+            # roll back the WHOLE outer transaction — destroying any
+            # pending writes the caller (e.g. the bridge tagging an
+            # already-created Entry row) made before invoking ensure().
+            # begin_nested() issues a PG SAVEPOINT and unconditionally
+            # flushes pre-existing pending state to it first, so the
+            # caller's prior writes go into the savepoint scope too.
+            # The add() + flush() of OUR row happens inside the
+            # savepoint, so on IntegrityError we ROLLBACK TO SAVEPOINT
+            # (releasing only OUR failed INSERT while preserving the
+            # already-flushed pending state from the outer tx).
+            async with session.begin_nested():
+                session.add(project)
+                await session.flush()
         except IntegrityError:
-            # Concurrent insert won the race. Roll back the failed
-            # INSERT and re-find — the winning row is now visible.
-            await session.rollback()
+            # Concurrent insert won the race. The SAVEPOINT scoped the
+            # rollback to just our failed INSERT — the outer
+            # transaction (and any other pending changes the caller
+            # made before invoking ensure()) is intact. Re-find the
+            # winning row.
             again = await self._find(
                 session,
                 user_id=user_id,
@@ -98,7 +120,7 @@ class ProjectService:
                 # Genuinely unexpected — the row that triggered the
                 # IntegrityError vanished. Re-raise the original.
                 raise
-            again.last_seen_at = datetime.now(timezone.utc)
+            again.last_seen_at = func.now()
             return again
         return project
 
