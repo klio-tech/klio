@@ -158,6 +158,39 @@ func (c *Client) EnsureProject(
 	return resp.ID, nil
 }
 
+// PromoteProject calls POST /v1/projects/{project_id}/promote (F1).
+//
+// Exactly one of spaceID / embeddingModel must be non-empty — the
+// engine's PromoteRequest schema XOR-validates and 422s otherwise.
+// Callers (the `klio project promote` CLI) enforce this client-side
+// before invoking; this method intentionally does NOT pre-check so a
+// future caller hitting the engine path directly gets the same error
+// shape any other HTTP client would.
+//
+// spaceID is forwarded as a string rather than uuid.UUID because the
+// CLI receives it as a `--space=<uuid>` flag and the engine accepts
+// the canonical 36-char dashed form. Conversion would round-trip
+// through uuid.Parse + UUID.String() with no gain.
+//
+// Returns the project_id (echoed) and the newly-pinned
+// dedicated_space_id. The 30s client timeout applies; promotion is
+// fast (one INSERT + one UPDATE inside a transaction) so a deadline
+// extension isn't warranted here.
+func (c *Client) PromoteProject(
+	ctx context.Context, projectID, spaceID, embeddingModel string,
+) (*PromoteResponse, error) {
+	body := PromoteRequest{
+		SpaceID:        spaceID,
+		EmbeddingModel: embeddingModel,
+	}
+	var resp PromoteResponse
+	path := fmt.Sprintf("/v1/projects/%s/promote", projectID)
+	if err := c.do(ctx, "POST", path, body, &resp, true); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // IngestTranscript calls POST /v1/spaces/{id}/ingest/transcript.
 func (c *Client) IngestTranscript(
 	ctx context.Context,

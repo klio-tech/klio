@@ -268,6 +268,92 @@ func TestEnsureProjectRefreshesOn401(t *testing.T) {
 	}
 }
 
+// TestPromoteProjectPostsToEngine verifies the cloud client forwards
+// (project_id in path, space_id in body) to /v1/projects/{id}/promote
+// and parses the echoed (project_id, dedicated_space_id) response.
+//
+// F2 surface-area test: proves the wire format matches the engine
+// handler's PromoteRequest / PromoteResponse pydantic schemas.
+func TestPromoteProjectPostsToEngine(t *testing.T) {
+	var body map[string]any
+	var sawAuth string
+	var sawPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		sawPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(
+			`{"project_id":"11111111-2222-3333-4444-555555555555",` +
+				`"dedicated_space_id":"99999999-8888-7777-6666-555555555555"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	c.SetAccessToken("test-token")
+	resp, err := c.PromoteProject(
+		context.Background(),
+		"11111111-2222-3333-4444-555555555555",
+		"99999999-8888-7777-6666-555555555555",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("PromoteProject: %v", err)
+	}
+	if sawPath != "/v1/projects/11111111-2222-3333-4444-555555555555/promote" {
+		t.Errorf("wrong path: %s", sawPath)
+	}
+	if sawAuth != "Bearer test-token" {
+		t.Errorf("Authorization header = %q", sawAuth)
+	}
+	if body["space_id"] != "99999999-8888-7777-6666-555555555555" {
+		t.Errorf("space_id = %v", body["space_id"])
+	}
+	if _, present := body["embedding_model"]; present {
+		t.Errorf("embedding_model should be omitted, body: %v", body)
+	}
+	if resp.ProjectID != uuid.MustParse("11111111-2222-3333-4444-555555555555") {
+		t.Errorf("ProjectID = %s", resp.ProjectID)
+	}
+	if resp.DedicatedSpaceID != uuid.MustParse("99999999-8888-7777-6666-555555555555") {
+		t.Errorf("DedicatedSpaceID = %s", resp.DedicatedSpaceID)
+	}
+}
+
+// TestPromoteProjectOmitsEmptyOptionalFields ensures the JSON wire
+// format omits whichever of space_id / embedding_model is empty.
+// The engine's PromoteRequest XOR-validates non-null fields, so a
+// stray empty string would shift behaviour from "absent" to "supplied
+// and 422" — symmetric to the EnsureProject omitempty contract.
+func TestPromoteProjectOmitsEmptyOptionalFields(t *testing.T) {
+	var raw map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(
+			`{"project_id":"11111111-2222-3333-4444-555555555555",` +
+				`"dedicated_space_id":"99999999-8888-7777-6666-555555555555"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	c.SetAccessToken("test-token")
+	if _, err := c.PromoteProject(
+		context.Background(),
+		"11111111-2222-3333-4444-555555555555",
+		"",
+		"ollama/snowflake-arctic-embed2",
+	); err != nil {
+		t.Fatalf("PromoteProject: %v", err)
+	}
+	if _, present := raw["space_id"]; present {
+		t.Errorf("space_id should be omitted when empty, got: %v", raw)
+	}
+	if raw["embedding_model"] != "ollama/snowflake-arctic-embed2" {
+		t.Errorf("embedding_model = %v", raw["embedding_model"])
+	}
+}
+
 // TestRecallSendsProjectField verifies the optional `project` field on
 // RecallRequest is forwarded to the engine. E3 will populate this from
 // the MCP recall tool's resolved project key; E1 just gets the field

@@ -123,6 +123,24 @@ func deriveDisplayName(remote, root, abs string) string {
 	return filepath.Base(abs)
 }
 
+// DisplayNameFromRemote is the exported wrapper around the package's
+// internal remote-URL → display-name parser. Useful for callers that
+// have a git remote string in hand but no working directory to feed
+// into Resolve (e.g. the `klio project promote <remote>` CLI, which
+// resolves a remote into a project_id by calling EnsureProject
+// before the promote round-trip).
+//
+// Returning the unparseable input verbatim — never `""` — is part of
+// the contract: callers forwarding the result as `display_name` rely
+// on the engine's `min_length=1` schema gate not tripping, and
+// passing-through is the only way to keep a non-empty signal for
+// inputs we don't recognise.
+//
+// See displayFromRemote for the underlying parsing rules.
+func DisplayNameFromRemote(remote string) string {
+	return displayFromRemote(remote)
+}
+
 // displayFromRemote extracts an `org/repo` (or `group/subgroup/repo`
 // for GitLab-style nesting) from a git remote URL. Supports the two
 // dominant remote shapes:

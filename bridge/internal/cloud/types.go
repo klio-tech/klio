@@ -110,3 +110,33 @@ type ensureProjectRequest struct {
 type ensureProjectResponse struct {
 	ID uuid.UUID `json:"id"`
 }
+
+// PromoteRequest is the wire format for
+// POST /v1/projects/{id}/promote.
+//
+// Exactly one of SpaceID / EmbeddingModel must be non-zero — the
+// engine's handler XOR-validates and 422s if both/neither are set.
+// The CLI layer enforces this before the call, but we still send the
+// raw fields so any future caller (or test) hits the same engine path.
+//
+// `omitempty` is load-bearing for both fields: an uninhibited
+// `uuid.Nil` for SpaceID would deserialise as a legal UUID on the
+// engine side (and override the embedding_model path); an empty
+// EmbeddingModel string would trip the engine's `min_length=1` schema
+// gate. Both fields are pointer-like (string / uuid.UUID) and the
+// zero values must be elided to mean "absent".
+type PromoteRequest struct {
+	SpaceID        string `json:"space_id,omitempty"`
+	EmbeddingModel string `json:"embedding_model,omitempty"`
+}
+
+// PromoteResponse is the wire format returned by
+// POST /v1/projects/{id}/promote.
+//
+// Both ids are echoed back so the CLI can confirm the assignment
+// without a follow-up GET. DedicatedSpaceID is guaranteed non-nil by
+// the engine handler.
+type PromoteResponse struct {
+	ProjectID        uuid.UUID `json:"project_id"`
+	DedicatedSpaceID uuid.UUID `json:"dedicated_space_id"`
+}

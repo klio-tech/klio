@@ -171,6 +171,26 @@ func TestResolveWorktreeSharesRemote(t *testing.T) {
 	}
 }
 
+// TestDisplayNameFromRemoteExportedWrapper verifies the exported
+// wrapper (`DisplayNameFromRemote`) routes to the same parser as the
+// unexported `displayFromRemote`. The wrapper exists so external
+// callers (e.g. `klio project promote <remote>`) can derive a display
+// name without fabricating a cwd to feed into Resolve; if a future
+// refactor accidentally diverges the two, this test catches it.
+func TestDisplayNameFromRemoteExportedWrapper(t *testing.T) {
+	cases := []string{
+		"git@github.com:klio-tech/klio.git",
+		"https://gitlab.com/group/subgroup/project",
+		"",
+		"  not-a-url  ",
+	}
+	for _, in := range cases {
+		if got, want := DisplayNameFromRemote(in), displayFromRemote(in); got != want {
+			t.Errorf("DisplayNameFromRemote(%q) = %q, displayFromRemote = %q", in, got, want)
+		}
+	}
+}
+
 // TestDisplayFromRemote — the table-driven survey of remote URL
 // shapes. Documented in the task: SSH, HTTPS, HTTPS-with-.git, the
 // ssh:// scheme variant, GitLab nested subgroups, and the "anything

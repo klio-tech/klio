@@ -56,6 +56,8 @@ func main() {
 		runBackfill(os.Args[2:])
 	case "reembed":
 		runReembed(os.Args[2:])
+	case "project":
+		runProject(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
 		printUsage()
@@ -653,5 +655,6 @@ func min(a, b int) int {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr,
-		"usage: klio [version|daemon|status|init|configure|uninstall|hook|backfill|reembed]")
+		"usage: klio [version|daemon|status|init|configure|uninstall|"+
+			"hook|backfill|reembed|project]")
 }
