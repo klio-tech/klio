@@ -30,6 +30,7 @@ class RecallService:
         space_id: uuid.UUID,
         query: str,
         kind: EntryKind | None = None,
+        project_id: uuid.UUID | None = None,
         limit: int = 10,
     ) -> list[tuple[Entry, float]]:
         space = await session.get(Space, space_id)
@@ -64,6 +65,18 @@ class RecallService:
         if kind is not None:
             sql += " AND e.kind::text = :kind"
             params["kind"] = kind.value
+        if project_id is not None:
+            # NULL-tagged entries surface in every project's recall —
+            # this is the safe default for legacy entries (written
+            # before per-project tagging in v0.7.0) and entries from
+            # non-detectable contexts (e.g. the bridge fired a hook
+            # from a non-git, non-repo folder). See v0.7.0 design
+            # doc §4: dropping the IS NULL branch would silently hide
+            # all pre-0.7 memory the moment the bridge starts passing
+            # a project filter — a worse user-visible regression than
+            # the tiny cross-project bleed risk from untagged rows.
+            sql += " AND (e.project_id = :project_id OR e.project_id IS NULL)"
+            params["project_id"] = project_id
         sql += """
             )
             SELECT id, embedding <=> CAST(:emb AS vector) AS distance
