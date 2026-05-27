@@ -20,16 +20,26 @@ so only the failed INSERT is rolled back; the caller's outer
 transaction stays alive. After the SAVEPOINT rollback we re-find the
 winning row — guaranteed visible because the concurrent insert
 committed before our IntegrityError fired.
+
+F1 — `promote()` is the escape-valve method: it elevates a project
+from "tagged inside the default space" to "owns a dedicated space"
+in one of two modes:
+  - assign an existing space (caller supplies space_id)
+  - create a new space pinned to a chosen embedding model
+The caller (handler) must validate the XOR invariant before calling.
 """
 from __future__ import annotations
 
 import uuid
 
+from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from klio_engine.models.project import Project
+from klio_engine.models.space import Space
+from klio_engine.services.embedding_models import resolve as resolve_embed_model
 
 
 class ProjectService:
@@ -122,6 +132,109 @@ class ProjectService:
                 raise
             again.last_seen_at = func.now()
             return again
+        return project
+
+    async def promote(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        project_id: uuid.UUID,
+        space_id: uuid.UUID | None,
+        embedding_model: str | None,
+    ) -> Project:
+        """Set `project.dedicated_space_id` to an existing space or a
+        newly-created one.
+
+        The caller (handler) must enforce the XOR invariant — exactly
+        one of `space_id` / `embedding_model` set — before calling.
+        We assert it here as defense-in-depth: a future internal caller
+        that forgets the pre-check gets a clear ValueError rather than
+        silently writing whichever field is non-None.
+
+        Raises (let the handler translate to HTTP):
+          - HTTPException(404, "project not found") if `project_id`
+            doesn't exist OR isn't owned by `user_id`. 404 not 403
+            because leaking row existence across tenants is the more
+            damaging failure mode.
+          - HTTPException(404, "space not found") if `space_id` is
+            supplied but doesn't exist OR isn't owned by `user_id`.
+          - HTTPException(422, "<reason>") if `embedding_model` is
+            supplied but unknown to the registry. `resolve()` raises
+            ValueError; we convert here so the handler stays thin.
+
+        Returns the mutated Project. The caller commits.
+        """
+        if (space_id is None) == (embedding_model is None):
+            # Defense-in-depth: caller's pre-check should have rejected.
+            raise ValueError(
+                "promote() requires exactly one of space_id or embedding_model"
+            )
+
+        project = (
+            await session.execute(
+                select(Project).where(
+                    Project.id == project_id,
+                    Project.user_id == user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if project is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "project not found"
+            )
+
+        if space_id is not None:
+            # Existing-space path: validate the space exists, belongs
+            # to this user, and is not soft-deleted. Reuse the same
+            # ownership + deleted_at filters that `/v1/spaces/{id}`
+            # uses (see `api/spaces.py::_load_owned_space`) so this
+            # endpoint can't be used to attach a project to a soft-
+            # deleted space.
+            space = (
+                await session.execute(
+                    select(Space).where(
+                        Space.id == space_id,
+                        Space.user_id == user_id,
+                        Space.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if space is None:
+                raise HTTPException(
+                    status.HTTP_404_NOT_FOUND, "space not found"
+                )
+            project.dedicated_space_id = space_id
+            return project
+
+        # New-space path: resolve the embedding model through the
+        # registry. `resolve()` raises ValueError on unknown names;
+        # convert to 422 with the original message so the user sees
+        # "Unknown embedding model 'xyz'. Add a row..." rather than a
+        # 500.
+        try:
+            spec = resolve_embed_model(embedding_model)
+        except ValueError as e:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)
+            ) from e
+
+        new_space = Space(
+            user_id=user_id,
+            name=f"{project.display_name} (dedicated)",
+            # Slug must be unique per (user_id, slug); use the project
+            # UUID for uniqueness (display_name slugs could collide for
+            # users with multiple projects sharing a basename, or with
+            # an already-named space). `dedicated-<project_uuid>` is
+            # deterministic, idempotent on retry, and never overlaps
+            # with user-created slugs (which never contain a UUID).
+            slug=f"dedicated-{project_id}",
+            embedding_model=spec.name,
+            embedding_dim=spec.dim,
+        )
+        session.add(new_space)
+        await session.flush()
+        project.dedicated_space_id = new_space.id
         return project
 
     async def _find(

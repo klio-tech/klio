@@ -41,6 +41,8 @@ from klio_engine.api.auth import _mint_for_test
 from klio_engine.api.main import build_app
 from klio_engine.crypto.kms_client import KMSClient
 from klio_engine.dependencies import get_kms
+from klio_engine.models.space import Space
+from klio_engine.services.embedding_models import resolve as resolve_embed_model
 from klio_engine.services.projects import ProjectService
 
 JWT_SECRET = "test-secret-do-not-use-in-prod"
@@ -149,6 +151,44 @@ async def seed_project(
     )
     await db_session.commit()
     return project.id
+
+
+async def seed_space(
+    db_session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    name: str,
+    slug: str,
+    embedding_model: str | None = None,
+) -> uuid.UUID:
+    """Insert a Space row directly for tests that need a pre-existing
+    space (promote-to-existing-space path, cross-tenant isolation).
+
+    Uses the same `resolve` registry the production /v1/spaces handler
+    uses (`api/spaces.py::create_space`) so the embed_model + embed_dim
+    pinned on the row match what the engine would have minted via the
+    HTTP path. Commits before returning so the TestClient request
+    under test reads the committed row.
+
+    The default `embedding_model=None` resolves to the registry default
+    (currently `ollama/nomic-embed-text`, 768-dim); test-env config
+    sets `KLIO_EMBEDDING_MODEL=stub` so the default actually used by
+    `_default_embedding_model` would be `stub` — but here we want a
+    deterministic pin regardless of env, so we resolve explicitly.
+    """
+    spec = resolve_embed_model(embedding_model)
+    space = Space(
+        user_id=user_id,
+        name=name,
+        slug=slug,
+        embedding_model=spec.name,
+        embedding_dim=spec.dim,
+    )
+    db_session.add(space)
+    await db_session.flush()
+    space_id = space.id
+    await db_session.commit()
+    return space_id
 
 
 def provision(client: TestClient) -> AuthCtx:

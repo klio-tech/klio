@@ -1,14 +1,20 @@
-"""E1 — POST /v1/projects/ensure get-or-create endpoint.
+"""E1 + F1 — POST /v1/projects/ensure and POST /v1/projects/{id}/promote.
 
-The bridge's `cloud.Client.EnsureProject` lands here on every hook
-fire that resolved a project from the working directory. The endpoint
-is a thin handler over `ProjectService.ensure` — the heavy lifting
-(remote vs path dedup, SAVEPOINT-scoped concurrent INSERT recovery,
-`last_seen_at` bumps) lives in the service.
+The bridge's `cloud.Client.EnsureProject` lands on `/ensure` on every
+hook fire that resolved a project from the working directory. The
+endpoint is a thin handler over `ProjectService.ensure` — the heavy
+lifting (remote vs path dedup, SAVEPOINT-scoped concurrent INSERT
+recovery, `last_seen_at` bumps) lives in the service.
 
-This test file covers the API-surface invariants the bridge depends
-on:
+`/promote` is the F1 escape valve: a project can be elevated from
+"tagged in default space" to "owning a dedicated space" when it needs
+different embeddings, isolated KMS, or atomic forget semantics. See
+`docs/plans/2026-05-27-per-project-memory-scoping-design.md` §6.
 
+This test file covers the API-surface invariants the bridge + CLI
+depend on:
+
+  /ensure:
   1. First call with `(git_remote, repo_root_path, display_name)`
      persists a row and returns its UUID.
   2. Second call with the same `git_remote` returns the same UUID
@@ -26,6 +32,18 @@ on:
   7. Cross-tenant isolation: two users sending the same identifiers
      get distinct project rows.
 
+  /promote (F1):
+  1. Assigning an existing space updates `project.dedicated_space_id`
+     and leaves the space untouched.
+  2. Supplying an embedding model creates a new dedicated space with
+     that model and pins the project to it.
+  3. Both modes set simultaneously → 422 (ambiguous).
+  4. Neither mode set → 422 (must pick one).
+  5. Unknown project_id (or another user's) → 404 (no-leak).
+  6. Unknown / cross-tenant space_id → 404 (no-leak).
+  7. User A cannot promote User B's project even with A's own valid
+     space_id — gets 404, preserving tenant isolation.
+
 Fixtures (`app_client`, `db_session`, `provision`, `AuthCtx`) live in
 `engine/tests/api/conftest.py`.
 """
@@ -39,7 +57,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from klio_engine.models.project import Project
-from tests.api.conftest import AuthCtx, provision
+from klio_engine.models.space import Space
+from tests.api.conftest import AuthCtx, provision, seed_project, seed_space
 
 
 def _ensure_body(
@@ -274,3 +293,342 @@ async def test_ensure_isolates_per_user(app_client: TestClient) -> None:
     assert r_a.status_code == 200, r_a.text
     assert r_b.status_code == 200, r_b.text
     assert r_a.json()["id"] != r_b.json()["id"]
+
+
+# ---------------------------------------------------------------------------
+# F1 — POST /v1/projects/{project_id}/promote
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_promote_assigns_existing_space(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """Simplest promote path: assign an existing space.
+
+    The handler must:
+      - set `project.dedicated_space_id` to the supplied space_id
+      - leave the existing Space row otherwise untouched
+        (no embedding model mutation, no new row created)
+      - return both IDs on the wire so the CLI / bridge can confirm
+    """
+    ctx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+    space_id = await seed_space(
+        db_session,
+        user_id=ctx.user_id,
+        name="Pre-existing",
+        slug="pre-existing",
+        embedding_model="stub",
+    )
+
+    resp = app_client.post(
+        f"/v1/projects/{project_id}/promote",
+        headers=ctx.auth_header(),
+        json={"space_id": str(space_id)},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert uuid.UUID(body["project_id"]) == project_id
+    assert uuid.UUID(body["dedicated_space_id"]) == space_id
+
+    # Round-trip through an independent session to confirm the commit
+    # landed and the existing Space row is unchanged.
+    project = (
+        await db_session.execute(
+            select(Project).where(Project.id == project_id)
+        )
+    ).scalar_one()
+    assert project.dedicated_space_id == space_id
+
+    space = (
+        await db_session.execute(select(Space).where(Space.id == space_id))
+    ).scalar_one()
+    assert space.user_id == ctx.user_id
+    assert space.name == "Pre-existing"
+    assert space.embedding_model == "stub"
+
+
+@pytest.mark.asyncio
+async def test_promote_creates_dedicated_space_with_embedding(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """Other promote path: supply an embedding model. The handler
+    creates a new Space pinned to that model, with a name derived from
+    the project's display_name, then points the project at it.
+
+    Verifies the dim is sourced from the registry rather than being
+    hardcoded — `stub` is pinned at 1536-dim in
+    `services/embedding_models.py::EMBEDDING_MODELS`.
+    """
+    ctx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+
+    resp = app_client.post(
+        f"/v1/projects/{project_id}/promote",
+        headers=ctx.auth_header(),
+        json={"embedding_model": "stub"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    new_space_id = uuid.UUID(body["dedicated_space_id"])
+    assert uuid.UUID(body["project_id"]) == project_id
+
+    project = (
+        await db_session.execute(
+            select(Project).where(Project.id == project_id)
+        )
+    ).scalar_one()
+    assert project.dedicated_space_id == new_space_id
+
+    new_space = (
+        await db_session.execute(
+            select(Space).where(Space.id == new_space_id)
+        )
+    ).scalar_one()
+    assert new_space.user_id == ctx.user_id
+    assert new_space.embedding_model == "stub"
+    assert new_space.embedding_dim == 1536  # registry pin
+    # Name derived from the project's display_name with a "(dedicated)"
+    # suffix so the user recognizes it in the spaces list.
+    assert "klio-tech/klio" in new_space.name
+    assert "dedicated" in new_space.name.lower()
+
+
+@pytest.mark.asyncio
+async def test_promote_rejects_both_modes(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """Both `space_id` and `embedding_model` set → 422 (ambiguous).
+    The caller must pick exactly one: assign an existing space, OR
+    create a new one with the given model. Allowing both would make
+    the override semantics undefined."""
+    ctx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+    space_id = await seed_space(
+        db_session,
+        user_id=ctx.user_id,
+        name="Pre-existing",
+        slug="pre-existing",
+        embedding_model="stub",
+    )
+
+    resp = app_client.post(
+        f"/v1/projects/{project_id}/promote",
+        headers=ctx.auth_header(),
+        json={"space_id": str(space_id), "embedding_model": "stub"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_promote_rejects_neither_mode(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """Empty body → 422 (must supply exactly one of the two).
+    Mirrors the `/ensure` cross-field validation: pydantic alone
+    cannot express XOR, so the handler enforces it explicitly."""
+    ctx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+
+    resp = app_client.post(
+        f"/v1/projects/{project_id}/promote",
+        headers=ctx.auth_header(),
+        json={},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_promote_404s_on_unknown_project(app_client: TestClient) -> None:
+    """A project_id that doesn't exist (or belongs to another user)
+    → 404. Using 404 not 403 deliberately: a 403 would leak the
+    existence of a row owned by another tenant."""
+    ctx = provision(app_client)
+    bogus_project_id = uuid.uuid4()
+    resp = app_client.post(
+        f"/v1/projects/{bogus_project_id}/promote",
+        headers=ctx.auth_header(),
+        json={"embedding_model": "stub"},
+    )
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_promote_404s_on_unknown_space(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """A space_id that doesn't exist (or belongs to another user)
+    → 404. Same no-leak rationale as the unknown-project case."""
+    ctx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+    bogus_space_id = uuid.uuid4()
+    resp = app_client.post(
+        f"/v1/projects/{project_id}/promote",
+        headers=ctx.auth_header(),
+        json={"space_id": str(bogus_space_id)},
+    )
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_promote_rejects_unsupported_embedding_model(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """An embedding_model name not in the registry → 422 (clean
+    error), not 500. The `services/embedding_models.py::resolve`
+    helper raises ValueError; the handler converts that to a 422
+    with a clear message."""
+    ctx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+
+    resp = app_client.post(
+        f"/v1/projects/{project_id}/promote",
+        headers=ctx.auth_header(),
+        json={"embedding_model": "this-model-does-not-exist"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_promote_isolates_per_user(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """User A cannot promote User B's project, even when supplying
+    A's own valid space_id. The lookup uses (project_id, user_id) so
+    A's request to promote B's project_id misses the projects table
+    and returns 404. This guards against the most subtle tenant-leak
+    bug: passing a legitimately-yours space to elevate someone else's
+    project."""
+    ctx_a = provision(app_client)
+    ctx_b = provision(app_client)
+
+    # User B owns the project.
+    project_b_id = await seed_project(
+        db_session,
+        user_id=ctx_b.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+    # User A owns a valid space of their own.
+    space_a_id = await seed_space(
+        db_session,
+        user_id=ctx_a.user_id,
+        name="A's space",
+        slug="a-space",
+        embedding_model="stub",
+    )
+
+    # A tries to promote B's project to A's space → 404, not 403.
+    resp = app_client.post(
+        f"/v1/projects/{project_b_id}/promote",
+        headers=ctx_a.auth_header(),
+        json={"space_id": str(space_a_id)},
+    )
+    assert resp.status_code == 404, resp.text
+
+    # Verify B's project is unchanged in the DB.
+    project_b = (
+        await db_session.execute(
+            select(Project).where(Project.id == project_b_id)
+        )
+    ).scalar_one()
+    assert project_b.dedicated_space_id is None
+
+
+@pytest.mark.asyncio
+async def test_promote_rejects_other_users_space_id(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """User A owns the project and tries to assign User B's space_id
+    → 404 (the space lookup is scoped by user_id). Without this scoping,
+    A could pin their project to B's space and route writes there."""
+    ctx_a = provision(app_client)
+    ctx_b = provision(app_client)
+
+    project_a_id = await seed_project(
+        db_session,
+        user_id=ctx_a.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+    space_b_id = await seed_space(
+        db_session,
+        user_id=ctx_b.user_id,
+        name="B's space",
+        slug="b-space",
+        embedding_model="stub",
+    )
+
+    resp = app_client.post(
+        f"/v1/projects/{project_a_id}/promote",
+        headers=ctx_a.auth_header(),
+        json={"space_id": str(space_b_id)},
+    )
+    assert resp.status_code == 404, resp.text
+
+    project_a = (
+        await db_session.execute(
+            select(Project).where(Project.id == project_a_id)
+        )
+    ).scalar_one()
+    assert project_a.dedicated_space_id is None
+
+
+@pytest.mark.asyncio
+async def test_promote_requires_auth(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """No Bearer token → 401. The endpoint is per-user; unauthenticated
+    access is never valid."""
+    ctx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/klio.git",
+        repo_root_path="/Users/x/klio",
+        display_name="klio-tech/klio",
+    )
+    resp = app_client.post(
+        f"/v1/projects/{project_id}/promote",
+        json={"embedding_model": "stub"},
+    )
+    assert resp.status_code == 401, resp.text

@@ -6,15 +6,16 @@ a resolvable project key (`project.Resolve` → `(git_remote,
 repo_root_path, display_name)`). The returned UUID is then attached
 to the `project` field on the write paths the bridge already calls.
 
-The endpoint is a thin shell over `ProjectService.ensure` — the heavy
-lifting (remote vs path dedup, SAVEPOINT-scoped concurrent INSERT
-recovery, `last_seen_at` bumps) lives in the service. This file's job
-is request-shape validation, auth scoping, and committing the
-transaction.
+POST /v1/projects/{id}/promote (F1) is the rare on-demand escape valve:
+elevate a project from "tagged inside the default space" to "owning a
+dedicated space" when it needs different embeddings, isolated KMS, or
+atomic forget semantics. The CLI (F2) is the primary caller.
 
-F1 will add another route to this router: POST
-/v1/projects/{id}/promote — see
-`docs/plans/2026-05-27-per-project-memory-scoping-design.md`.
+Both endpoints are thin shells over `ProjectService` — the heavy
+lifting (remote vs path dedup, SAVEPOINT-scoped concurrent INSERT
+recovery, `last_seen_at` bumps, dedicated-space creation, ownership
+scoping) lives in the service. This file's job is request-shape
+validation, auth scoping, and committing the transaction.
 """
 from __future__ import annotations
 
@@ -115,3 +116,95 @@ async def ensure_project(
     )
     await session.commit()
     return EnsureResponse(id=project.id)
+
+
+class PromoteRequest(BaseModel):
+    """Wire format for POST /v1/projects/{project_id}/promote.
+
+    Exactly one of `space_id` / `embedding_model` must be supplied:
+      - `space_id`: assign an existing space the user already owns
+        (common when consolidating projects, or when an integration
+        script pre-provisioned spaces).
+      - `embedding_model`: create a new dedicated space pinned to the
+        named embedding model (common when isolating a project for
+        per-project memory boundaries).
+
+    Allowing both would create ambiguity (does the new space override
+    the existing one? is the model field ignored?). The handler
+    rejects 422 so the caller is forced to decide.
+
+    `embedding_model` length bounds mirror `Space.embedding_model`
+    (`String(120)`) plus headroom for tag suffixes — Ollama can route
+    `ollama/nomic-embed-text:latest` and the registry strips the tag
+    before lookup. Hard limit at 200 chars (> 120 col limit) so the
+    schema layer rejects clearly oversized inputs before they reach
+    the column.
+    """
+
+    space_id: uuid.UUID | None = None
+    embedding_model: str | None = Field(
+        default=None, min_length=1, max_length=200
+    )
+
+
+class PromoteResponse(BaseModel):
+    """The promoted project's id + its newly-pinned dedicated space.
+
+    Both ids are echoed back so the CLI / bridge can confirm without
+    a follow-up GET. Typed as `uuid.UUID` for the same wire-format
+    consistency reason as `EnsureResponse`.
+    """
+
+    project_id: uuid.UUID
+    dedicated_space_id: uuid.UUID
+
+
+@router.post("/{project_id}/promote", response_model=PromoteResponse)
+async def promote_project(
+    project_id: uuid.UUID,
+    body: PromoteRequest,
+    ctx: RequestContext = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+) -> PromoteResponse:
+    """Elevate a project from default-space tagging to owning a
+    dedicated space — see
+    `docs/plans/2026-05-27-per-project-memory-scoping-design.md` §6.
+
+    XOR validation:
+      `(space_id is None) == (embedding_model is None)` is True when
+      both are None OR both are set — either case is ambiguous and
+      rejected here, BEFORE delegating to the service. Pydantic alone
+      cannot express XOR (no model_validator on `BaseModel.fields`
+      alone) so this lives at the handler.
+
+    Service-raised HTTPException (404 on unknown project/space, 422 on
+    unknown embedding model) propagates through FastAPI unchanged.
+    Commit happens here, mirroring `/ensure` and the rest of the
+    engine's handler/service split.
+    """
+    if (body.space_id is None) == (body.embedding_model is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="must supply exactly one of space_id or embedding_model",
+        )
+    svc = ProjectService()
+    project = await svc.promote(
+        session,
+        user_id=ctx.user_id,
+        project_id=project_id,
+        space_id=body.space_id,
+        embedding_model=body.embedding_model,
+    )
+    await session.commit()
+    # dedicated_space_id is non-None here: promote() either set it to
+    # the supplied space_id or to the newly-created space's id, and
+    # both code paths run BEFORE the early returns. The type-checker
+    # sees `uuid.UUID | None` on the column so we narrow with an
+    # assert that doubles as a runtime invariant guard — if a future
+    # refactor introduces a path that leaves it None, this fires
+    # immediately instead of producing a confusing pydantic error.
+    assert project.dedicated_space_id is not None
+    return PromoteResponse(
+        project_id=project.id,
+        dedicated_space_id=project.dedicated_space_id,
+    )
