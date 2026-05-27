@@ -48,6 +48,42 @@ from klio_engine.services.provisioning import provision_user
 from klio_engine.services.recall import RecallService
 
 
+# --- Hermetic env ---------------------------------------------------
+#
+# `provision_user` constructs a Settings (pydantic-settings) instance,
+# which requires `KLIO_DATABASE_URL` and reads `KLIO_EMBEDDING_MODEL`
+# / `KLIO_EXTRACTION_MODEL` to wire EmbeddingService + extractor
+# routing inside EntryService. Without ambient env, Settings() would
+# either fail validation (database_url Field required) or default
+# `embedding_model` to `ollama/nomic-embed-text` and try to talk to a
+# live Ollama daemon — making this test file's "stub-model, no
+# external services" claim depend on the developer's shell.
+#
+# Pin the env vars deterministically per-test so the suite runs under
+# bare `pytest tests/services/test_recall.py` with no shell setup.
+# `monkeypatch.setenv` auto-restores at teardown so neighbouring
+# test files see their own env. Matches the pattern in
+# `tests/test_curator_writer.py`.
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auto-applied to every test in this file. `provision_user`
+    instantiates Settings() which requires KLIO_DATABASE_URL and reads
+    KLIO_EMBEDDING_MODEL / KLIO_EXTRACTION_MODEL. Set all three to
+    predictable hermetic values so the suite runs under bare `pytest`
+    without ambient env. The DB url here is only used to satisfy
+    Settings validation — actual session connections go through
+    conftest's `session` fixture which reads KLIO_TEST_DATABASE_URL
+    directly."""
+    monkeypatch.setenv(
+        "KLIO_DATABASE_URL",
+        "postgresql+asyncpg://klio:klio_dev_password@127.0.0.1:5433/klio",
+    )
+    monkeypatch.setenv("KLIO_EMBEDDING_MODEL", "stub")
+    monkeypatch.setenv("KLIO_EXTRACTION_MODEL", "stub")
+
+
 async def _setup_user_and_services(
     session: AsyncSession, kms: KMSClient
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, EntryService, RecallService]:
