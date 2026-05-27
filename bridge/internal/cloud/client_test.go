@@ -92,3 +92,151 @@ func TestNoRefreshTokenFails(t *testing.T) {
 		t.Fatal("expected error when no refresh token")
 	}
 }
+
+// TestEnsureProjectPostsToEngine verifies the cloud client forwards
+// (git_remote, repo_root_path, display_name) verbatim to the engine's
+// /v1/projects/ensure endpoint and parses the returned project id.
+//
+// E1 surface-area test. E2 will exercise this method from inside the
+// hook handler; for now we just prove the wire format matches the
+// engine's EnsureRequest schema.
+func TestEnsureProjectPostsToEngine(t *testing.T) {
+	var got struct {
+		GitRemote    string `json:"git_remote"`
+		RepoRootPath string `json:"repo_root_path"`
+		DisplayName  string `json:"display_name"`
+	}
+	var sawAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/projects/ensure" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != "POST" {
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+		sawAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"11111111-2222-3333-4444-555555555555"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	c.SetAccessToken("test-token")
+	id, err := c.EnsureProject(
+		context.Background(),
+		"git@github.com:klio-tech/klio.git",
+		"/Users/x/klio",
+		"klio-tech/klio",
+	)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if id == uuid.Nil {
+		t.Fatal("zero uuid returned")
+	}
+	want := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	if id != want {
+		t.Errorf("id = %s, want %s", id, want)
+	}
+	if got.GitRemote != "git@github.com:klio-tech/klio.git" {
+		t.Errorf("git_remote = %q", got.GitRemote)
+	}
+	if got.RepoRootPath != "/Users/x/klio" {
+		t.Errorf("repo_root_path = %q", got.RepoRootPath)
+	}
+	if got.DisplayName != "klio-tech/klio" {
+		t.Errorf("display_name = %q", got.DisplayName)
+	}
+	if sawAuth != "Bearer test-token" {
+		t.Errorf("Authorization header = %q", sawAuth)
+	}
+}
+
+// TestEnsureProjectOmitsEmptyOptionalFields ensures the JSON wire
+// format omits git_remote / repo_root_path when the caller passes an
+// empty string — the engine's EnsureRequest rejects empty strings with
+// min_length=1 (mirrors the C1 ingest schema), so sending `""` would
+// 422 even though the bridge's intent is "this identifier is absent".
+//
+// `omitempty` on the request struct is load-bearing for this contract.
+func TestEnsureProjectOmitsEmptyOptionalFields(t *testing.T) {
+	var raw map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		_, _ = w.Write([]byte(`{"id":"11111111-2222-3333-4444-555555555555"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	c.SetAccessToken("test-token")
+	if _, err := c.EnsureProject(
+		context.Background(),
+		"",
+		"/Users/x/klio",
+		"klio-detached",
+	); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if _, present := raw["git_remote"]; present {
+		t.Errorf("git_remote should be omitted when empty, got: %v", raw)
+	}
+	if raw["repo_root_path"] != "/Users/x/klio" {
+		t.Errorf("repo_root_path = %v", raw["repo_root_path"])
+	}
+	if raw["display_name"] != "klio-detached" {
+		t.Errorf("display_name = %v", raw["display_name"])
+	}
+}
+
+// TestRecallSendsProjectField verifies the optional `project` field on
+// RecallRequest is forwarded to the engine. E3 will populate this from
+// the MCP recall tool's resolved project key; E1 just gets the field
+// onto the wire so E3 doesn't have to touch types.go again.
+func TestRecallSendsProjectField(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	c.SetAccessToken("test-token")
+	spaceID := uuid.New()
+	if _, err := c.Recall(context.Background(), spaceID, RecallRequest{
+		Query:   "anything",
+		Project: "git@github.com:klio-tech/klio.git",
+	}); err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if body["project"] != "git@github.com:klio-tech/klio.git" {
+		t.Errorf("project field missing or wrong: %v", body["project"])
+	}
+}
+
+// TestRecallOmitsEmptyProjectField verifies an unset Project (zero
+// string) does NOT serialize on the wire — the engine treats a missing
+// `project` key as "no filter" (B3 semantics), so sending `""` would
+// shift behaviour from `any` to `exact-empty-string-match` and produce
+// zero results.
+func TestRecallOmitsEmptyProjectField(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	c.SetAccessToken("test-token")
+	if _, err := c.Recall(context.Background(), uuid.New(), RecallRequest{
+		Query: "anything",
+	}); err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if _, present := body["project"]; present {
+		t.Errorf("project should be omitted when empty, got: %v", body)
+	}
+}

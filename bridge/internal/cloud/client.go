@@ -132,6 +132,32 @@ func (c *Client) WriteEntry(ctx context.Context, spaceID uuid.UUID, req EntryWri
 	return &e, nil
 }
 
+// EnsureProject calls POST /v1/projects/ensure and returns the
+// resulting project_id. The engine handles get-or-create semantics
+// (deduplicates by git_remote when present, else by repo_root_path).
+//
+// At least one of gitRemote or repoRootPath must be non-empty; the
+// engine 422s otherwise. The bridge's project.Resolve guarantees this
+// for AbsCwd-anchored Keys (DisplayName is always set).
+//
+// E1 surface-area only: nothing in the bridge calls this yet. E2 will
+// wire the hook handler to invoke EnsureProject before tagging writes
+// with the returned project_id.
+func (c *Client) EnsureProject(
+	ctx context.Context, gitRemote, repoRootPath, displayName string,
+) (uuid.UUID, error) {
+	body := ensureProjectRequest{
+		GitRemote:    gitRemote,
+		RepoRootPath: repoRootPath,
+		DisplayName:  displayName,
+	}
+	var resp ensureProjectResponse
+	if err := c.do(ctx, "POST", "/v1/projects/ensure", body, &resp, true); err != nil {
+		return uuid.Nil, err
+	}
+	return resp.ID, nil
+}
+
 // IngestTranscript calls POST /v1/spaces/{id}/ingest/transcript.
 func (c *Client) IngestTranscript(
 	ctx context.Context,

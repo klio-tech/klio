@@ -68,4 +68,30 @@ type RecallRequest struct {
 	Query string `json:"query"`
 	Kind  string `json:"kind,omitempty"`
 	Limit int    `json:"limit,omitempty"`
+	// Project is the optional per-call project filter understood by the
+	// engine's recall endpoint (B3 semantics): a project UUID string, a
+	// `git_remote` literal, or empty to disable filtering.
+	//
+	// `omitempty` is load-bearing — an empty string would shift the
+	// engine from "no filter" to "exact match on empty string" and
+	// produce zero results. E3 will populate this from the MCP recall
+	// tool's resolved project key; E1 just gets the field onto the wire.
+	Project string `json:"project,omitempty"`
+}
+
+// ensureProjectRequest is the wire format for POST /v1/projects/ensure.
+//
+// All three fields use `omitempty` so the bridge can pass empty
+// strings to mean "absent" without tripping the engine's min_length=1
+// validation. The engine 422s if BOTH git_remote AND repo_root_path
+// are absent — bridge callers are expected to guarantee at least one
+// is non-empty (project.Resolve does this).
+type ensureProjectRequest struct {
+	GitRemote    string `json:"git_remote,omitempty"`
+	RepoRootPath string `json:"repo_root_path,omitempty"`
+	DisplayName  string `json:"display_name"`
+}
+
+type ensureProjectResponse struct {
+	ID uuid.UUID `json:"id"`
 }
