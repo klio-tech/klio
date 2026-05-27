@@ -277,6 +277,15 @@ async def _resolve_project_arg(
     results (everything the user can see), the exact failure mode
     the per-project scoping design forbids.
     """
+    # Normalize: strip whitespace, treat empty as None. A bridge that
+    # sends " any" or "" should behave the same as omitting the field.
+    # Otherwise users get a confusing 404 ("project not found: ") from
+    # what's almost certainly a client-side bug, not a real lookup.
+    if raw is not None:
+        raw = raw.strip()
+        if raw == "":
+            raw = None
+
     if raw is None or raw == "any":
         return None
 

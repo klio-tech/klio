@@ -37,7 +37,7 @@ class RecallRequest(BaseModel):
     # Resolved to a project_id in the recall handler before being passed
     # to RecallService. See `klio_engine.api.entries._resolve_project_arg`
     # for the four resolution branches and why "unknown" returns 404 not 422.
-    project: str | None = None
+    project: str | None = Field(default=None, max_length=2048)
 
 
 class AgentResponse(BaseModel):

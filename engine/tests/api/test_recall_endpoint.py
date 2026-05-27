@@ -304,3 +304,24 @@ async def test_recall_unknown_project_returns_404(
     )
     assert r_str.status_code == 404, r_str.text
     assert "project not found" in r_str.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_recall_normalizes_whitespace_and_empty_string(app_client: TestClient) -> None:
+    """The bridge or a malformed client might send `" any"` or `""`
+    for project. Both should be treated as cross-project (same as
+    omitting the field) — not 404'd into oblivion. Confusing the
+    user with `project not found: ` is worse than just doing the
+    right thing."""
+    ctx = _provision(app_client)
+    headers = ctx.auth_header()
+    for raw in [" any", "any ", "  any  ", ""]:
+        resp = app_client.post(
+            f"/v1/spaces/{ctx.default_space_id}/recall",
+            headers=headers,
+            json={"query": "anything", "project": raw, "limit": 5},
+        )
+        assert resp.status_code == 200, (
+            f"project={raw!r} should normalize to cross-project (None), "
+            f"got {resp.status_code}: {resp.text}"
+        )
