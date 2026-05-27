@@ -26,6 +26,7 @@ import (
 	"github.com/klio-tech/bridge/internal/hooks"
 	"github.com/klio-tech/bridge/internal/keychain"
 	"github.com/klio-tech/bridge/internal/orchestrator"
+	"github.com/klio-tech/bridge/internal/project"
 	"github.com/klio-tech/bridge/internal/version"
 )
 
@@ -430,7 +431,17 @@ func runHook(args []string) {
 		os.Exit(2)
 	}
 	backend := hooks.NewSocketBackend()
-	exit := hooks.Run(args[0], backend, os.Stdin, os.Stdout, os.Stderr)
+	// Per-process project.Cache. The hook subprocess lifecycle is one
+	// process per hook fire, so the cache amortises a single cwd's git
+	// shell-outs across the resolve + ensure pair — about half the
+	// theoretical benefit a long-lived cache would yield, but still
+	// meaningful (cuts hook latency by one `git config` call) and
+	// keeps cwd-handling logic in the same address space that owns
+	// Payload.Cwd. A future revision may push the cache into the
+	// daemon and have the hook ship cwd over the socket; doing so
+	// requires a wire-protocol change that's out of scope for E2.
+	cache := project.NewCache(0)
+	exit := hooks.Run(args[0], backend, cache, os.Stdin, os.Stdout, os.Stderr)
 	os.Exit(exit)
 }
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // maxObservationFieldChars caps each tool I/O field independently in the
@@ -21,8 +23,14 @@ const maxObservationFieldChars = 2000
 
 // SessionStart hooks: pull recent context for the active space and emit it
 // as additionalContext that Claude Code prepends to its system prompt.
-func SessionStart(b Backend, _ Payload) (Response, error) {
-	rows, err := b.Recall("", 12) // empty query -> daemon falls back to cache list-by-active-space
+//
+// projectID scopes the recall to the resolved project (with NULL-tagged
+// entries always surfacing per B2's invariant). When uuid.Nil — non-git
+// cwd, resolve failure, or EnsureProject failure — recall runs across the
+// space's full entry set, which is the safe default for a non-project cwd.
+func SessionStart(b Backend, _ Payload, projectID uuid.UUID) (Response, error) {
+	// empty query -> daemon falls back to cache list-by-active-space
+	rows, err := b.Recall("", 12, projectID)
 	if err != nil {
 		return Response{}, nil // soft fail
 	}
@@ -57,7 +65,7 @@ var triggerPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bnote\s+that\s+(.+?)$`),
 }
 
-func UserPromptSubmit(b Backend, p Payload) (Response, error) {
+func UserPromptSubmit(b Backend, p Payload, projectID uuid.UUID) (Response, error) {
 	if p.UserMessage == "" {
 		return Response{}, nil
 	}
@@ -72,7 +80,7 @@ func UserPromptSubmit(b Backend, p Payload) (Response, error) {
 			_, _ = b.WriteEntry("remember", fact, map[string]any{
 				"source":     "user-trigger-phrase",
 				"session_id": p.SessionID,
-			})
+			}, projectID)
 			return Response{}, nil
 		}
 	}
@@ -81,12 +89,12 @@ func UserPromptSubmit(b Backend, p Payload) (Response, error) {
 
 // PreToolUse: only fires for Bash/Edit/Write per the install matcher.
 // Recall with the tool's input and warn if a strong "never run X" memory exists.
-func PreToolUse(b Backend, p Payload) (Response, error) {
+func PreToolUse(b Backend, p Payload, projectID uuid.UUID) (Response, error) {
 	if p.ToolName == "" {
 		return Response{}, nil
 	}
 	query := fmt.Sprintf("safety constraint about %s", p.ToolName)
-	rows, err := b.Recall(query, 3)
+	rows, err := b.Recall(query, 3, projectID)
 	if err != nil || len(rows) == 0 {
 		return Response{}, nil
 	}
@@ -114,7 +122,7 @@ func PreToolUse(b Backend, p Payload) (Response, error) {
 // upstream signal the curator's FactExtractor consumes — losing it
 // (which pre-0.5.4 silently did for any input >= 400 bytes, and for
 // every tool response unconditionally) starves extraction.
-func PostToolUse(b Backend, p Payload) (Response, error) {
+func PostToolUse(b Backend, p Payload, projectID uuid.UUID) (Response, error) {
 	if p.ToolName == "" {
 		return Response{}, nil
 	}
@@ -127,7 +135,7 @@ func PostToolUse(b Backend, p Payload) (Response, error) {
 	_, _ = b.WriteEntry("observe", sb.String(), map[string]any{
 		"tool":       p.ToolName,
 		"session_id": p.SessionID,
-	})
+	}, projectID)
 	return Response{}, nil
 }
 
@@ -154,19 +162,19 @@ func formatObservationField(raw []byte) string {
 }
 
 // SubagentStop: capture subagent's final report as an observation.
-func SubagentStop(b Backend, p Payload) (Response, error) {
+func SubagentStop(b Backend, p Payload, projectID uuid.UUID) (Response, error) {
 	if p.UserMessage == "" {
 		return Response{}, nil
 	}
 	_, _ = b.WriteEntry("observe", p.UserMessage, map[string]any{
 		"kind":       "subagent_finding",
 		"session_id": p.SessionID,
-	})
+	}, projectID)
 	return Response{}, nil
 }
 
 // SessionStop: ingest the full transcript for extraction.
-func SessionStop(b Backend, p Payload) (Response, error) {
+func SessionStop(b Backend, p Payload, projectID uuid.UUID) (Response, error) {
 	if p.SessionID == "" {
 		return Response{}, nil
 	}
@@ -178,6 +186,6 @@ func SessionStop(b Backend, p Payload) (Response, error) {
 	if err != nil || len(messages) == 0 {
 		return Response{}, nil
 	}
-	_, _ = b.IngestTranscript(p.SessionID, messages)
+	_, _ = b.IngestTranscript(p.SessionID, messages, projectID)
 	return Response{}, nil
 }

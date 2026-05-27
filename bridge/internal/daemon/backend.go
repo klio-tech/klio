@@ -14,7 +14,7 @@ import (
 // Daemon implements mcp.Backend.
 
 func (d *Daemon) Recall(
-	ctx context.Context, query, spaceSlug, kind string, limit int,
+	ctx context.Context, query, spaceSlug, kind string, limit int, projectID uuid.UUID,
 ) ([]map[string]any, error) {
 	spaceID, err := d.resolveSpace(ctx, spaceSlug)
 	if err != nil {
@@ -24,8 +24,15 @@ func (d *Daemon) Recall(
 	if limit <= 0 {
 		limit = 10
 	}
+	// projectID -> RecallRequest.Project as a UUID string. uuid.Nil means
+	// "no project filter" — the engine's B3 path interprets an empty
+	// project string as cross-project recall (legacy v0.6 behaviour).
+	projectArg := ""
+	if projectID != uuid.Nil {
+		projectArg = projectID.String()
+	}
 	entries, err := d.cloud.Recall(ctx, spaceID, cloud.RecallRequest{
-		Query: query, Kind: kind, Limit: limit,
+		Query: query, Kind: kind, Limit: limit, Project: projectArg,
 	})
 	if err != nil {
 		// Cloud failed — fall back to local cache
@@ -57,7 +64,10 @@ func (d *Daemon) Recall(
 }
 
 func (d *Daemon) WriteEntry(
-	ctx context.Context, kind, content, spaceSlug string, metadata map[string]any,
+	ctx context.Context,
+	kind, content, spaceSlug string,
+	metadata map[string]any,
+	projectID uuid.UUID,
 ) (map[string]any, error) {
 	spaceID, err := d.resolveSpace(ctx, spaceSlug)
 	if err != nil {
@@ -74,8 +84,21 @@ func (d *Daemon) WriteEntry(
 	case "decide":
 		engineKind = "decision"
 	}
+	// Translate uuid.Nil → nil pointer so the cloud client serialises the
+	// project_id field as absent (which the engine maps to NULL). Sending
+	// a literal zero-uuid string would be rejected by the engine's C1
+	// path-level validators.
+	var projectIDPtr *uuid.UUID
+	if projectID != uuid.Nil {
+		copy := projectID
+		projectIDPtr = &copy
+	}
 	e, err := d.cloud.WriteEntry(ctx, spaceID, cloud.EntryWrite{
-		Kind: engineKind, Content: content, Metadata: metadata, Confidence: 1.0,
+		Kind:       engineKind,
+		Content:    content,
+		Metadata:   metadata,
+		Confidence: 1.0,
+		ProjectID:  projectIDPtr,
 	})
 	if err != nil {
 		// Queue offline
@@ -143,6 +166,18 @@ func (d *Daemon) RequestAccess(ctx context.Context, slug, scope string) error {
 		return err
 	}
 	return nil
+}
+
+// EnsureProject delegates to cloud.Client.EnsureProject. It is the
+// daemon-side handler for the `klio.ensure_project` JSON-RPC method that
+// hook subprocesses invoke before every write/recall. The cloud client
+// handles auth refresh + retry-on-401 internally, so this method is a
+// thin pass-through. Callers (the MCP dispatcher; downstream the hook
+// runner) are expected to fail open on errors — see runner.go.
+func (d *Daemon) EnsureProject(
+	ctx context.Context, gitRemote, repoRootPath, displayName string,
+) (uuid.UUID, error) {
+	return d.cloud.EnsureProject(ctx, gitRemote, repoRootPath, displayName)
 }
 
 func (d *Daemon) ActiveSpaceInfo(ctx context.Context) (map[string]any, error) {

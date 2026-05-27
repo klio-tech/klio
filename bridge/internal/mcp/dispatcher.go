@@ -4,16 +4,44 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/google/uuid"
 )
 
 // Backend abstracts the daemon's domain operations.
+//
+// projectID parameters carry the engine project_id resolved by the hook
+// runner (via project.Cache + EnsureProject). uuid.Nil is the "no project
+// tag" sentinel: the daemon's cloud-client adapter MUST translate uuid.Nil
+// into an omitted JSON `project_id` field on the wire, which the engine
+// maps to NULL — and NULL-tagged entries always surface under any project
+// recall filter (B2's invariant). See cloud.EntryWrite for the wire shape.
 type Backend interface {
-	Recall(ctx context.Context, query, spaceSlug, kind string, limit int) ([]map[string]any, error)
-	WriteEntry(ctx context.Context, kind, content, spaceSlug string, metadata map[string]any) (map[string]any, error)
+	Recall(
+		ctx context.Context,
+		query, spaceSlug, kind string,
+		limit int,
+		projectID uuid.UUID,
+	) ([]map[string]any, error)
+	WriteEntry(
+		ctx context.Context,
+		kind, content, spaceSlug string,
+		metadata map[string]any,
+		projectID uuid.UUID,
+	) (map[string]any, error)
 	ListSpaces(ctx context.Context) ([]map[string]any, error)
 	SwitchSpace(ctx context.Context, slug string) error
 	RequestAccess(ctx context.Context, slug, scope string) error
 	ActiveSpaceInfo(ctx context.Context) (map[string]any, error)
+	// EnsureProject is the daemon's per-cwd identity bridge: it accepts a
+	// project.Key projection from the hook subprocess and returns the
+	// engine project_id (creating one if this is the first time the
+	// engine has seen this remote/root). E2's hook runner calls this
+	// before each write/recall so the resulting tag follows the user's
+	// actual project boundary, not their cwd boundary.
+	EnsureProject(
+		ctx context.Context, gitRemote, repoRootPath, displayName string,
+	) (uuid.UUID, error)
 }
 
 // Dispatcher routes MCP requests to a Backend.
@@ -41,6 +69,15 @@ func (d *Dispatcher) Handle(line []byte) []byte {
 		return d.handleToolsList(req)
 	case "tools/call":
 		return d.handleToolsCall(req)
+	case "klio.ensure_project":
+		// Custom JSON-RPC method (not an MCP tool) called by the hook
+		// runner before every write/recall. The hook subprocess does
+		// not own the cloud client, so EnsureProject must transit the
+		// socket → daemon → cloud path. Exposing it as a top-level
+		// method (rather than a synthetic tool) keeps it out of the
+		// LLM-facing tool surface: nothing in `tools/list` should
+		// suggest the LLM call this directly.
+		return d.handleEnsureProject(req)
 	case "ping":
 		return ok(req.ID, map[string]any{})
 	}
@@ -93,7 +130,8 @@ func (d *Dispatcher) callRecall(ctx context.Context, id json.RawMessage, args ma
 	if l, ok := args["limit"].(float64); ok {
 		limit = int(l)
 	}
-	rows, err := d.backend.Recall(ctx, query, space, kind, limit)
+	projectID := parseProjectID(args)
+	rows, err := d.backend.Recall(ctx, query, space, kind, limit, projectID)
 	if err != nil {
 		return errorResp(id, -32000, err.Error(), nil)
 	}
@@ -115,11 +153,69 @@ func (d *Dispatcher) callWrite(
 		}
 		metadata["rationale"] = rationale
 	}
-	entry, err := d.backend.WriteEntry(ctx, kind, content, space, metadata)
+	projectID := parseProjectID(args)
+	entry, err := d.backend.WriteEntry(ctx, kind, content, space, metadata, projectID)
 	if err != nil {
 		return errorResp(id, -32000, err.Error(), nil)
 	}
 	return ok(id, toCallResult(formatEntry(entry)))
+}
+
+// parseProjectID reads the optional `project_id` argument from a tools/call
+// payload. Returns uuid.Nil for absent, empty, or unparseable values — the
+// safe "no project tag" sentinel that lets the engine apply NULL handling.
+// An unparseable value is intentionally NOT a hard error: the hook runner
+// is fail-open by design, and surfacing a 400 here would short-circuit the
+// underlying write/recall. The expected real-world frequency of bad
+// project_ids is zero; we still want the underlying operation to win.
+func parseProjectID(args map[string]any) uuid.UUID {
+	raw, _ := args["project_id"].(string)
+	if raw == "" {
+		return uuid.Nil
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil
+	}
+	return id
+}
+
+// handleEnsureProject services the `klio.ensure_project` JSON-RPC method
+// sent by the hook subprocess. The hook resolved cwd → project.Key
+// locally; the daemon translates that Key projection into a cloud-side
+// ensure call and returns the resulting project_id.
+//
+// Param shape (mirrors cloud.ensureProjectRequest):
+//
+//	{
+//	  "git_remote":      optional string,
+//	  "repo_root_path":  optional string,
+//	  "display_name":    string (required by engine, runner enforces non-empty)
+//	}
+//
+// At least one of git_remote / repo_root_path must be non-empty — the
+// engine 422s otherwise, but the hook runner skips the call entirely in
+// that case (non-git cwd → uuid.Nil), so the daemon never sees it. The
+// daemon does not re-validate beyond what the cloud client surfaces.
+func (d *Dispatcher) handleEnsureProject(req Request) []byte {
+	var params struct {
+		GitRemote    string `json:"git_remote"`
+		RepoRootPath string `json:"repo_root_path"`
+		DisplayName  string `json:"display_name"`
+	}
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return errorResp(req.ID, -32602, "invalid params: "+err.Error(), nil)
+		}
+	}
+	ctx := context.Background()
+	id, err := d.backend.EnsureProject(
+		ctx, params.GitRemote, params.RepoRootPath, params.DisplayName,
+	)
+	if err != nil {
+		return errorResp(req.ID, -32000, err.Error(), nil)
+	}
+	return ok(req.ID, map[string]any{"project_id": id.String()})
 }
 
 func (d *Dispatcher) callSpace(ctx context.Context, id json.RawMessage, args map[string]any) []byte {

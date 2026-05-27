@@ -57,11 +57,26 @@ type Entry struct {
 	SupersededBy *uuid.UUID     `json:"superseded_by,omitempty"`
 }
 
+// EntryWrite is the body of POST /v1/spaces/{id}/entries.
+//
+// ProjectID, when non-nil, tags the resulting entries row with the engine
+// project_id resolved by the bridge's project.Cache + EnsureProject flow.
+// A nil pointer serialises as the JSON field being absent, which the
+// engine treats as NULL — and NULL-tagged entries always surface in every
+// project's recall scope (B2's invariant).
+//
+// Pointer-not-value is load-bearing: uuid.UUID is a [16]byte and the
+// `encoding/json` `omitempty` rule does NOT treat a zero-valued array as
+// empty (a value-typed field with `omitempty` would still serialise as
+// "00000000-0000-0000-0000-000000000000", which the engine's C1 path-level
+// validators reject). The pointer form is the only way to send "absent"
+// over the wire from Go.
 type EntryWrite struct {
 	Kind       string         `json:"kind"`
 	Content    string         `json:"content"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
 	Confidence float64        `json:"confidence,omitempty"`
+	ProjectID  *uuid.UUID     `json:"project_id,omitempty"`
 }
 
 type RecallRequest struct {

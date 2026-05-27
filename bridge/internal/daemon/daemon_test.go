@@ -89,7 +89,7 @@ func TestRecallProxiesToCloud(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	rows, err := d.Recall(context.Background(), "test", "", "", 10)
+	rows, err := d.Recall(context.Background(), "test", "", "", 10, uuid.Nil)
 	if err != nil {
 		t.Fatalf("Recall: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestWriteQueuesWhenCloudFails(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	resp, err := d.WriteEntry(context.Background(), "remember", "queued content", "", nil)
+	resp, err := d.WriteEntry(context.Background(), "remember", "queued content", "", nil, uuid.Nil)
 	if err != nil {
 		t.Fatalf("WriteEntry should succeed offline: %v", err)
 	}
