@@ -100,8 +100,13 @@ func (c *Cache) Resolve(ctx context.Context, cwd string) (Key, error) {
 	c.items[cwd] = elem
 
 	if c.evict.Len() > c.cap {
-		oldest := c.evict.Back()
-		if oldest != nil {
+		// `oldest != nil` is unreachable when cap >= 1 (we just PushFront'd,
+		// so Len() > cap implies at least 2 elements, so Back() is non-nil).
+		// The constructor clamps capacity to defaultCapacity for cap <= 0
+		// inputs, so cap >= 1 is guaranteed. Kept as belt-and-suspenders: a
+		// future change to either the constructor's clamp OR the eviction
+		// trigger would otherwise risk a nil-deref panic on a hot path.
+		if oldest := c.evict.Back(); oldest != nil {
 			c.evict.Remove(oldest)
 			delete(c.items, oldest.Value.(*cacheEntry).cwd)
 		}
