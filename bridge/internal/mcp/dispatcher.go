@@ -10,18 +10,31 @@ import (
 
 // Backend abstracts the daemon's domain operations.
 //
-// projectID parameters carry the engine project_id resolved by the hook
-// runner (via project.Cache + EnsureProject). uuid.Nil is the "no project
-// tag" sentinel: the daemon's cloud-client adapter MUST translate uuid.Nil
-// into an omitted JSON `project_id` field on the wire, which the engine
-// maps to NULL — and NULL-tagged entries always surface under any project
-// recall filter (B2's invariant). See cloud.EntryWrite for the wire shape.
+// The recall vs write paths handle the project context with different
+// types — load-bearing distinction, do not unify:
+//
+//   - WriteEntry takes `projectID uuid.UUID`. Writes always know the
+//     concrete project (resolved by the hook via project.Cache +
+//     EnsureProject) and uuid.Nil is the "no project tag" sentinel.
+//     The cloud client translates uuid.Nil into an omitted JSON
+//     `project_id` field, which the engine maps to NULL — and
+//     NULL-tagged entries always surface under any project recall
+//     filter (B2's invariant). See cloud.EntryWrite for the wire shape.
+//
+//   - Recall takes `project string`. The LLM-facing recall tool accepts
+//     the literal "any" (cross-project widening), a `git_remote` URL,
+//     or a UUID — uuid.UUID can't represent "any" so a string is
+//     required. The empty string disables filtering (legacy v0.6
+//     behaviour). The bridge does NOT parse or normalise the value;
+//     the engine's recall endpoint owns the uuid|remote|"any"
+//     resolution (B3). This split keeps the write path's strict UUID
+//     contract intact while letting the LLM pick the recall scope.
 type Backend interface {
 	Recall(
 		ctx context.Context,
 		query, spaceSlug, kind string,
 		limit int,
-		projectID uuid.UUID,
+		project string,
 	) ([]map[string]any, error)
 	WriteEntry(
 		ctx context.Context,
@@ -130,8 +143,8 @@ func (d *Dispatcher) callRecall(ctx context.Context, id json.RawMessage, args ma
 	if l, ok := args["limit"].(float64); ok {
 		limit = int(l)
 	}
-	projectID := parseProjectID(args)
-	rows, err := d.backend.Recall(ctx, query, space, kind, limit, projectID)
+	project := parseRecallProject(args)
+	rows, err := d.backend.Recall(ctx, query, space, kind, limit, project)
 	if err != nil {
 		return errorResp(id, -32000, err.Error(), nil)
 	}
@@ -161,13 +174,17 @@ func (d *Dispatcher) callWrite(
 	return ok(id, toCallResult(formatEntry(entry)))
 }
 
-// parseProjectID reads the optional `project_id` argument from a tools/call
-// payload. Returns uuid.Nil for absent, empty, or unparseable values — the
-// safe "no project tag" sentinel that lets the engine apply NULL handling.
-// An unparseable value is intentionally NOT a hard error: the hook runner
-// is fail-open by design, and surfacing a 400 here would short-circuit the
-// underlying write/recall. The expected real-world frequency of bad
-// project_ids is zero; we still want the underlying operation to win.
+// parseProjectID reads the optional `project_id` argument from a write
+// tools/call payload. Returns uuid.Nil for absent, empty, or unparseable
+// values — the safe "no project tag" sentinel that lets the engine apply
+// NULL handling. An unparseable value is intentionally NOT a hard error:
+// the hook runner is fail-open by design, and surfacing a 400 here would
+// short-circuit the underlying write. The expected real-world frequency
+// of bad project_ids is zero; we still want the write to land.
+//
+// Write-path only: the recall path uses parseRecallProject because recall
+// accepts a free-form string (uuid | git_remote | "any") that uuid.UUID
+// can't represent.
 func parseProjectID(args map[string]any) uuid.UUID {
 	raw, _ := args["project_id"].(string)
 	if raw == "" {
@@ -178,6 +195,43 @@ func parseProjectID(args map[string]any) uuid.UUID {
 		return uuid.Nil
 	}
 	return id
+}
+
+// parseRecallProject reads the recall-tool project argument and returns
+// the string to forward to the engine's recall endpoint (B3 semantics:
+// uuid | git_remote | "any" | empty=no-filter).
+//
+// Two aliases are accepted, in precedence order:
+//
+//  1. `project` — the LLM-facing alias documented in the tool schema.
+//     Forwarded verbatim, no validation. Empty string ("") is treated
+//     as absent (the engine's recall endpoint normalises whitespace
+//     and treats empty as no-filter, but we strip it here too so the
+//     cloud client's `omitempty` rule can omit it on the wire).
+//
+//  2. `project_id` — the legacy alias the hook subprocess emits (see
+//     internal/hooks/socket_backend.go::Recall). Hook-resolved UUIDs
+//     are validated as UUID-shaped before forwarding so a malformed
+//     hook client can't poison the engine call; on parse failure the
+//     dispatcher silently drops to "no filter" (fail-open).
+//
+// Precedence: explicit `project` from the LLM wins over a `project_id`
+// the hook may have piggy-backed. The LLM's intent is the higher-level
+// signal — a pathological caller setting both means a bug elsewhere,
+// and the safer failure mode is "the LLM's scope took effect" rather
+// than "the LLM was silently overridden by an opaque UUID tag".
+func parseRecallProject(args map[string]any) string {
+	if raw, _ := args["project"].(string); raw != "" {
+		return raw
+	}
+	raw, _ := args["project_id"].(string)
+	if raw == "" {
+		return ""
+	}
+	if _, err := uuid.Parse(raw); err != nil {
+		return ""
+	}
+	return raw
 }
 
 // handleEnsureProject services the `klio.ensure_project` JSON-RPC method

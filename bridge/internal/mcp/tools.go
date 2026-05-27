@@ -27,6 +27,16 @@ func Tools() []Tool {
 						"enum": []string{"memory", "observation", "plan", "decision", "note"},
 					},
 					"limit": map[string]any{"type": "integer", "default": 10, "minimum": 1, "maximum": 100},
+					"project": map[string]any{
+						"type": "string",
+						"description": "Optional project filter. When omitted, defaults to the " +
+							"current project (auto-detected from the agent's working directory) " +
+							"if the bridge tagged this call, otherwise recall is cross-project. " +
+							"Pass the literal 'any' to widen recall to ALL projects the user has " +
+							"memories in — useful when the user asks 'how did we do X in that " +
+							"other repo'. Pass a specific git remote URL (e.g. " +
+							"'git@github.com:org/repo.git') to scope to a named other project.",
+					},
 				},
 				"required": []string{"query"},
 			},

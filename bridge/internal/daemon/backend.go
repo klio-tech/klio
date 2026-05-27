@@ -14,7 +14,7 @@ import (
 // Daemon implements mcp.Backend.
 
 func (d *Daemon) Recall(
-	ctx context.Context, query, spaceSlug, kind string, limit int, projectID uuid.UUID,
+	ctx context.Context, query, spaceSlug, kind string, limit int, project string,
 ) ([]map[string]any, error) {
 	spaceID, err := d.resolveSpace(ctx, spaceSlug)
 	if err != nil {
@@ -24,15 +24,12 @@ func (d *Daemon) Recall(
 	if limit <= 0 {
 		limit = 10
 	}
-	// projectID -> RecallRequest.Project as a UUID string. uuid.Nil means
-	// "no project filter" — the engine's B3 path interprets an empty
-	// project string as cross-project recall (legacy v0.6 behaviour).
-	projectArg := ""
-	if projectID != uuid.Nil {
-		projectArg = projectID.String()
-	}
+	// `project` is forwarded verbatim — uuid | git_remote | "any" | "".
+	// The engine's B3 path interprets an empty string as cross-project
+	// recall (legacy v0.6 behaviour). The cloud client's `omitempty` rule
+	// drops the field from the wire when empty.
 	entries, err := d.cloud.Recall(ctx, spaceID, cloud.RecallRequest{
-		Query: query, Kind: kind, Limit: limit, Project: projectArg,
+		Query: query, Kind: kind, Limit: limit, Project: project,
 	})
 	if err != nil {
 		// Cloud failed — fall back to local cache

@@ -89,7 +89,7 @@ func TestRecallProxiesToCloud(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	rows, err := d.Recall(context.Background(), "test", "", "", 10, uuid.Nil)
+	rows, err := d.Recall(context.Background(), "test", "", "", 10, "")
 	if err != nil {
 		t.Fatalf("Recall: %v", err)
 	}
