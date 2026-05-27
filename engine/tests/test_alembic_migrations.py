@@ -94,7 +94,13 @@ async def test_projects_table_exists() -> None:
 async def test_projects_partial_unique_indexes_present() -> None:
     """git_remote uniqueness when present; repo_root_path uniqueness
     when git_remote IS NULL. Two partial unique indexes give correct
-    semantics — neither overlaps, neither requires CHECK constraints."""
+    semantics — neither overlaps, neither requires CHECK constraints.
+
+    Asserting the predicates (not just `unique=True`) is load-bearing:
+    if a future migration drops the partial WHERE clause, the indexes
+    become ordinary uniques and two NULL git_remotes (the legitimate
+    no-remote case) would collide.
+    """
     _run_alembic_upgrade_head()
     engine = create_async_engine(TEST_DB_URL)
     async with engine.connect() as conn:
@@ -102,12 +108,40 @@ async def test_projects_partial_unique_indexes_present() -> None:
             lambda c: inspect(c).get_indexes("projects", schema="public")
         )
     by_name = {i["name"]: i for i in idx}
-    assert "projects_user_remote_idx" in by_name, \
-        f"projects_user_remote_idx missing; got: {sorted(by_name)}"
-    assert "projects_user_path_idx" in by_name, \
-        f"projects_user_path_idx missing; got: {sorted(by_name)}"
-    assert by_name["projects_user_remote_idx"]["unique"] is True
-    assert by_name["projects_user_path_idx"]["unique"] is True
+
+    remote_idx = by_name.get("ix_projects_user_remote")
+    path_idx = by_name.get("ix_projects_user_path")
+    assert remote_idx is not None, f"ix_projects_user_remote missing; got: {sorted(by_name)}"
+    assert path_idx is not None, f"ix_projects_user_path missing; got: {sorted(by_name)}"
+    assert remote_idx["unique"] is True
+    assert path_idx["unique"] is True
+
+    # Partial-index predicates are the whole design. SQLAlchemy surfaces
+    # them via dialect_options["postgresql"]["where"] on PG.
+    remote_where = (remote_idx.get("dialect_options") or {}).get("postgresql_where")
+    path_where = (path_idx.get("dialect_options") or {}).get("postgresql_where")
+    # Fall back to top-level `dialect_options["postgresql"]["where"]` shape
+    # if SQLAlchemy version surfaces it differently.
+    if remote_where is None:
+        remote_where = ((remote_idx.get("dialect_options") or {})
+                        .get("postgresql", {}).get("where"))
+    if path_where is None:
+        path_where = ((path_idx.get("dialect_options") or {})
+                      .get("postgresql", {}).get("where"))
+    assert remote_where is not None, (
+        f"ix_projects_user_remote has no postgresql_where predicate; "
+        f"dialect_options: {remote_idx.get('dialect_options')}"
+    )
+    assert "git_remote IS NOT NULL" in str(remote_where), (
+        f"predicate must constrain git_remote IS NOT NULL; got: {remote_where!r}"
+    )
+    assert path_where is not None, (
+        f"ix_projects_user_path has no postgresql_where predicate; "
+        f"dialect_options: {path_idx.get('dialect_options')}"
+    )
+    assert "git_remote IS NULL" in str(path_where), (
+        f"predicate must constrain git_remote IS NULL; got: {path_where!r}"
+    )
 
 
 @pytest.mark.asyncio

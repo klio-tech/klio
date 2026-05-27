@@ -48,7 +48,7 @@ def upgrade() -> None:
         ),
         sa.Column("git_remote", sa.Text(), nullable=True),
         sa.Column("repo_root_path", sa.Text(), nullable=True),
-        sa.Column("display_name", sa.Text(), nullable=False),
+        sa.Column("display_name", sa.String(200), nullable=False),
         sa.Column(
             "dedicated_space_id",
             postgresql.UUID(as_uuid=True),
@@ -71,14 +71,14 @@ def upgrade() -> None:
 
     # Partial unique indexes: git_remote when present; repo_root_path otherwise.
     op.create_index(
-        "projects_user_remote_idx",
+        "ix_projects_user_remote",
         "projects",
         ["user_id", "git_remote"],
         unique=True,
         postgresql_where=sa.text("git_remote IS NOT NULL"),
     )
     op.create_index(
-        "projects_user_path_idx",
+        "ix_projects_user_path",
         "projects",
         ["user_id", "repo_root_path"],
         unique=True,
@@ -94,12 +94,12 @@ def upgrade() -> None:
             nullable=True,
         ),
     )
-    op.create_index("entries_project_id_idx", "entries", ["project_id"])
+    op.create_index("ix_entries_project_id", "entries", ["project_id"])
 
 
 def downgrade() -> None:
-    op.drop_index("entries_project_id_idx", table_name="entries")
+    op.drop_index("ix_entries_project_id", table_name="entries")
     op.drop_column("entries", "project_id")
-    op.drop_index("projects_user_path_idx", table_name="projects")
-    op.drop_index("projects_user_remote_idx", table_name="projects")
+    op.drop_index("ix_projects_user_path", table_name="projects")
+    op.drop_index("ix_projects_user_remote", table_name="projects")
     op.drop_table("projects")
