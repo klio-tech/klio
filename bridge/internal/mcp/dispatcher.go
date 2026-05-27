@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -221,17 +222,29 @@ func parseProjectID(args map[string]any) uuid.UUID {
 // and the safer failure mode is "the LLM's scope took effect" rather
 // than "the LLM was silently overridden by an opaque UUID tag".
 func parseRecallProject(args map[string]any) string {
-	if raw, _ := args["project"].(string); raw != "" {
-		return raw
+	// Preferred: the LLM-facing `project` field carries the LLM's intent
+	// verbatim (uuid string, git remote URL, or the literal "any").
+	if raw, ok := args["project"].(string); ok {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed != "" {
+			return trimmed
+		}
 	}
-	raw, _ := args["project_id"].(string)
-	if raw == "" {
-		return ""
+	// Legacy alias: the hook subprocess emits `project_id` as a UUID
+	// string. Stringify after a UUID-roundtrip check so a malformed
+	// legacy caller fails open (the engine sees no project filter and
+	// returns cross-project results, matching v0.6 semantics).
+	if raw, ok := args["project_id"].(string); ok {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			return ""
+		}
+		if _, err := uuid.Parse(trimmed); err != nil {
+			return ""
+		}
+		return trimmed
 	}
-	if _, err := uuid.Parse(raw); err != nil {
-		return ""
-	}
-	return raw
+	return ""
 }
 
 // handleEnsureProject services the `klio.ensure_project` JSON-RPC method

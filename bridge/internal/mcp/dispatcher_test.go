@@ -319,12 +319,62 @@ func TestRecallAbsentProjectStaysEmpty(t *testing.T) {
 	}
 }
 
+// TestRecallEmptyProjectStaysEmpty guards the wire-protocol contract:
+// when the LLM (or a buggy hook) passes a literally-empty or
+// whitespace-only `project`, the dispatcher MUST collapse it to "" so
+// the cloud client's `omitempty` rule fires and the field is dropped
+// from the JSON payload entirely. Without the TrimSpace step a value
+// like "   " would survive `raw != ""` and arrive at the engine as
+// three spaces — the engine normalises it back to empty, but only by
+// accident of its own input handling. We want the bridge to be the
+// canonical normaliser so the wire never carries that weirdness.
+func TestRecallEmptyProjectStaysEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		proj string
+	}{
+		{"empty", ""},
+		{"whitespace_spaces", "   "},
+		{"whitespace_mixed", "\t \n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &stubBackend{}
+			d := NewDispatcher(b)
+			// Encode the project value through JSON so escape sequences
+			// (\t, \n) survive into the arguments map verbatim — matches
+			// what the LLM client would send on the wire.
+			argsBytes, err := json.Marshal(map[string]any{
+				"query":   "find tabs",
+				"project": tc.proj,
+			})
+			if err != nil {
+				t.Fatalf("marshal args: %v", err)
+			}
+			body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{` +
+				`"name":"recall","arguments":` + string(argsBytes) + `}}`
+			resp := d.Handle([]byte(body))
+			var r Response
+			if err := json.Unmarshal(resp, &r); err != nil {
+				t.Fatalf("unmarshal resp: %v", err)
+			}
+			if r.Error != nil {
+				t.Fatalf("unexpected err: %v", r.Error)
+			}
+			if b.recallProject != "" {
+				t.Errorf("project %q should collapse to empty; got %q",
+					tc.proj, b.recallProject)
+			}
+		})
+	}
+}
+
 // TestRecallToolSchemaIncludesProject locks the LLM-facing schema: the
 // `recall` tool MUST expose a `project` property of type string, with
 // a description that names the load-bearing values an LLM should know
-// about ("any" and "current project"). Stripping or renaming this
-// breaks the agent's ability to scope recall — guarding both the key
-// and the description content catches the two ways this regresses.
+// about ("any" and "current working project"). Stripping or renaming
+// this breaks the agent's ability to scope recall — guarding both the
+// key and the description content catches the two ways this regresses.
 func TestRecallToolSchemaIncludesProject(t *testing.T) {
 	var recall *Tool
 	for i := range Tools() {
@@ -356,8 +406,8 @@ func TestRecallToolSchemaIncludesProject(t *testing.T) {
 	if !contains(desc, "any") {
 		t.Errorf("project.description must mention `any` literal: %q", desc)
 	}
-	if !contains(desc, "current project") {
-		t.Errorf("project.description must mention `current project` default: %q", desc)
+	if !contains(desc, "current working project") {
+		t.Errorf("project.description must mention `current working project` default: %q", desc)
 	}
 }
 
