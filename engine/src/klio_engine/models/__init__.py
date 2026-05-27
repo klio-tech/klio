@@ -13,6 +13,7 @@ from klio_engine.models.entry_embedding import (
 )
 from klio_engine.models.notarization import AuditNotarization
 from klio_engine.models.permission import Permission, PermissionScope
+from klio_engine.models.project import Project
 from klio_engine.models.refresh_token import MagicLinkToken, RefreshToken
 from klio_engine.models.session import Session
 from klio_engine.models.space import Space
@@ -35,6 +36,7 @@ __all__ = [
     "MagicLinkToken",
     "Permission",
     "PermissionScope",
+    "Project",
     "RefreshToken",
     "Session",
     "Space",

@@ -48,6 +48,16 @@ class Entry(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
     )
+    # Nullable: legacy entries written before per-project scoping (v0.7.0)
+    # and entries from non-repo contexts (e.g. ad-hoc chats with no cwd).
+    # SET NULL on delete preserves the entry when its project is removed —
+    # the entry simply surfaces in the "uncategorized" bucket that recall
+    # always includes alongside the active project's tagged rows.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     kind: Mapped[EntryKind] = mapped_column(
         Enum(
             EntryKind,
@@ -95,5 +105,13 @@ class Entry(Base):
             "ix_entries_superseded_by",
             "superseded_by",
             postgresql_where="superseded_by IS NOT NULL",
+        ),
+        # Mirrors migration 0008. Recall queries filter by project_id
+        # (with NULLs always surfacing); without this index the partition
+        # filter would force a sequential scan at row counts > a few
+        # hundred per user.
+        Index(
+            "ix_entries_project_id",
+            "project_id",
         ),
     )
