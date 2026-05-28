@@ -8,6 +8,9 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { init, type InitOptions } from "../src/commands/init.js";
 import {
@@ -365,4 +368,140 @@ test("InitOptions accepts emailPromptFn + emailFetchFn DI seams", () => {
   };
   assert.equal(typeof opts.emailPromptFn, "function");
   assert.equal(typeof opts.emailFetchFn, "function");
+});
+
+// ---------------------------------------------------------------------
+// Mode routing — cloud-default `klio init`
+// ---------------------------------------------------------------------
+//
+// The first decision in init() is "where should Klio store memory?".
+// `--cloud` / `--local` (opts.mode) pins the branch without a prompt.
+// These tests verify the routing fork without driving the full local
+// flow (which needs Docker): the cloud branch runs the injected cloud
+// stubs and RETURNS before any local phase; the local branch renders
+// its 6-phase welcome preview (cloud never does) before reaching the
+// Docker preflight.
+
+type CaptureCtx = { after: (fn: () => void) => void };
+
+/** Capture process.stdout.write for the duration of a test. */
+function captureStdout(t: CaptureCtx): { lines: () => string } {
+  const chunks: string[] = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  (process.stdout as { write: unknown }).write = ((chunk: unknown) => {
+    chunks.push(typeof chunk === "string" ? chunk : String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  t.after(() => {
+    (process.stdout as { write: unknown }).write = orig;
+  });
+  return { lines: () => chunks.join("") };
+}
+
+/** Redirect HOME (+ XDG) to a throwaway dir so no agents are detected. */
+function withEmptyHome(t: CaptureCtx): void {
+  const home = mkdtempSync(join(tmpdir(), "klio-init-route-test-"));
+  const prevHome = process.env.HOME;
+  const prevUserprofile = process.env.USERPROFILE;
+  const prevXdg = process.env.XDG_CONFIG_HOME;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.XDG_CONFIG_HOME = join(home, ".config");
+  t.after(() => {
+    process.env.HOME = prevHome;
+    process.env.USERPROFILE = prevUserprofile;
+    if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdg;
+    try {
+      rmSync(home, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+test("mode routing: --cloud runs the cloud flow and never reaches the local phases", async (t) => {
+  withEmptyHome(t);
+  const cap = captureStdout(t);
+  const cloudLines: string[] = [];
+
+  // No --skip-provider etc. is needed: the cloud branch returns BEFORE
+  // any local phase. If routing were broken and the local flow ran, it
+  // would hit `preflightDocker` and either throw or print the 6-phase
+  // welcome preview — neither must happen here.
+  await init({
+    imageTag: "0.7.1",
+    mode: "cloud",
+    cloudDeps: {
+      promptFn: async () => "sk-route-key-2222",
+      fetchFn: (async () =>
+        new Response(JSON.stringify({ valid: true }), {
+          status: 200,
+        })) as typeof fetch,
+      claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+      log: (l) => cloudLines.push(l),
+    },
+  });
+
+  const cloud = cloudLines.join("\n");
+  assert.match(cloud, /Key verified/);
+  assert.match(cloud, /Klio Cloud is ready/);
+
+  // The LOCAL welcome preview (a local-only string) must never appear.
+  const stdout = cap.lines();
+  assert.doesNotMatch(stdout, /Bring up your stack/);
+  assert.doesNotMatch(stdout, /Connect a model/);
+});
+
+test("mode routing: --local takes the local branch and reaches the Docker preflight", async (t) => {
+  withEmptyHome(t);
+  const cap = captureStdout(t);
+
+  // The local branch's FIRST external action is `preflightDocker()`,
+  // which runs `docker --version`. We blank PATH for the duration of
+  // this test so that probe fails IMMEDIATELY (ENOENT) — the local
+  // flow then throws at preflight before ever touching compose / pull
+  // / a real stack. This proves the LOCAL branch was taken (it reached
+  // the Docker preflight) while staying fast and side-effect-free, and
+  // crucially without depending on whether a Docker daemon is present.
+  const prevPath = process.env.PATH;
+  process.env.PATH = "";
+  t.after(() => {
+    process.env.PATH = prevPath;
+  });
+
+  let threw = false;
+  try {
+    await init({ imageTag: "0.7.1", mode: "local" });
+  } catch {
+    // Expected: preflightDocker throws when `docker` isn't resolvable.
+    threw = true;
+  }
+
+  assert.equal(threw, true, "local branch must reach + fail at Docker preflight");
+
+  const stdout = cap.lines();
+  // The 6-phase welcome preview is local-only — its presence confirms
+  // the local branch ran rather than the cloud one.
+  assert.match(stdout, /Bring up your stack/, "local branch renders its preview");
+  // The cloud reference block must never appear on the local branch.
+  assert.doesNotMatch(stdout, /Klio Cloud is ready/);
+});
+
+test("InitOptions accepts the mode flag + cloudDeps DI seam", () => {
+  // Compile-time assertion: the CLI flag (--cloud/--local) and the
+  // test DI seam both flow through InitOptions. If either field drifts
+  // the type system fails this build.
+  const opts: InitOptions = {
+    imageTag: "0.7.1",
+    mode: "cloud",
+    cloudDeps: {
+      promptFn: async () => "",
+      fetchFn: (async () => new Response("{}", { status: 200 })) as typeof fetch,
+      claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+      log: () => {},
+    },
+  };
+  assert.equal(opts.mode, "cloud");
+  assert.equal(typeof opts.cloudDeps?.promptFn, "function");
 });

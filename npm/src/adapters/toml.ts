@@ -14,6 +14,7 @@
 // Subset we support (everything else is left untouched):
 //   - top-level tables `[mcp_servers.<name>]`
 //   - the optional sub-table `[mcp_servers.<name>.env]`
+//   - the optional sub-table `[mcp_servers.<name>.http_headers]`
 //   - scalar string values: `key = "value"`
 //   - string arrays: `key = ["a", "b"]`
 //
@@ -21,11 +22,38 @@
 // rewrite the whole block. This keeps the code small enough to
 // audit and removes a class of escaping bugs.
 
-export type McpServerEntry = {
+/**
+ * A stdio-transport MCP server: spawns a local `command` with `args`
+ * and an optional `env` table. This is the shape the LOCAL adapters
+ * emit (`docker exec -i klio-bridge klio-mcp`).
+ */
+export type McpStdioEntry = {
   command: string;
   args: string[];
   env?: Record<string, string>;
 };
+
+/**
+ * A remote-HTTP-transport MCP server: connects to `url` with an
+ * optional `headers` table rendered as the Codex `[mcp_servers.<name>
+ * .http_headers]` sub-table. This is the shape CLOUD mode emits
+ * (the hosted brain at mcp.klio.tech with X-Vex-Key / X-Vex-Agent).
+ */
+export type McpHttpEntry = {
+  url: string;
+  headers?: Record<string, string>;
+};
+
+/**
+ * Either transport. Discriminated structurally — a `command` field
+ * means stdio, a `url` field means HTTP. The renderer branches on
+ * which one is present.
+ */
+export type McpServerEntry = McpStdioEntry | McpHttpEntry;
+
+function isHttpEntry(entry: McpServerEntry): entry is McpHttpEntry {
+  return "url" in entry;
+}
 
 const TABLE_PREFIX = "[mcp_servers.";
 
@@ -127,6 +155,20 @@ function lineStartOffset(lines: string[], index: number): number {
 function renderEntry(name: string, entry: McpServerEntry): string {
   const lines: string[] = [];
   lines.push(`[mcp_servers.${name}]`);
+
+  if (isHttpEntry(entry)) {
+    lines.push(`url = ${JSON.stringify(entry.url)}`);
+    const headers = entry.headers ?? {};
+    if (Object.keys(headers).length > 0) {
+      lines.push("");
+      lines.push(`[mcp_servers.${name}.http_headers]`);
+      for (const [k, v] of Object.entries(headers)) {
+        lines.push(`${k} = ${JSON.stringify(v)}`);
+      }
+    }
+    return lines.join("\n") + "\n";
+  }
+
   lines.push(`command = ${JSON.stringify(entry.command)}`);
   lines.push(
     `args = [${entry.args.map((a) => JSON.stringify(a)).join(", ")}]`,

@@ -89,11 +89,19 @@ function parseInitArgs(rest: string[]): Parameters<typeof init>[0] {
       opts.skipCommunity = true;
     } else if (a === "--quiet") {
       opts.quiet = true;
+    } else if (a === "--cloud") {
+      // Force the hosted-brain flow, skipping the mode prompt. Mutually
+      // exclusive with --local; the last one on the command line wins,
+      // mirroring standard getopt "last flag" semantics.
+      opts.mode = "cloud";
+    } else if (a === "--local") {
+      // Force the self-hosted Docker flow, skipping the mode prompt.
+      opts.mode = "local";
     } else if (a === "-h" || a === "--help") {
       process.stdout.write(
-        "usage: klio init [--email <addr>] [--image-tag <tag>] [--engine-url <url>]\n" +
-          "                 [--skip-provider] [--skip-wow] [--skip-community]\n" +
-          "                 [--quiet]\n",
+        "usage: klio init [--cloud | --local] [--email <addr>] [--image-tag <tag>]\n" +
+          "                 [--engine-url <url>] [--skip-provider] [--skip-wow]\n" +
+          "                 [--skip-community] [--quiet]\n",
       );
       process.exit(0);
     } else {

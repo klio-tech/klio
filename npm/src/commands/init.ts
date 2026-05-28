@@ -95,6 +95,8 @@ import {
   curatorEnvLines,
   type CuratorConfig,
 } from "../curatorConfig.js";
+import { initCloud, type InitCloudOptions } from "./initCloud.js";
+import { selectInitMode, type InitMode } from "../initModeMenu.js";
 
 const ENGINE_URL = "http://127.0.0.1:8000";
 const TRUST_APP_URL = "http://127.0.0.1:3000";
@@ -209,6 +211,26 @@ export type InitOptions = {
    * both must wire each one.
    */
   emailFetchFn?: typeof fetch;
+  /**
+   * Force the memory backend without showing the mode prompt.
+   *
+   *   - "cloud" → run the hosted-brain flow (initCloud) and return.
+   *   - "local" → run the original six-phase Docker flow.
+   *   - undefined (default) → show the interactive mode menu, which
+   *     defaults to Cloud on Enter.
+   *
+   * Set by `--cloud` / `--local` on the CLI so non-interactive / CI
+   * runs and tests can pin a mode without a TTY. When set, the mode
+   * menu is skipped entirely.
+   */
+  mode?: InitMode;
+  /**
+   * Dependency-injection seam for the cloud flow. Tests pass scripted
+   * prompt / fetch / claude-CLI stubs through here so they can drive
+   * `--cloud` runs hermetically; production leaves it undefined and
+   * the cloud flow uses the real readline / fetch / claude binary.
+   */
+  cloudDeps?: InitCloudOptions;
 };
 
 /**
@@ -229,6 +251,23 @@ export async function init(opts: InitOptions): Promise<void> {
   const quiet = opts.quiet ?? false;
   setQuiet(quiet);
 
+  // -----------------------------------------------------------------
+  // Mode selection — the very first choice. Where should Klio store
+  // memory? Cloud (hosted brain, default) or Local (self-hosted
+  // Docker). A `--cloud` / `--local` flag (opts.mode) pins the mode
+  // and skips the prompt for non-interactive / CI runs. Default when
+  // unset is the interactive menu, which itself defaults to Cloud.
+  // -----------------------------------------------------------------
+  const mode = await resolveMode(opts.mode);
+  if (mode === "cloud") {
+    // Cloud is dramatically simpler: no Docker, no model setup, no
+    // local engine. Hand off to the cloud flow and RETURN — the local
+    // phases below never run.
+    await initCloud({ log: writeLine, ...opts.cloudDeps });
+    return;
+  }
+
+  // ---- Local (self-hosted Docker) — the original six-phase flow ----
   if (!quiet) writeWelcomePreview();
 
   const engineURL = opts.engineURL ?? ENGINE_URL;
@@ -409,6 +448,21 @@ function writeWelcomePreview(): void {
   process.stdout.write("    5) Memory curator       — turn observations into durable memories\n");
   process.stdout.write("    6) Prove it works       — write a memory, recall it back\n");
   process.stdout.write("\n");
+}
+
+/**
+ * Resolve the memory backend mode. When `forced` is set (via the
+ * `--cloud` / `--local` flags), it wins and the prompt is skipped —
+ * this is the path CI / non-interactive runs and tests take. When
+ * unset, render the interactive two-option menu (defaulting to Cloud
+ * on Enter) and return the user's pick.
+ */
+async function resolveMode(forced?: InitMode): Promise<InitMode> {
+  if (forced) return forced;
+  return selectInitMode({
+    promptFn: (o) => prompt({ message: o.message, default: o.default }),
+    log: writeLine,
+  });
 }
 
 /**
