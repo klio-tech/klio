@@ -4,6 +4,52 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] — 2026-05-28
+
+### Added — project surfaces in the trust-app dashboard
+
+0.7.0 made `recall` project-aware for agents but left the human-facing
+dashboard blind to it: `/memories` could only filter by space and
+kind, and the API didn't even return an entry's `project_id`. 0.7.1
+closes that gap.
+
+**Engine:**
+
+  - `EntryResponse` now carries `project_id` (populated on every entry
+    read + write path).
+  - New `GET /v1/projects` — lists the caller's projects with
+    `display_name`, `git_remote`, `dedicated_space_id`, timestamps,
+    and a per-project `entry_count`. Ordered by `last_seen_at DESC`
+    with an `id` tiebreaker for deterministic paging. Tenant-scoped.
+  - `GET /v1/spaces/{id}/entries` accepts an optional `project_id`
+    filter. When set, it returns that project's entries plus
+    NULL-tagged (uncategorized) entries — the same B2 NULL-surfacing
+    semantics recall uses, so a project view still shows your
+    pre-0.7.0 global pool.
+
+**Dashboard (`/memories`):**
+
+  - A project dropdown alongside the space tabs ("All projects" +
+    each `display_name (entry_count)`). Hidden entirely for users
+    with no projects yet.
+  - A subtle project badge on each memory row; NULL-tagged entries
+    read as `· uncategorized`.
+  - Space, kind, and project filters all compose in the URL.
+  - The project filter is **best-effort**: if the engine is older
+    than 0.7.1 and 404s on `GET /v1/projects`, the dashboard hides
+    the filter and still renders entries rather than failing the
+    whole page — version skew between the trust-app image and the
+    engine is a graceful degrade, not a 500.
+
+### Deferred to a later release
+
+  - Session-level drill-down (group a project's entries by the
+    conversation that produced them — `sessions.cwd` from 0.7.0
+    makes this possible). The dashboard differentiates by project
+    now; by session later.
+
+[0.7.1]: https://github.com/klio-tech/klio/releases/tag/v0.7.1
+
 ## [0.7.0] — 2026-05-28
 
 ### Added — per-project memory scoping
