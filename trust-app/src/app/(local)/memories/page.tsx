@@ -29,7 +29,21 @@ export default async function MemoriesPage({
   searchParams: Promise<Search>;
 }) {
   const params = await searchParams;
-  const spaces = await api.listSpaces();
+  // listSpaces stays a hard failure — the page genuinely can't render
+  // without a space. listProjects is best-effort: the project filter is
+  // an enhancement, not a gate, so it must not take the dashboard down.
+  const [spaces, projects] = await Promise.all([
+    api.listSpaces(),
+    api.listProjects().catch((e) => {
+      // An older engine (image/version skew) returns 404 on
+      // GET /v1/projects — degrade to "no projects" so the dashboard
+      // still renders entries instead of 500ing the whole page.
+      // Logged server-side rather than silently swallowed (per the
+      // project's error-handling rule).
+      console.error("listProjects failed; hiding project filter:", e);
+      return [] as Project[];
+    }),
+  ]);
   if (spaces.length === 0) {
     return (
       <main>
@@ -39,7 +53,6 @@ export default async function MemoriesPage({
     );
   }
 
-  const projects = await api.listProjects();
   const projectsById = new Map(projects.map((p) => [p.id, p]));
 
   const activeSpaceId = params.space ?? spaces[0].id;
@@ -251,12 +264,12 @@ function EntryRow({
   const supersededTooltip = entry.superseded_by
     ? "This entry has been superseded by a newer one — kept for history."
     : null;
-  // Prefer the human-readable project name; fall back to a truncated id
-  // for the rare case an entry references a project not in the list
-  // (e.g. created since the page was rendered).
+  // Show the human-readable project name when we have it. An entry that
+  // references a project not in the list (e.g. created since the page was
+  // rendered, or the projects fetch degraded to empty) falls through to
+  // the "uncategorized" label rather than surfacing a noisy truncated id.
   const projectLabel = entry.project_id
-    ? projectsById.get(entry.project_id)?.display_name ??
-      `${entry.project_id.slice(0, 8)}…`
+    ? projectsById.get(entry.project_id)?.display_name ?? null
     : null;
   return (
     <li
