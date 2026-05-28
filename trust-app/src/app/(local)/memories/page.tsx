@@ -1,7 +1,8 @@
 import Link from "next/link";
 
-import { api, type Entry, type EntryKind } from "@/lib/api";
+import { api, type Entry, type EntryKind, type Project } from "@/lib/api";
 
+import { ProjectFilter } from "./project-filter";
 import { SearchForm } from "./search-form";
 
 const KINDS: (EntryKind | "all")[] = [
@@ -18,6 +19,7 @@ export const dynamic = "force-dynamic";
 type Search = {
   space?: string;
   kind?: string;
+  project?: string;
   limit?: string;
 };
 
@@ -37,6 +39,9 @@ export default async function MemoriesPage({
     );
   }
 
+  const projects = await api.listProjects();
+  const projectsById = new Map(projects.map((p) => [p.id, p]));
+
   const activeSpaceId = params.space ?? spaces[0].id;
   const activeSpace =
     spaces.find((s) => s.id === activeSpaceId) ?? spaces[0];
@@ -44,10 +49,17 @@ export default async function MemoriesPage({
     params.kind && KINDS.includes(params.kind as EntryKind | "all")
       ? (params.kind as EntryKind | "all")
       : "all";
+  // Only honour a project filter that actually exists; an unknown UUID
+  // falls back to "All projects" rather than silently returning nothing.
+  const activeProjectId =
+    params.project && projectsById.has(params.project)
+      ? params.project
+      : undefined;
   const limit = Math.min(Math.max(1, Number(params.limit ?? 100)), 500);
 
   const entries = await api.listEntries(activeSpace.id, {
     kind: kindFilter === "all" ? undefined : kindFilter,
+    projectId: activeProjectId,
     limit,
   });
 
@@ -68,6 +80,14 @@ export default async function MemoriesPage({
         spaces={spaces}
         activeId={activeSpace.id}
         kindFilter={kindFilter}
+        projectId={activeProjectId}
+      />
+
+      <ProjectFilter
+        projects={projects}
+        activeProjectId={activeProjectId ?? null}
+        spaceId={activeSpace.id}
+        kindFilter={kindFilter}
       />
 
       <SearchForm spaceId={activeSpace.id} />
@@ -87,6 +107,7 @@ export default async function MemoriesPage({
           spaceId={activeSpace.id}
           activeKind={kindFilter}
           counts={counts}
+          projectId={activeProjectId}
         />
 
         {entries.length === 0 ? (
@@ -94,7 +115,12 @@ export default async function MemoriesPage({
         ) : (
           <ul className="list" style={{ listStyle: "none" }}>
             {entries.map((e) => (
-              <EntryRow key={e.id} entry={e} space={activeSpace} />
+              <EntryRow
+                key={e.id}
+                entry={e}
+                space={activeSpace}
+                projectsById={projectsById}
+              />
             ))}
           </ul>
         )}
@@ -105,14 +131,34 @@ export default async function MemoriesPage({
   );
 }
 
+// Build a /memories href that always preserves the space, kind and
+// project filters together, so changing one never drops the others.
+// Omitting `project` (the "All projects" case) leaves the param off the
+// URL entirely rather than emitting an empty value.
+function memoriesHref({
+  spaceId,
+  kind,
+  projectId,
+}: {
+  spaceId: string;
+  kind: string;
+  projectId?: string;
+}) {
+  const qs = new URLSearchParams({ space: spaceId, kind });
+  if (projectId) qs.set("project", projectId);
+  return `/memories?${qs}`;
+}
+
 function SpaceSwitcher({
   spaces,
   activeId,
   kindFilter,
+  projectId,
 }: {
   spaces: { id: string; name: string }[];
   activeId: string;
   kindFilter: string;
+  projectId?: string;
 }) {
   if (spaces.length <= 1) return null;
   return (
@@ -130,7 +176,7 @@ function SpaceSwitcher({
       {spaces.map((s) => (
         <Link
           key={s.id}
-          href={`/memories?space=${s.id}&kind=${kindFilter}`}
+          href={memoriesHref({ spaceId: s.id, kind: kindFilter, projectId })}
           style={{
             padding: "0.25rem 0.625rem",
             borderRadius: "0.25rem",
@@ -151,10 +197,12 @@ function KindFilter({
   spaceId,
   activeKind,
   counts,
+  projectId,
 }: {
   spaceId: string;
   activeKind: string;
   counts: Record<string, number>;
+  projectId?: string;
 }) {
   return (
     <nav
@@ -173,7 +221,7 @@ function KindFilter({
         return (
           <Link
             key={k}
-            href={`/memories?space=${spaceId}&kind=${k}`}
+            href={memoriesHref({ spaceId, kind: k, projectId })}
             style={{
               padding: "0.25rem 0.625rem",
               borderRadius: "0.25rem",
@@ -194,12 +242,21 @@ function KindFilter({
 function EntryRow({
   entry,
   space,
+  projectsById,
 }: {
   entry: Entry;
   space: { embedding_model: string };
+  projectsById: Map<string, Project>;
 }) {
   const supersededTooltip = entry.superseded_by
     ? "This entry has been superseded by a newer one — kept for history."
+    : null;
+  // Prefer the human-readable project name; fall back to a truncated id
+  // for the rare case an entry references a project not in the list
+  // (e.g. created since the page was rendered).
+  const projectLabel = entry.project_id
+    ? projectsById.get(entry.project_id)?.display_name ??
+      `${entry.project_id.slice(0, 8)}…`
     : null;
   return (
     <li
@@ -227,6 +284,29 @@ function EntryRow({
           {new Date(entry.created_at).toLocaleString()} · agent{" "}
           {entry.agent_id.slice(0, 8)}…
         </span>
+        {projectLabel ? (
+          <span
+            title={`Project: ${projectLabel}`}
+            style={{
+              fontSize: "0.72rem",
+              padding: "0.1rem 0.45rem",
+              marginLeft: "0.5rem",
+              borderRadius: "0.25rem",
+              border: "1px solid var(--border)",
+              color: "var(--muted-foreground)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {projectLabel}
+          </span>
+        ) : (
+          <span
+            className="muted"
+            style={{ fontSize: "0.72rem", marginLeft: "0.5rem", opacity: 0.7 }}
+          >
+            · uncategorized
+          </span>
+        )}
         {supersededTooltip && (
           <span
             title={supersededTooltip}

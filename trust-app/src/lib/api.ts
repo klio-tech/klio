@@ -18,12 +18,24 @@ export type Entry = {
   space_id: string;
   agent_id: string;
   session_id: string | null;
+  project_id: string | null;
   kind: EntryKind;
   content: string;
   metadata: Record<string, unknown> | null;
   confidence: number;
   created_at: string;
   superseded_by: string | null;
+};
+
+export type Project = {
+  id: string;
+  display_name: string;
+  git_remote: string | null;
+  repo_root_path: string | null;
+  dedicated_space_id: string | null;
+  created_at: string;
+  last_seen_at: string;
+  entry_count: number;
 };
 
 export type Permission = {
@@ -70,14 +82,21 @@ async function authedFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   listSpaces: () => authedFetch<Space[]>("/v1/spaces"),
+  listProjects: () => authedFetch<Project[]>("/v1/projects"),
   listAgents: () => authedFetch<Agent[]>("/v1/agents"),
   listEntries: (
     spaceId: string,
-    opts?: { kind?: EntryKind; since?: string; limit?: number },
+    opts?: {
+      kind?: EntryKind;
+      since?: string;
+      limit?: number;
+      projectId?: string;
+    },
   ) => {
     const qs = new URLSearchParams();
     if (opts?.kind) qs.set("kind", opts.kind);
     if (opts?.since) qs.set("since", opts.since);
+    if (opts?.projectId) qs.set("project_id", opts.projectId);
     qs.set("limit", String(opts?.limit ?? 100));
     return authedFetch<Entry[]>(`/v1/spaces/${spaceId}/entries?${qs}`);
   },
