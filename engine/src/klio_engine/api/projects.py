@@ -126,10 +126,21 @@ async def list_projects(
         .correlate(Project)
         .scalar_subquery()
     )
+    # `last_seen_at` alone is not a total order: `ProjectService.ensure`
+    # bumps it to `func.now()`, which Postgres evaluates as the
+    # transaction-start timestamp. Two projects ensured in the SAME
+    # transaction (e.g. a future batch-ensure across a multi-repo
+    # workspace) therefore get byte-identical `last_seen_at` values, and
+    # a primary-only ORDER BY would return them in an arbitrary,
+    # vacuum-unstable order — the dashboard's default selection could
+    # flip between requests. `Project.id` (a UUID, unique per row) is the
+    # deterministic tiebreaker: desc to keep the most-recently-minted of
+    # a same-timestamp pair first, which matches the "recent-first"
+    # intent of the primary key.
     stmt = (
         select(Project, entry_count.label("entry_count"))
         .where(Project.user_id == ctx.user_id)
-        .order_by(Project.last_seen_at.desc())
+        .order_by(Project.last_seen_at.desc(), Project.id.desc())
     )
     rows = (await session.execute(stmt)).all()
     return [

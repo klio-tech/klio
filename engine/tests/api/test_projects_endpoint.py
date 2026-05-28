@@ -50,10 +50,11 @@ Fixtures (`app_client`, `db_session`, `provision`, `AuthCtx`) live in
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from klio_engine.models.project import Project
@@ -851,6 +852,64 @@ async def test_list_projects_requires_auth(app_client: TestClient) -> None:
     anonymous access is never valid — mirrors /ensure and /promote."""
     resp = app_client.get("/v1/projects")
     assert resp.status_code == 401, resp.text
+
+
+@pytest.mark.asyncio
+async def test_list_projects_orders_ties_by_id_desc(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """When two projects share an identical `last_seen_at`, the list is
+    still totally ordered: `Project.id` desc is the deterministic
+    tiebreaker.
+
+    `last_seen_at` defaults to `func.now()` (transaction-start time), so
+    two projects bumped in the same transaction get byte-identical
+    timestamps and a primary-only ORDER BY would return them in an
+    arbitrary, vacuum-unstable order. Here we force the tie explicitly:
+    seed two projects, then stamp both rows with the SAME literal
+    `last_seen_at` via the db_session. The endpoint must then return
+    them in `id` desc order regardless of insertion order.
+    """
+    ctx = provision(app_client)
+    project_1 = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/tie-1.git",
+        repo_root_path="/Users/x/tie-1",
+        display_name="klio-tech/tie-1",
+    )
+    project_2 = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/tie-2.git",
+        repo_root_path="/Users/x/tie-2",
+        display_name="klio-tech/tie-2",
+    )
+
+    # Force an exact tie on the primary sort key. A timezone-aware
+    # literal mirrors the `TIMESTAMPTZ` column type so the comparison is
+    # unambiguous and both rows end up byte-identical on `last_seen_at`.
+    tie_ts = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
+    await db_session.execute(
+        update(Project)
+        .where(Project.id.in_([project_1, project_2]))
+        .values(last_seen_at=tie_ts)
+    )
+    await db_session.commit()
+
+    resp = app_client.get("/v1/projects", headers=ctx.auth_header())
+    assert resp.status_code == 200, resp.text
+    ids = [uuid.UUID(r["id"]) for r in resp.json()]
+    # Both seeded projects are present and ordered id-desc. Asserting
+    # against `sorted(..., reverse=True)` (not insertion order) is the
+    # load-bearing check: the two UUIDs are random, so the expected
+    # order is whichever id is numerically larger — exactly what the
+    # `Project.id.desc()` tiebreaker produces, independent of which
+    # project was seeded first.
+    assert ids == sorted([project_1, project_2], reverse=True), (
+        "tied last_seen_at must break to id desc deterministically; "
+        f"got {ids}"
+    )
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 """Entries + recall endpoints."""
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -36,6 +37,35 @@ def _entry_service(kms: KMSClient) -> EntryService:
         kms=kms,
         embeddings=EmbeddingService(),
         dedup_threshold=settings.dedup_cosine_threshold,
+    )
+
+
+def _entry_to_response(
+    entry: Entry, *, content: str, metadata: dict[str, Any] | None
+) -> EntryResponse:
+    """Build the API response shape from an Entry ORM row + its
+    already-resolved content/metadata.
+
+    Content + metadata are passed in (not read off `entry`) because
+    the read paths supply DECRYPTED values while the write path
+    supplies the caller's plaintext — the caller owns that resolution,
+    this helper owns the field mapping. Centralizing it means a new
+    EntryResponse field is a one-line change here, not a three-site
+    hunt (project_id and session_id both previously required touching
+    all three sites in lockstep).
+    """
+    return EntryResponse(
+        id=entry.id,
+        space_id=entry.space_id,
+        session_id=entry.session_id,
+        agent_id=entry.agent_id,
+        project_id=entry.project_id,
+        kind=entry.kind.value,
+        content=content,
+        metadata=metadata,
+        confidence=entry.confidence,
+        created_at=entry.created_at,
+        superseded_by=entry.superseded_by,
     )
 
 
@@ -111,19 +141,10 @@ async def write_entry(
 
         structlog.get_logger().warning("publish_entry_created.failed", entry_id=str(e.id))
 
-    return EntryResponse(
-        id=e.id,
-        space_id=e.space_id,
-        session_id=e.session_id,
-        project_id=e.project_id,
-        agent_id=e.agent_id,
-        kind=e.kind.value,
-        content=body.content,
-        metadata=body.metadata,
-        confidence=e.confidence,
-        created_at=e.created_at,
-        superseded_by=e.superseded_by,
-    )
+    # write_entry returns the caller's plaintext content/metadata
+    # (what they just sent), NOT a decrypt round-trip — the row is
+    # freshly written so the values are already in hand.
+    return _entry_to_response(e, content=body.content, metadata=body.metadata)
 
 
 @router.get("", response_model=list[EntryResponse])
@@ -192,21 +213,7 @@ async def list_entries(
     out: list[EntryResponse] = []
     for e in rows:
         content, metadata = await svc.decrypt(session, e, ctx.user_id)
-        out.append(
-            EntryResponse(
-                id=e.id,
-                space_id=e.space_id,
-                session_id=e.session_id,
-                project_id=e.project_id,
-                agent_id=e.agent_id,
-                kind=e.kind.value,
-                content=content,
-                metadata=metadata,
-                confidence=e.confidence,
-                created_at=e.created_at,
-                superseded_by=e.superseded_by,
-            )
-        )
+        out.append(_entry_to_response(e, content=content, metadata=metadata))
     return out
 
 
@@ -255,21 +262,7 @@ async def recall(
     out: list[EntryResponse] = []
     for entry, _score in results:
         content, metadata = await entry_svc.decrypt(session, entry, ctx.user_id)
-        out.append(
-            EntryResponse(
-                id=entry.id,
-                space_id=entry.space_id,
-                session_id=entry.session_id,
-                project_id=entry.project_id,
-                agent_id=entry.agent_id,
-                kind=entry.kind.value,
-                content=content,
-                metadata=metadata,
-                confidence=entry.confidence,
-                created_at=entry.created_at,
-                superseded_by=entry.superseded_by,
-            )
-        )
+        out.append(_entry_to_response(entry, content=content, metadata=metadata))
     return out
 
 
