@@ -715,3 +715,182 @@ async def test_promote_twice_rejects_409(
     )
     assert r2.status_code == 409, r2.text
     assert "already promoted" in r2.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# UI-1 — GET /v1/projects (list with per-project entry counts)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_projects_returns_user_projects_with_counts(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """GET /v1/projects returns the caller's projects, ordered by
+    `last_seen_at` desc (most-recently-active first), each carrying a
+    `entry_count` of its non-deleted tagged entries.
+
+    Two projects are seeded in order (A then B); B is seeded later so
+    its `last_seen_at` is strictly greater (PostgreSQL `now()` is the
+    transaction-start time and `seed_project` commits each project in
+    its own transaction). Three entries are tagged to project A and
+    one to project B, so the counts are independently verifiable and
+    can't be confused with the ordering.
+    """
+    ctx = provision(app_client)
+    project_a = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/project-a.git",
+        repo_root_path="/Users/x/project-a",
+        display_name="klio-tech/project-a",
+    )
+    project_b = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/project-b.git",
+        repo_root_path="/Users/x/project-b",
+        display_name="klio-tech/project-b",
+    )
+
+    # 3 entries into A, 1 into B. Written via the API so the full
+    # write path (encryption, project tagging) is exercised.
+    for i in range(3):
+        r = app_client.post(
+            f"/v1/spaces/{ctx.default_space_id}/entries",
+            json={
+                "kind": "memory",
+                "content": f"A memory {i}",
+                "project_id": str(project_a),
+            },
+            headers=ctx.auth_header(),
+        )
+        assert r.status_code == 201, r.text
+    r = app_client.post(
+        f"/v1/spaces/{ctx.default_space_id}/entries",
+        json={
+            "kind": "memory",
+            "content": "B memory",
+            "project_id": str(project_b),
+        },
+        headers=ctx.auth_header(),
+    )
+    assert r.status_code == 201, r.text
+
+    resp = app_client.get("/v1/projects", headers=ctx.auth_header())
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert len(rows) == 2, rows
+
+    # Ordered by last_seen_at desc → B (seeded last) first, then A.
+    assert uuid.UUID(rows[0]["id"]) == project_b
+    assert uuid.UUID(rows[1]["id"]) == project_a
+
+    by_id = {uuid.UUID(r["id"]): r for r in rows}
+    assert by_id[project_a]["entry_count"] == 3
+    assert by_id[project_b]["entry_count"] == 1
+
+    # Spot-check the full row shape the dashboard depends on.
+    a_row = by_id[project_a]
+    assert a_row["display_name"] == "klio-tech/project-a"
+    assert a_row["git_remote"] == "git@github.com:klio-tech/project-a.git"
+    assert a_row["repo_root_path"] == "/Users/x/project-a"
+    assert a_row["dedicated_space_id"] is None
+    assert "created_at" in a_row
+    assert "last_seen_at" in a_row
+
+
+@pytest.mark.asyncio
+async def test_list_projects_is_tenant_scoped(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """User A's GET /v1/projects never includes User B's projects.
+    The query is scoped to `projects.user_id == ctx.user_id`; without
+    that filter the dashboard would leak another tenant's repo names."""
+    ctx_a = provision(app_client)
+    ctx_b = provision(app_client)
+
+    project_a = await seed_project(
+        db_session,
+        user_id=ctx_a.user_id,
+        git_remote="git@github.com:klio-tech/a-only.git",
+        repo_root_path="/Users/x/a-only",
+        display_name="klio-tech/a-only",
+    )
+    project_b = await seed_project(
+        db_session,
+        user_id=ctx_b.user_id,
+        git_remote="git@github.com:klio-tech/b-only.git",
+        repo_root_path="/Users/x/b-only",
+        display_name="klio-tech/b-only",
+    )
+
+    resp = app_client.get("/v1/projects", headers=ctx_a.auth_header())
+    assert resp.status_code == 200, resp.text
+    ids = {uuid.UUID(r["id"]) for r in resp.json()}
+    assert project_a in ids
+    assert project_b not in ids
+
+
+@pytest.mark.asyncio
+async def test_list_projects_empty_for_new_user(
+    app_client: TestClient,
+) -> None:
+    """A freshly-provisioned user with no projects gets `[]`, not an
+    error. The dashboard renders an empty project filter rather than
+    crashing on a 404/500."""
+    ctx = provision(app_client)
+    resp = app_client.get("/v1/projects", headers=ctx.auth_header())
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_list_projects_requires_auth(app_client: TestClient) -> None:
+    """No Bearer token → 401. Project rows are user-scoped, so
+    anonymous access is never valid — mirrors /ensure and /promote."""
+    resp = app_client.get("/v1/projects")
+    assert resp.status_code == 401, resp.text
+
+
+@pytest.mark.asyncio
+async def test_list_projects_excludes_deleted_entries_from_count(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """`entry_count` counts only non-deleted entries. A soft-deleted
+    entry (DELETE /v1/entries/{id}) must drop out of the count so the
+    dashboard's per-project totals match what the user actually sees in
+    the memories list."""
+    ctx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=ctx.user_id,
+        git_remote="git@github.com:klio-tech/count-deleted.git",
+        repo_root_path="/Users/x/count-deleted",
+        display_name="klio-tech/count-deleted",
+    )
+
+    written_ids = []
+    for i in range(2):
+        r = app_client.post(
+            f"/v1/spaces/{ctx.default_space_id}/entries",
+            json={
+                "kind": "memory",
+                "content": f"memory {i}",
+                "project_id": str(project_id),
+            },
+            headers=ctx.auth_header(),
+        )
+        assert r.status_code == 201, r.text
+        written_ids.append(r.json()["id"])
+
+    # Soft-delete one of the two tagged entries.
+    d = app_client.delete(
+        f"/v1/entries/{written_ids[0]}", headers=ctx.auth_header()
+    )
+    assert d.status_code == 204, d.text
+
+    resp = app_client.get("/v1/projects", headers=ctx.auth_header())
+    assert resp.status_code == 200, resp.text
+    by_id = {uuid.UUID(r["id"]): r for r in resp.json()}
+    assert by_id[project_id]["entry_count"] == 1

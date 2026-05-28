@@ -115,6 +115,7 @@ async def write_entry(
         id=e.id,
         space_id=e.space_id,
         session_id=e.session_id,
+        project_id=e.project_id,
         agent_id=e.agent_id,
         kind=e.kind.value,
         content=body.content,
@@ -130,6 +131,7 @@ async def list_entries(
     space_id: uuid.UUID,
     kind: str | None = None,
     since: datetime | None = None,
+    project_id: uuid.UUID | None = None,
     limit: int = 100,
     ctx: RequestContext = Depends(require_auth),
     session: AsyncSession = Depends(get_session),
@@ -157,6 +159,32 @@ async def list_entries(
         q = q.where(Entry.kind == EntryKind(kind))
     if since is not None:
         q = q.where(Entry.created_at >= since)
+    if project_id is not None:
+        # Mirror recall's B2 semantics: NULL-tagged (legacy /
+        # uncategorized) entries surface alongside the selected
+        # project's entries. A user browsing "klio-tech/klio" still
+        # sees their pre-0.7.0 global pool, which is the safe default
+        # that avoids "where did my old memories go".
+        #
+        # We take a `uuid.UUID` directly here (NOT recall's richer
+        # `project` string form that resolves remote / "any"): the
+        # trust-app dashboard always has the project UUID in hand from
+        # GET /v1/projects, so the string-resolution branches recall
+        # needs for agent-driven calls add no value on this browse
+        # path.
+        #
+        # No ownership check / 404 on an unknown project_id: the filter
+        # is a browse convenience, not a correctness-critical read. An
+        # unknown id (e.g. a stale dashboard tab) simply resolves to
+        # the NULL-tagged subset — the project-match branch matches
+        # nothing while the OR-NULL branch still applies. This leaks
+        # nothing (the outer `Entry.user_id == ctx.user_id` predicate
+        # already tenant-scopes every row) and never silently widens to
+        # cross-project results, so the harmless-subset behavior is
+        # strictly safer than 404-ing a stale-tab request.
+        q = q.where(
+            (Entry.project_id == project_id) | (Entry.project_id.is_(None))
+        )
     q = q.order_by(Entry.created_at.desc()).limit(min(max(1, limit), 500))
 
     rows = (await session.execute(q)).scalars().all()
@@ -169,6 +197,7 @@ async def list_entries(
                 id=e.id,
                 space_id=e.space_id,
                 session_id=e.session_id,
+                project_id=e.project_id,
                 agent_id=e.agent_id,
                 kind=e.kind.value,
                 content=content,
@@ -231,6 +260,7 @@ async def recall(
                 id=entry.id,
                 space_id=entry.space_id,
                 session_id=entry.session_id,
+                project_id=entry.project_id,
                 agent_id=entry.agent_id,
                 kind=entry.kind.value,
                 content=content,

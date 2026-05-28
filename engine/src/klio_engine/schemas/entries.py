@@ -26,6 +26,12 @@ class EntryResponse(BaseModel):
     id: uuid.UUID
     space_id: uuid.UUID
     session_id: uuid.UUID | None = None
+    # v0.7.0 per-project scoping. NULL for legacy / uncategorized
+    # entries (the safe default that surfaces under every project
+    # filter — see B2). The trust-app dashboard reads this to badge
+    # each memory with its project; defaulting to None keeps the wire
+    # shape backward-compatible for clients that predate UI-1.
+    project_id: uuid.UUID | None = None
     agent_id: uuid.UUID
     kind: str
     content: str

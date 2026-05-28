@@ -20,14 +20,18 @@ validation, auth scoping, and committing the transaction.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from klio_engine.api.auth import RequestContext, require_auth
 from klio_engine.audit.writer import write_audit_event
 from klio_engine.dependencies import get_session
+from klio_engine.models.entry import Entry
+from klio_engine.models.project import Project
 from klio_engine.services.projects import ProjectService
 
 router = APIRouter(prefix="/v1/projects", tags=["projects"])
@@ -65,6 +69,82 @@ class EnsureResponse(BaseModel):
     """
 
     id: uuid.UUID
+
+
+class ProjectListItem(BaseModel):
+    """One row of GET /v1/projects.
+
+    `entry_count` is the number of non-deleted entries tagged with
+    this project — the dashboard renders it as a per-project badge.
+    NULL-tagged (uncategorized) entries are deliberately NOT counted
+    here: they belong to no single project, so attributing them to one
+    would inflate every project's count and double-count the global
+    pool. The list-entries browse filter surfaces them alongside any
+    selected project (B2), but the count reflects only owned entries.
+
+    Both `git_remote` and `repo_root_path` are nullable, mirroring the
+    `projects` columns: a project keyed only by path has no remote, and
+    vice-versa. `dedicated_space_id` is None until the project is
+    promoted (F1).
+    """
+
+    id: uuid.UUID
+    display_name: str
+    git_remote: str | None
+    repo_root_path: str | None
+    dedicated_space_id: uuid.UUID | None
+    created_at: datetime
+    last_seen_at: datetime
+    entry_count: int
+
+
+@router.get("", response_model=list[ProjectListItem])
+async def list_projects(
+    ctx: RequestContext = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+) -> list[ProjectListItem]:
+    """List the caller's projects with per-project entry counts, for
+    the trust-app dashboard's project filter. Ordered by last_seen_at
+    desc (most-recently-active first) so the dashboard's default
+    selection lands on what the user is currently working on.
+    """
+    # Correlated scalar subquery for the count. Chosen over a LEFT
+    # OUTER JOIN + GROUP BY because it keeps the outer query a plain
+    # `select(Project, count)` with no GROUP BY clause to keep in sync
+    # with every selected column — adding a project column later can't
+    # silently change the grouping. The `ix_entries_project_id` index
+    # (migration 0008) serves the per-project COUNT, and the subquery
+    # runs once per returned project row (bounded by the user's project
+    # count, which is small). `coalesce` is unnecessary: COUNT over an
+    # empty match returns 0, not NULL.
+    entry_count = (
+        select(func.count(Entry.id))
+        .where(
+            Entry.project_id == Project.id,
+            Entry.deleted_at.is_(None),
+        )
+        .correlate(Project)
+        .scalar_subquery()
+    )
+    stmt = (
+        select(Project, entry_count.label("entry_count"))
+        .where(Project.user_id == ctx.user_id)
+        .order_by(Project.last_seen_at.desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        ProjectListItem(
+            id=project.id,
+            display_name=project.display_name,
+            git_remote=project.git_remote,
+            repo_root_path=project.repo_root_path,
+            dedicated_space_id=project.dedicated_space_id,
+            created_at=project.created_at,
+            last_seen_at=project.last_seen_at,
+            entry_count=count,
+        )
+        for project, count in rows
+    ]
 
 
 @router.post(
