@@ -645,3 +645,25 @@ test("Claude Code cloud wiring installs the 3 capture hooks on a fresh machine",
     "UserPromptSubmit",
   ]);
 });
+
+test("Claude Code cloud wiring is idempotent across re-runs (no duplicate hooks)", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".claude"));
+  const { fn } = recordingClaudeCli();
+
+  // Run cloud wiring twice — the second run must strip the prior cloud
+  // hooks (their command contains the `klio hook` marker) before
+  // re-installing, converging to exactly one block/hook per event.
+  for (let i = 0; i < 2; i++) {
+    await wireCloudAgents({ apiKey: "k", agentId: "a", log: () => {}, claudeCliFn: fn });
+  }
+
+  const settings = JSON.parse(
+    readFileSync(join(home, ".claude", "settings.json"), "utf8"),
+  );
+  assertCloudHooksInstalled(settings);
+  for (const event of ["SessionStart", "UserPromptSubmit", "Stop"]) {
+    assert.equal(settings.hooks[event].length, 1, `${event}: one block`);
+    assert.equal(settings.hooks[event][0].hooks.length, 1, `${event}: one hook`);
+  }
+});
