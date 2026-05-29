@@ -4,6 +4,38 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-05-29
+
+### Added — Klio Cloud onboarding (`klio init` cloud-default mode)
+
+`klio init` now opens with a **Cloud (default) / Local** choice. Cloud
+mode connects your agents to the hosted Klio brain at
+`https://mcp.klio.tech` in seconds — **no Docker, no local engine, no
+model setup**:
+
+  - **Mode prompt** at the top of `init` (default Cloud on Enter), plus
+    `--cloud` / `--local` flags to skip the prompt for non-interactive
+    runs.
+  - **Cloud flow:** paste your API key → it's verified against
+    `GET https://mcp.klio.tech/verify` (clear messages for an invalid
+    key or one missing the `memory` scope) → your agents are wired and
+    you're done. Phases 1–3 + 5 of the local flow (Docker preflight,
+    model provider, stack bring-up, curator) are skipped — the hosted
+    brain already provides embeddings, storage, and curation.
+  - **Agent wiring** writes a remote **Streamable-HTTP** MCP entry
+    (`https://mcp.klio.tech/mcp` with `X-Vex-Key` + a stable
+    `X-Vex-Agent` header) to Claude Code, Cursor, and Codex. Existing
+    config + peer MCP servers are preserved; every file is backed up
+    before patching. The API key is masked (last-4) in all output.
+
+**Engine / MCP server (Vex-hosted):** the hosted brain exposes the 7
+Klio tools (`recall`, `remember`, `observe`, `plan`, `decide`, `note`,
+`space`) over MCP, gated by a dedicated `memory` API-key scope, plus a
+lightweight `GET /verify` endpoint used by the cloud onboarding flow.
+
+The local-first flow is unchanged — selecting **Local** runs the exact
+same six-phase Docker onboarding as before.
+
 ## [0.7.1] — 2026-05-28
 
 ### Added — project surfaces in the trust-app dashboard
