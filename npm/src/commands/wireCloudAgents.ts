@@ -14,13 +14,18 @@
 // and the shared file/CLI/allowlist primitives. The local path remains
 // byte-for-byte unchanged.
 //
-// Coverage: Claude Code, Cursor, and Codex. Any other detected agent
-// is skipped cleanly with a note (no cloud writer implemented yet) so
-// onboarding never silently drops an agent.
+// Coverage: Claude Code, Cursor, Codex, Claude Desktop, OpenCode, and
+// OpenClaw. Agents whose config can speak remote-HTTP-with-headers
+// natively (Cursor, Codex, OpenCode) get a direct HTTP MCP entry;
+// agents that only accept stdio servers (Claude Desktop, OpenClaw) get
+// an `mcp-remote` stdio bridge that forwards both auth headers upstream.
+// Claude Code uses its own CLI's `http` transport. Any other detected
+// agent is skipped cleanly with a note (no cloud writer implemented
+// yet) so onboarding never silently drops an agent.
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { join } from "node:path";
 
 import { allAdapters } from "../adapters/types.js";
@@ -35,6 +40,7 @@ import {
   CLOUD_MCP_URL,
   VEX_AGENT_HEADER,
   VEX_KEY_HEADER,
+  mcpRemoteBridge,
 } from "../cloud.js";
 
 /** Inputs for `wireCloudAgents`. */
@@ -142,6 +148,9 @@ const CLOUD_WRITERS: Record<string, CloudWriter> = {
   "claude-code": writeClaudeCodeCloud,
   cursor: writeCursorCloud,
   codex: writeCodexCloud,
+  "claude-desktop": writeClaudeDesktopCloud,
+  opencode: writeOpenCodeCloud,
+  openclaw: writeOpenClawCloud,
 };
 
 // ---------------------------------------------------------------------
@@ -164,7 +173,11 @@ const CLOUD_WRITERS: Record<string, CloudWriter> = {
  * The 7-tool allowlist is carried over from the local adapter so a
  * first-time cloud user doesn't face a permission prompt per klio tool.
  * We patch ONLY permissions.allow in ~/.claude/settings.json (backed
- * up first) — no hooks, unlike the local adapter.
+ * up first) — and, crucially, STRIP any lingering local-mode klio hooks
+ * (the six `docker exec ... klio hook ...` entries a prior `klio init`
+ * wrote) so a cloud user who has stopped Docker doesn't hit a hook
+ * error on every Claude Code event. Unlike the local adapter we never
+ * WRITE hooks here.
  */
 async function writeClaudeCodeCloud(args: CloudWriterArgs): Promise<void> {
   const payload = {
@@ -199,21 +212,25 @@ async function writeClaudeCodeCloud(args: CloudWriterArgs): Promise<void> {
     );
   }
 
-  patchClaudeAllowList();
+  patchClaudeSettings();
 }
 
 /**
- * Append klio's 7 MCP tool names to ~/.claude/settings.json
- * permissions.allow if not already present. Backup-on-write; every
- * other key under settings (and the user's prior allow/deny/ask lists)
- * is preserved.
+ * Single backup + read + write pass over ~/.claude/settings.json that
+ * (1) appends klio's 7 MCP tool names to permissions.allow and
+ * (2) strips any lingering local-mode klio hooks. Both edits share one
+ * backup and one write so a cloud re-run touches the file at most once.
  *
- * A re-implementation of the local adapter's `mergeKlioAllowList`
- * behaviour scoped to the settings file only — we deliberately do NOT
- * import the local adapter's private helper (it also strips legacy
- * mcpServers + writes hooks, neither of which belongs in cloud mode).
+ * permissions: a re-implementation of the local adapter's
+ * `mergeKlioAllowList` scoped to the settings file only — we
+ * deliberately do NOT import the local adapter's private helper (it
+ * also strips legacy mcpServers + WRITES hooks, neither of which
+ * belongs in cloud mode).
+ *
+ * hooks: see `stripKlioHooks`. No-op on a fresh machine (no settings
+ * file / no klio hooks).
  */
-function patchClaudeAllowList(): void {
+function patchClaudeSettings(): void {
   const path = join(homedir(), ".claude", "settings.json");
   const settings = readJson(path);
   backupFile(path);
@@ -238,7 +255,80 @@ function patchClaudeAllowList(): void {
   permissions["allow"] = existing;
   settings["permissions"] = permissions;
 
+  stripKlioHooks(settings);
+
   writeJson(path, settings);
+}
+
+/**
+ * Remove Klio's capture hooks from a Claude Code settings object in
+ * place, leaving every non-Klio hook intact.
+ *
+ * A prior LOCAL `klio init` writes six hook entries whose command is
+ * `docker exec -i <container> klio hook <subcmd>` across the
+ * SessionStart / UserPromptSubmit / PreToolUse / PostToolUse /
+ * SubagentStop / Stop events. Once a user switches to cloud mode and
+ * stops Docker, those commands fail on every event. We match a hook
+ * entry as "Klio's" when its `command` string mentions either
+ * `klio hook` (the subcommand the local adapter writes) or
+ * `klio-bridge` (the default bridge container name) — both are
+ * Klio-specific and won't collide with a user's own hooks.
+ *
+ * We prune matching entries from each event's matcher blocks, drop a
+ * block once its `hooks` array is empty, drop an event once it has no
+ * blocks, and drop the top-level `hooks` key once it's empty — so the
+ * file is left exactly as it would be had Klio never written hooks.
+ * No-op when there are no hooks at all (fresh machine).
+ */
+function stripKlioHooks(settings: Record<string, unknown>): void {
+  const hooks = settings["hooks"];
+  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) {
+    return;
+  }
+  const hookMap = hooks as Record<string, unknown>;
+
+  for (const event of Object.keys(hookMap)) {
+    const blocks = hookMap[event];
+    if (!Array.isArray(blocks)) continue;
+
+    const keptBlocks: unknown[] = [];
+    for (const block of blocks) {
+      if (typeof block !== "object" || block === null || Array.isArray(block)) {
+        keptBlocks.push(block);
+        continue;
+      }
+      const b = block as Record<string, unknown>;
+      const entries = b["hooks"];
+      if (!Array.isArray(entries)) {
+        keptBlocks.push(block);
+        continue;
+      }
+      const keptEntries = entries.filter((entry) => !isKlioHookEntry(entry));
+      if (keptEntries.length === 0) continue; // whole block was Klio's
+      keptBlocks.push({ ...b, hooks: keptEntries });
+    }
+
+    if (keptBlocks.length === 0) delete hookMap[event];
+    else hookMap[event] = keptBlocks;
+  }
+
+  if (Object.keys(hookMap).length === 0) delete settings["hooks"];
+  else settings["hooks"] = hookMap;
+}
+
+/**
+ * True when a single hook entry's `command` is one Klio wrote in local
+ * mode — identified by the `klio hook` subcommand marker or the
+ * `klio-bridge` container name. Non-string / malformed entries are
+ * never treated as Klio's (we preserve anything we don't recognise).
+ */
+function isKlioHookEntry(entry: unknown): boolean {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return false;
+  }
+  const command = (entry as Record<string, unknown>)["command"];
+  if (typeof command !== "string") return false;
+  return command.includes("klio hook") || command.includes("klio-bridge");
 }
 
 // ---------------------------------------------------------------------
@@ -308,6 +398,161 @@ function writeCodexCloud(args: CloudWriterArgs): Promise<void> {
   });
 
   writeFileSync(path, next, { mode: 0o644 });
+  return Promise.resolve();
+}
+
+// ---------------------------------------------------------------------
+// Claude Desktop
+// ---------------------------------------------------------------------
+
+/**
+ * Patch Claude Desktop's `claude_desktop_config.json` so the desktop
+ * app reaches the hosted brain on next launch.
+ *
+ * Claude Desktop's config only understands STDIO MCP servers
+ * (`{command, args}` under `mcpServers`) — it has no native
+ * remote-HTTP-with-headers transport. So we register an `mcp-remote`
+ * stdio bridge that forwards both auth headers upstream:
+ *
+ *   "klio": { "command": "npx", "args": ["-y","mcp-remote",
+ *      CLOUD_MCP_URL,"--header","X-Vex-Key: <key>",
+ *      "--header","X-Vex-Agent: <agent>"] }
+ *
+ * The config path is resolved per-OS exactly as the local
+ * ClaudeDesktopAdapter does (macOS Application Support, Windows
+ * APPDATA, else XDG). Backup-on-write; peer mcpServers untouched;
+ * re-running replaces only the `klio` entry.
+ */
+function writeClaudeDesktopCloud(args: CloudWriterArgs): Promise<void> {
+  const path = claudeDesktopConfigPath();
+
+  const settings = readJson(path);
+  backupFile(path);
+
+  const servers =
+    (settings["mcpServers"] as Record<string, unknown> | undefined) ?? {};
+  servers["klio"] = mcpRemoteBridge(args.apiKey, args.agentId);
+  settings["mcpServers"] = servers;
+
+  writeJson(path, settings);
+  return Promise.resolve();
+}
+
+/**
+ * Per-OS Claude Desktop config path. Mirrors
+ * ClaudeDesktopAdapter.configPath so cloud + local agree byte-for-byte
+ * on where the file lives.
+ */
+function claudeDesktopConfigPath(): string {
+  const p = platform();
+  if (p === "darwin") {
+    return join(
+      homedir(),
+      "Library",
+      "Application Support",
+      "Claude",
+      "claude_desktop_config.json",
+    );
+  }
+  if (p === "win32") {
+    const appData = process.env.APPDATA;
+    const dir = appData
+      ? join(appData, "Claude")
+      : join(homedir(), "AppData", "Roaming", "Claude");
+    return join(dir, "claude_desktop_config.json");
+  }
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const dir = xdg ? join(xdg, "Claude") : join(homedir(), ".config", "Claude");
+  return join(dir, "claude_desktop_config.json");
+}
+
+// ---------------------------------------------------------------------
+// OpenCode
+// ---------------------------------------------------------------------
+
+/**
+ * Patch OpenCode's `opencode.json` with a native remote MCP entry.
+ *
+ * OpenCode supports remote-HTTP MCP servers directly via a
+ * `{type:"remote", url, headers, enabled}` shape under the top-level
+ * `mcp` key (per https://opencode.ai/docs/mcp-servers), so — unlike
+ * Claude Desktop — no `mcp-remote` bridge is needed:
+ *
+ *   "mcp": { "klio": { "type":"remote", "url":CLOUD_MCP_URL,
+ *      "enabled":true, "headers":{
+ *        "X-Vex-Key":<key>,"X-Vex-Agent":<agent>}}}
+ *
+ * Note the `mcp` key (OpenCode's own) vs. `mcpServers` (Claude/Cursor)
+ * — matched from the local OpenCodeAdapter. Config path honours
+ * $XDG_CONFIG_HOME. Backup-on-write; peer servers + `$schema`
+ * preserved; re-running replaces only the `klio` entry.
+ */
+function writeOpenCodeCloud(args: CloudWriterArgs): Promise<void> {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const dir = xdg ? join(xdg, "opencode") : join(homedir(), ".config", "opencode");
+  const path = join(dir, "opencode.json");
+
+  const settings = readJson(path);
+  backupFile(path);
+
+  const mcp = (settings["mcp"] as Record<string, unknown> | undefined) ?? {};
+  mcp["klio"] = {
+    type: "remote",
+    url: CLOUD_MCP_URL,
+    enabled: true,
+    headers: {
+      [VEX_KEY_HEADER]: args.apiKey,
+      [VEX_AGENT_HEADER]: args.agentId,
+    },
+  };
+  settings["mcp"] = mcp;
+  if (!settings["$schema"]) {
+    settings["$schema"] = "https://opencode.ai/config.json";
+  }
+
+  writeJson(path, settings);
+  return Promise.resolve();
+}
+
+// ---------------------------------------------------------------------
+// OpenClaw
+// ---------------------------------------------------------------------
+
+/**
+ * Patch OpenClaw's `~/.openclaw/config.json` with an `mcp-remote`
+ * stdio bridge to the hosted brain.
+ *
+ * OpenClaw's config (and its `openclaw mcp set` CLI) declares MCP
+ * servers in the STDIO shape `mcp.servers.<name>: {command, args, env}`
+ * — the local OpenClawAdapter writes exactly that — with no documented
+ * remote-HTTP-with-headers transport. So, like Claude Desktop, we
+ * register an `mcp-remote` bridge that carries both auth headers:
+ *
+ *   "mcp": { "servers": { "klio": { "command":"npx", "args":[
+ *      "-y","mcp-remote",CLOUD_MCP_URL,
+ *      "--header","X-Vex-Key: <key>",
+ *      "--header","X-Vex-Agent: <agent>"] }}}
+ *
+ * We write the config file directly (rather than shelling out to the
+ * `openclaw` CLI) to keep the cloud path subprocess-free and
+ * deterministic in tests — the JSON shape matches the adapter's
+ * documented file-write fallback. Backup-on-write; peer servers
+ * untouched; re-running replaces only the `klio` entry.
+ */
+function writeOpenClawCloud(args: CloudWriterArgs): Promise<void> {
+  const path = join(homedir(), ".openclaw", "config.json");
+
+  const settings = readJson(path);
+  backupFile(path);
+
+  const mcp = (settings["mcp"] as Record<string, unknown> | undefined) ?? {};
+  const servers =
+    (mcp["servers"] as Record<string, unknown> | undefined) ?? {};
+  servers["klio"] = mcpRemoteBridge(args.apiKey, args.agentId);
+  mcp["servers"] = servers;
+  settings["mcp"] = mcp;
+
+  writeJson(path, settings);
   return Promise.resolve();
 }
 

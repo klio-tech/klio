@@ -18,6 +18,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { platform } from "node:os";
+
 import {
   wireCloudAgents,
   type ClaudeCliFn,
@@ -49,6 +51,27 @@ function withFakeHome(t: TestCtx): string {
     }
   });
   return home;
+}
+
+/**
+ * The Claude Desktop config directory under a fake HOME, resolved per
+ * OS exactly as both the local adapter and the cloud writer do. Lets
+ * the desktop test create the dir (so installed() fires) and then read
+ * the written config back regardless of platform.
+ */
+function claudeDesktopDir(home: string): string {
+  const p = platform();
+  if (p === "darwin") {
+    return join(home, "Library", "Application Support", "Claude");
+  }
+  if (p === "win32") {
+    const appData = process.env.APPDATA;
+    return appData
+      ? join(appData, "Claude")
+      : join(home, "AppData", "Roaming", "Claude");
+  }
+  const xdg = process.env.XDG_CONFIG_HOME;
+  return xdg ? join(xdg, "Claude") : join(home, ".config", "Claude");
 }
 
 /** A Claude-CLI stub that records every invocation and succeeds. */
@@ -199,17 +222,11 @@ test("Codex: writes remote-HTTP TOML with url + http_headers, no docker", async 
   assert.doesNotMatch(body, /command = "docker"/);
 });
 
-test("detected agent without a cloud writer is skipped cleanly", async (t) => {
+test("opencode is now wired (no longer in the skip list)", async (t) => {
   const home = withFakeHome(t);
-  // OpenCode is a real adapter with no cloud writer yet. Its
-  // installed() checks $XDG_CONFIG_HOME/opencode or ~/.config/opencode.
-  // Pin XDG to the fake home so the dev environment can't leak in.
-  const prevXdg = process.env.XDG_CONFIG_HOME;
-  delete process.env.XDG_CONFIG_HOME;
-  t.after(() => {
-    if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = prevXdg;
-  });
+  // withFakeHome pins XDG_CONFIG_HOME under the fake home, so
+  // OpenCode's installed() check (looks under $XDG_CONFIG_HOME/opencode)
+  // is hermetic.
   mkdirSync(join(home, ".config", "opencode"), { recursive: true });
 
   const { fn } = recordingClaudeCli();
@@ -221,9 +238,12 @@ test("detected agent without a cloud writer is skipped cleanly", async (t) => {
     claudeCliFn: fn,
   });
 
-  assert.ok(result.skipped.includes("opencode"));
-  assert.deepEqual(result.configured, []);
-  assert.match(lines.join("\n"), /opencode.*skipping/i);
+  assert.ok(
+    result.configured.includes("opencode"),
+    "opencode now has a cloud writer",
+  );
+  assert.deepEqual(result.skipped, [], "no agent left in the skip list");
+  assert.doesNotMatch(lines.join("\n"), /opencode.*skipping/i);
 });
 
 test("no detected agents → empty result, no throw", async (t) => {
@@ -255,4 +275,326 @@ test("multiple detected agents all get wired", async (t) => {
   assert.ok(result.configured.includes("codex"));
   assert.equal(existsSync(join(home, ".cursor", "mcp.json")), true);
   assert.equal(existsSync(join(home, ".codex", "config.toml")), true);
+});
+
+// ---------------------------------------------------------------------
+// Claude Desktop — mcp-remote stdio bridge (no native HTTP-with-headers)
+// ---------------------------------------------------------------------
+
+test("Claude Desktop: writes mcp-remote stdio bridge with URL + both headers", async (t) => {
+  const home = withFakeHome(t);
+  const dir = claudeDesktopDir(home);
+  mkdirSync(dir, { recursive: true });
+
+  const result = await wireCloudAgents({
+    apiKey: "sk-desk",
+    agentId: "klio-desktop",
+    log: () => {},
+  });
+
+  assert.ok(result.configured.includes("claude-desktop"));
+
+  const body = JSON.parse(
+    readFileSync(join(dir, "claude_desktop_config.json"), "utf8"),
+  );
+  const klio = body.mcpServers.klio;
+  assert.equal(klio.command, "npx");
+  assert.deepEqual(klio.args, [
+    "-y",
+    "mcp-remote",
+    CLOUD_MCP_URL,
+    "--header",
+    "X-Vex-Key: sk-desk",
+    "--header",
+    "X-Vex-Agent: klio-desktop",
+  ]);
+  // Bridge mode: no native url/headers fields on the entry itself.
+  assert.equal(klio.url, undefined);
+  assert.equal(klio.headers, undefined);
+});
+
+test("Claude Desktop: preserves peer servers and backs up before patching", async (t) => {
+  const home = withFakeHome(t);
+  const dir = claudeDesktopDir(home);
+  mkdirSync(dir, { recursive: true });
+  const { writeFileSync, readdirSync } = await import("node:fs");
+  writeFileSync(
+    join(dir, "claude_desktop_config.json"),
+    JSON.stringify({ mcpServers: { fs: { command: "/opt/fs" } } }, null, 2),
+  );
+
+  await wireCloudAgents({ apiKey: "k", agentId: "a", log: () => {} });
+
+  const body = JSON.parse(
+    readFileSync(join(dir, "claude_desktop_config.json"), "utf8"),
+  );
+  assert.ok(body.mcpServers.fs, "peer server preserved");
+  assert.equal(body.mcpServers.klio.command, "npx");
+
+  const backups = readdirSync(dir).filter((f) =>
+    f.startsWith("claude_desktop_config.json.klio-backup-"),
+  );
+  assert.equal(backups.length, 1, "must back up before patching");
+});
+
+// ---------------------------------------------------------------------
+// OpenCode — native remote-HTTP MCP (type: "remote")
+// ---------------------------------------------------------------------
+
+test("OpenCode: writes native remote MCP entry with url + both headers", async (t) => {
+  const home = withFakeHome(t);
+  // withFakeHome pins XDG_CONFIG_HOME under the fake home.
+  const dir = join(home, ".config", "opencode");
+  mkdirSync(dir, { recursive: true });
+
+  const result = await wireCloudAgents({
+    apiKey: "sk-oc",
+    agentId: "klio-oc",
+    log: () => {},
+  });
+
+  assert.ok(result.configured.includes("opencode"));
+
+  const body = JSON.parse(readFileSync(join(dir, "opencode.json"), "utf8"));
+  const klio = body.mcp.klio;
+  assert.equal(klio.type, "remote");
+  assert.equal(klio.url, CLOUD_MCP_URL);
+  assert.equal(klio.enabled, true);
+  assert.equal(klio.headers["X-Vex-Key"], "sk-oc");
+  assert.equal(klio.headers["X-Vex-Agent"], "klio-oc");
+  // Native HTTP transport — never a stdio/docker command array.
+  assert.equal(klio.command, undefined);
+  assert.equal(body["$schema"], "https://opencode.ai/config.json");
+});
+
+test("OpenCode: preserves peer servers + $schema and backs up before patching", async (t) => {
+  const home = withFakeHome(t);
+  const dir = join(home, ".config", "opencode");
+  mkdirSync(dir, { recursive: true });
+  const { writeFileSync, readdirSync } = await import("node:fs");
+  writeFileSync(
+    join(dir, "opencode.json"),
+    JSON.stringify(
+      {
+        $schema: "https://opencode.ai/config.json",
+        mcp: { other: { type: "local", command: ["foo"] } },
+      },
+      null,
+      2,
+    ),
+  );
+
+  await wireCloudAgents({ apiKey: "k", agentId: "a", log: () => {} });
+
+  const body = JSON.parse(readFileSync(join(dir, "opencode.json"), "utf8"));
+  assert.ok(body.mcp.other, "peer server preserved");
+  assert.equal(body.mcp.klio.url, CLOUD_MCP_URL);
+
+  const backups = readdirSync(dir).filter((f) =>
+    f.startsWith("opencode.json.klio-backup-"),
+  );
+  assert.equal(backups.length, 1, "must back up before patching");
+});
+
+// ---------------------------------------------------------------------
+// OpenClaw — mcp-remote stdio bridge (mcp.servers.<name>)
+// ---------------------------------------------------------------------
+
+test("OpenClaw: writes mcp-remote stdio bridge under mcp.servers with both headers", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".openclaw"));
+
+  const result = await wireCloudAgents({
+    apiKey: "sk-claw",
+    agentId: "klio-claw",
+    log: () => {},
+  });
+
+  assert.ok(result.configured.includes("openclaw"));
+
+  const body = JSON.parse(
+    readFileSync(join(home, ".openclaw", "config.json"), "utf8"),
+  );
+  const klio = body.mcp.servers.klio;
+  assert.equal(klio.command, "npx");
+  assert.deepEqual(klio.args, [
+    "-y",
+    "mcp-remote",
+    CLOUD_MCP_URL,
+    "--header",
+    "X-Vex-Key: sk-claw",
+    "--header",
+    "X-Vex-Agent: klio-claw",
+  ]);
+});
+
+test("OpenClaw: preserves peer servers and backs up before patching", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".openclaw"));
+  const { writeFileSync, readdirSync } = await import("node:fs");
+  writeFileSync(
+    join(home, ".openclaw", "config.json"),
+    JSON.stringify(
+      { mcp: { servers: { fs: { command: "docker", args: [] } } } },
+      null,
+      2,
+    ),
+  );
+
+  await wireCloudAgents({ apiKey: "k", agentId: "a", log: () => {} });
+
+  const body = JSON.parse(
+    readFileSync(join(home, ".openclaw", "config.json"), "utf8"),
+  );
+  assert.ok(body.mcp.servers.fs, "peer server preserved");
+  assert.equal(body.mcp.servers.klio.command, "npx");
+
+  const backups = readdirSync(join(home, ".openclaw")).filter((f) =>
+    f.startsWith("config.json.klio-backup-"),
+  );
+  assert.equal(backups.length, 1, "must back up before patching");
+});
+
+// ---------------------------------------------------------------------
+// Hook cleanup — strip stale local klio hooks during cloud Claude Code wiring
+// ---------------------------------------------------------------------
+
+test("Claude Code cloud wiring strips stale local klio hooks, keeps non-klio hooks", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".claude"));
+  const { writeFileSync, readdirSync } = await import("node:fs");
+
+  // A settings.json a prior LOCAL `klio init` left behind: six docker
+  // klio hooks across several events, plus one unrelated user hook.
+  const priorSettings = {
+    hooks: {
+      SessionStart: [
+        {
+          matcher: "*",
+          hooks: [
+            {
+              type: "command",
+              command: "docker exec -i klio-bridge klio hook session-start",
+            },
+          ],
+        },
+      ],
+      PreToolUse: [
+        {
+          matcher: "Bash|Edit|Write",
+          hooks: [
+            {
+              type: "command",
+              command: "docker exec -i klio-bridge klio hook pre-tool",
+            },
+            // A peer (non-klio) hook sharing the same matcher block.
+            { type: "command", command: "/usr/local/bin/my-linter" },
+          ],
+        },
+      ],
+      // An entirely non-klio event/block.
+      PostToolUse: [
+        {
+          matcher: "*",
+          hooks: [{ type: "command", command: "echo hi" }],
+        },
+      ],
+    },
+  };
+  writeFileSync(
+    join(home, ".claude", "settings.json"),
+    JSON.stringify(priorSettings, null, 2),
+  );
+
+  const { fn } = recordingClaudeCli();
+  const result = await wireCloudAgents({
+    apiKey: "sk-cc",
+    agentId: "klio-mac",
+    log: () => {},
+    claudeCliFn: fn,
+  });
+
+  assert.deepEqual(result.configured, ["claude-code"]);
+
+  const settings = JSON.parse(
+    readFileSync(join(home, ".claude", "settings.json"), "utf8"),
+  );
+
+  // The SessionStart event was klio-only → event removed entirely.
+  assert.equal(settings.hooks.SessionStart, undefined);
+  // PreToolUse block kept, but only the non-klio linter survives.
+  const pre = settings.hooks.PreToolUse;
+  assert.equal(pre.length, 1);
+  assert.equal(pre[0].hooks.length, 1);
+  assert.equal(pre[0].hooks[0].command, "/usr/local/bin/my-linter");
+  // The unrelated PostToolUse hook is untouched.
+  assert.equal(settings.hooks.PostToolUse[0].hooks[0].command, "echo hi");
+
+  // No klio hook command survives anywhere in the file.
+  const serialized = JSON.stringify(settings);
+  assert.doesNotMatch(serialized, /klio hook/);
+  assert.doesNotMatch(serialized, /klio-bridge/);
+
+  // Allowlist behaviour still intact.
+  assert.ok(settings.permissions.allow.includes("mcp__klio__recall"));
+
+  // Backup taken before the strip.
+  const backups = readdirSync(join(home, ".claude")).filter((f) =>
+    f.startsWith("settings.json.klio-backup-"),
+  );
+  assert.equal(backups.length, 1, "must back up before stripping hooks");
+});
+
+test("Claude Code cloud wiring is a no-op for hooks when none are klio's", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".claude"));
+  const { writeFileSync } = await import("node:fs");
+
+  const priorSettings = {
+    hooks: {
+      PostToolUse: [
+        { matcher: "*", hooks: [{ type: "command", command: "echo hi" }] },
+      ],
+    },
+  };
+  writeFileSync(
+    join(home, ".claude", "settings.json"),
+    JSON.stringify(priorSettings, null, 2),
+  );
+
+  const { fn } = recordingClaudeCli();
+  const result = await wireCloudAgents({
+    apiKey: "k",
+    agentId: "a",
+    log: () => {},
+    claudeCliFn: fn,
+  });
+
+  assert.deepEqual(result.configured, ["claude-code"]);
+
+  const settings = JSON.parse(
+    readFileSync(join(home, ".claude", "settings.json"), "utf8"),
+  );
+  // Non-klio hooks survive intact, no crash.
+  assert.equal(settings.hooks.PostToolUse[0].hooks[0].command, "echo hi");
+  assert.ok(settings.permissions.allow.includes("mcp__klio__recall"));
+});
+
+test("Claude Code cloud wiring writes no hooks on a fresh machine", async (t) => {
+  const home = withFakeHome(t);
+  mkdirSync(join(home, ".claude"));
+  const { fn } = recordingClaudeCli();
+
+  await wireCloudAgents({
+    apiKey: "k",
+    agentId: "a",
+    log: () => {},
+    claudeCliFn: fn,
+  });
+
+  const settings = JSON.parse(
+    readFileSync(join(home, ".claude", "settings.json"), "utf8"),
+  );
+  // No hooks key materialised from nothing.
+  assert.equal(settings.hooks, undefined, "cloud mode writes no hooks");
 });

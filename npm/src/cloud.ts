@@ -42,6 +42,40 @@ export const VEX_KEY_HEADER = "X-Vex-Key";
 export const VEX_AGENT_HEADER = "X-Vex-Agent";
 
 /**
+ * Build the stdio-bridge command+args that point a host with NO native
+ * remote-HTTP-with-headers MCP support (Claude Desktop, OpenClaw) at the
+ * hosted brain through the `mcp-remote` npm bridge.
+ *
+ * `mcp-remote` connects to a remote Streamable-HTTP MCP server over a
+ * local stdio process, forwarding each `--header "Name: Value"` pair on
+ * every upstream request. `npx -y` resolves+runs it without a global
+ * install. We pass both auth headers in the documented
+ * `--header "Name: Value"` flag form so the bridge carries the same
+ * `X-Vex-Key` / `X-Vex-Agent` headers a native HTTP client would.
+ *
+ * Returned as a `{ command, args }` pair so each adapter's writer can
+ * render it into whatever stdio shape that host expects (Claude
+ * Desktop's `{command, args}`, OpenClaw's `{command, args, env}`).
+ */
+export function mcpRemoteBridge(
+  apiKey: string,
+  agentId: string,
+): { command: string; args: string[] } {
+  return {
+    command: "npx",
+    args: [
+      "-y",
+      "mcp-remote",
+      CLOUD_MCP_URL,
+      "--header",
+      `${VEX_KEY_HEADER}: ${apiKey}`,
+      "--header",
+      `${VEX_AGENT_HEADER}: ${agentId}`,
+    ],
+  };
+}
+
+/**
  * Outcome of `verifyCloudKey`. Tagged so the caller (initCloud) can
  * branch on the four cases without re-inspecting the HTTP Response:
  *
