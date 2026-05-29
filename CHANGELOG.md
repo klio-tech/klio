@@ -4,6 +4,22 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.2] — 2026-05-29
+
+### Added — PostToolUse capture (fuller session capture)
+
+Cloud mode now captures **every tool call** as a lightweight `observation`
+(tool name + truncated input/response), restoring parity with the local
+bridge so the brain reflects what the agent actually *did*, not just
+"remember that…" phrases and end-of-session facts. `klio init` installs a
+4th Claude Code hook (`PostToolUse → npx -y @klio-tech/klio hook
+post-tool`); observations are tagged `source: hook-tool` and the curator
+condenses them into facts over time. Re-run `klio init` to install it.
+
+PreToolUse recall is still intentionally omitted in cloud mode — a remote
+recall before every tool action would add noticeable latency, and
+SessionStart already injects context.
+
 ## [0.9.1] — 2026-05-29
 
 ### Changed — per-tool agent attribution
