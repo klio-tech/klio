@@ -170,7 +170,7 @@ test("Claude Code: registers HTTP transport via add-json + allowlists tools", as
   // No stdio command/args — this is the HTTP transport.
   assert.equal(payload.command, undefined);
 
-  // permissions.allow carries the 7 klio tools; the 3 cloud capture
+  // permissions.allow carries the 7 klio tools; the 4 cloud capture
   // hooks are installed pointing at the `klio hook` client.
   const settings = JSON.parse(
     readFileSync(join(home, ".claude", "settings.json"), "utf8"),
@@ -186,12 +186,15 @@ test("Claude Code: registers HTTP transport via add-json + allowlists tools", as
     "npx -y @klio-tech/klio hook user-prompt",
   );
   assert.equal(
+    settings.hooks.PostToolUse[0].hooks[0].command,
+    "npx -y @klio-tech/klio hook post-tool",
+  );
+  assert.equal(
     settings.hooks.Stop[0].hooks[0].command,
     "npx -y @klio-tech/klio hook session-stop",
   );
-  // Cloud captures a subset: no Pre/PostToolUse round-trips.
+  // Cloud still skips the per-tool recall round-trip (PreToolUse).
   assert.equal(settings.hooks.PreToolUse, undefined);
-  assert.equal(settings.hooks.PostToolUse, undefined);
 });
 
 test("Claude Code: non-zero add-json exit is reported as an error, not a throw", async (t) => {
@@ -471,12 +474,13 @@ test("OpenClaw: preserves peer servers and backs up before patching", async (t) 
 });
 
 // ---------------------------------------------------------------------
-// Hooks — strip stale local klio hooks, install the 3 cloud capture hooks
+// Hooks — strip stale local klio hooks, install the 4 cloud capture hooks
 // ---------------------------------------------------------------------
 
 const CLOUD_HOOK_COMMANDS = {
   SessionStart: "npx -y @klio-tech/klio hook session-start",
   UserPromptSubmit: "npx -y @klio-tech/klio hook user-prompt",
+  PostToolUse: "npx -y @klio-tech/klio hook post-tool",
   Stop: "npx -y @klio-tech/klio hook session-stop",
 };
 
@@ -567,10 +571,20 @@ test("Claude Code cloud wiring strips stale local klio hooks, installs cloud hoo
   assert.equal(pre.length, 1);
   assert.equal(pre[0].hooks.length, 1);
   assert.equal(pre[0].hooks[0].command, "/usr/local/bin/my-linter");
-  // The unrelated PostToolUse hook is untouched (and not added by cloud).
-  assert.equal(settings.hooks.PostToolUse[0].hooks[0].command, "echo hi");
+  // The unrelated PostToolUse hook is preserved at its original position;
+  // cloud now ALSO installs its own PostToolUse capture hook alongside it.
+  const post = settings.hooks.PostToolUse;
+  assert.equal(post[0].hooks[0].command, "echo hi");
+  assert.ok(
+    post.some((b: { hooks: Array<{ command: string }> }) =>
+      b.hooks.some(
+        (h) => h.command === "npx -y @klio-tech/klio hook post-tool",
+      ),
+    ),
+    "cloud PostToolUse capture hook installed alongside the peer hook",
+  );
 
-  // The 3 cloud capture hooks are installed; no DOCKER klio hook survives.
+  // The 4 cloud capture hooks are installed; no DOCKER klio hook survives.
   assertCloudHooksInstalled(settings);
   const serialized = JSON.stringify(settings);
   assert.doesNotMatch(serialized, /docker exec/);
@@ -616,13 +630,14 @@ test("Claude Code cloud wiring installs cloud hooks alongside non-klio hooks", a
   const settings = JSON.parse(
     readFileSync(join(home, ".claude", "settings.json"), "utf8"),
   );
-  // Non-klio hooks survive intact; the 3 cloud hooks are added.
+  // Non-klio hooks survive intact; the 4 cloud hooks are added (the peer
+  // `echo hi` PostToolUse block stays first, the klio block is appended).
   assert.equal(settings.hooks.PostToolUse[0].hooks[0].command, "echo hi");
   assertCloudHooksInstalled(settings);
   assert.ok(settings.permissions.allow.includes("mcp__klio__recall"));
 });
 
-test("Claude Code cloud wiring installs the 3 capture hooks on a fresh machine", async (t) => {
+test("Claude Code cloud wiring installs the 4 capture hooks on a fresh machine", async (t) => {
   const home = withFakeHome(t);
   mkdirSync(join(home, ".claude"));
   const { fn } = recordingClaudeCli();
@@ -637,9 +652,10 @@ test("Claude Code cloud wiring installs the 3 capture hooks on a fresh machine",
   const settings = JSON.parse(
     readFileSync(join(home, ".claude", "settings.json"), "utf8"),
   );
-  // Exactly the 3 cloud capture hooks materialised; no others.
+  // Exactly the 4 cloud capture hooks materialised; no others.
   assertCloudHooksInstalled(settings);
   assert.deepEqual(Object.keys(settings.hooks).sort(), [
+    "PostToolUse",
     "SessionStart",
     "Stop",
     "UserPromptSubmit",
@@ -662,7 +678,7 @@ test("Claude Code cloud wiring is idempotent across re-runs (no duplicate hooks)
     readFileSync(join(home, ".claude", "settings.json"), "utf8"),
   );
   assertCloudHooksInstalled(settings);
-  for (const event of ["SessionStart", "UserPromptSubmit", "Stop"]) {
+  for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]) {
     assert.equal(settings.hooks[event].length, 1, `${event}: one block`);
     assert.equal(settings.hooks[event][0].hooks.length, 1, `${event}: one hook`);
   }

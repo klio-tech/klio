@@ -7,7 +7,7 @@
 // the hosted brain's REST capture endpoints (src/cloud.ts +
 // services/mcp-server/app/capture.py).
 //
-// Cloud v1 wires exactly three events (the high-signal, low-cost set):
+// Cloud v1 wires these events (the high-signal capture set):
 //
 //   SessionStart      → POST /capture/recall (empty query → recency),
 //                       then print the memories as `additionalContext`
@@ -18,6 +18,12 @@
 //                       here (they're mined from the transcript at Stop)
 //                       — this mirrors the local bridge and keeps noise
 //                       and embedding cost down.
+//   PostToolUse       → after each tool call, POST /capture/event as a
+//                       lightweight `observation` summarising the tool,
+//                       its input, and its response. The server stores it
+//                       via embedding alone (no chat LLM), so this is the
+//                       cheap cross-agent visibility signal the local
+//                       bridge already captured — ported here for parity.
 //   Stop              → read the session transcript file and POST
 //                       /capture/transcript so the brain distils it into
 //                       facts + a summary.
@@ -45,6 +51,9 @@ type HookPayload = {
   transcript_path?: string;
   cwd?: string;
   prompt?: string;
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_response?: unknown;
 };
 
 /** A single transcript message in the shape the capture endpoint expects. */
@@ -75,6 +84,18 @@ const CAPTURE_TIMEOUT_MS = 8_000;
 
 /** Cap on transcript messages forwarded (the server also tail-caps by chars). */
 const MAX_TRANSCRIPT_MESSAGES = 400;
+
+/**
+ * Per-field cap (chars) for a PostToolUse observation's input/response.
+ * The cloud embedder (`multilingual-e5-large`) has a ~512-token / ~2000-char
+ * window, and each observation carries two fields plus framing — so capping
+ * each field at 800 keeps the whole observation comfortably embeddable while
+ * still preserving enough of a bash stdout / Edit patch / Write payload for
+ * the curator to reason about. (The local bridge caps at 2000 bytes/field,
+ * but it stores raw and embeds opaquely; the cloud path embeds the content
+ * directly, so it needs the tighter budget.)
+ */
+const MAX_OBS_FIELD = 800;
 
 /**
  * Explicit "store this" trigger phrases, ported verbatim from the local
@@ -111,11 +132,14 @@ export async function runHook(event: string, deps: HookDeps = {}): Promise<numbe
       case "UserPromptSubmit":
         await handleUserPrompt(config, payload, fetchFn, deps);
         return 0;
+      case "PostToolUse":
+        await handlePostTool(config, payload, fetchFn, deps);
+        return 0;
       case "Stop":
         await handleStop(config, payload, fetchFn, deps);
         return 0;
       default:
-        // Unhandled event (PreToolUse, PostToolUse, …) → clean no-op.
+        // Unhandled event (PreToolUse, SubagentStop, …) → clean no-op.
         return 0;
     }
   } catch {
@@ -182,6 +206,44 @@ async function handleUserPrompt(
 }
 
 /**
+ * PostToolUse: record one tool call as a lightweight `observation` so the
+ * brain has cross-agent visibility into what the agent actually did. Ported
+ * from the local bridge's PostToolUse handler
+ * (bridge/internal/hooks/handlers.go): the content summarises the tool, its
+ * input, and its response, with each I/O field independently truncated.
+ *
+ * The server stores an observation via embedding alone (no chat LLM), so this
+ * is cheap. The `source: "hook-tool"` tag matters: the dashboard counts hook
+ * captures via `metadata->>'source' LIKE 'hook%'`, so it must start with
+ * `hook`. An empty `tool_name` is a no-op (parity with the bridge).
+ */
+async function handlePostTool(
+  config: CloudConfig,
+  payload: HookPayload,
+  fetchFn: typeof fetch,
+  deps: HookDeps,
+): Promise<void> {
+  if (!payload.tool_name) return;
+
+  const content =
+    `Used tool ${payload.tool_name}\n` +
+    `input: ${fmtField(payload.tool_input)}\n` +
+    `response: ${fmtField(payload.tool_response)}`;
+
+  await postCapture(config, fetchFn, CLOUD_CAPTURE_PATHS.event, {
+    content,
+    memory_type: "observation",
+    metadata: {
+      source: "hook-tool",
+      tool: payload.tool_name,
+      session_id: payload.session_id,
+    },
+    session_id: payload.session_id,
+    ...resolveProject(payload.cwd, deps),
+  });
+}
+
+/**
  * Stop: forward the session transcript so the brain distils it into facts
  * + a summary. No transcript path or no messages → no-op.
  */
@@ -224,16 +286,17 @@ function parsePayload(stdin: string): HookPayload {
 
 /**
  * Normalize the event token to one of SessionStart | UserPromptSubmit |
- * Stop. Accepts the Claude Code canonical names, the local bridge's
- * subcommand names (session-start, user-prompt, session-stop), and falls
- * back to the payload's `hook_event_name`. Anything else passes through
- * (and runHook treats it as a no-op).
+ * PostToolUse | Stop. Accepts the Claude Code canonical names, the local
+ * bridge's subcommand names (session-start, user-prompt, post-tool,
+ * session-stop), and falls back to the payload's `hook_event_name`.
+ * Anything else passes through (and runHook treats it as a no-op).
  */
 function normalizeEvent(arg: string, payload: HookPayload): string {
   const raw = (arg || payload.hook_event_name || "").trim();
   const key = raw.toLowerCase().replace(/[_-]/g, "");
   if (key === "sessionstart") return "SessionStart";
   if (key === "userpromptsubmit" || key === "userprompt") return "UserPromptSubmit";
+  if (key === "posttooluse" || key === "posttool") return "PostToolUse";
   if (key === "stop" || key === "sessionstop") return "Stop";
   return raw;
 }
@@ -262,6 +325,37 @@ function matchTriggerPhrase(message: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Render one PostToolUse I/O field for the observation summary, mirroring the
+ * local bridge's `formatObservationField`:
+ *   - `undefined` / `null` / empty string → the literal `"(none)"` so the
+ *     curator can tell "absent" from "truncated to nothing".
+ *   - objects → compact `JSON.stringify`; everything else → `String(value)`.
+ *   - anything over {@link MAX_OBS_FIELD} chars is truncated with a marker
+ *     recording the original length, so a reader knows signal was dropped and
+ *     the whole observation stays within the cloud embedder's window.
+ */
+function fmtField(value: unknown): string {
+  if (value === undefined || value === null) return "(none)";
+
+  let str: string;
+  if (typeof value === "object") {
+    try {
+      str = JSON.stringify(value);
+    } catch {
+      // Circular or otherwise unserialisable → fall back to a coarse cast
+      // rather than throwing (the hook must stay soft-fail).
+      str = String(value);
+    }
+  } else {
+    str = String(value);
+  }
+
+  if (str === "") return "(none)";
+  if (str.length <= MAX_OBS_FIELD) return str;
+  return `${str.slice(0, MAX_OBS_FIELD)}... (truncated, original ${str.length} chars)`;
 }
 
 /**

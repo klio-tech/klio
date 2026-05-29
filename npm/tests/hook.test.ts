@@ -182,6 +182,110 @@ test("UserPromptSubmit matches the 'note that' trigger", async () => {
   assert.equal(bodyOf(calls[0]).content, "the API base is /v2");
 });
 
+// --- PostToolUse ------------------------------------------------------
+
+test("PostToolUse posts an observation to /capture/event", async () => {
+  const { fn, calls } = makeFetch();
+  await runHook("PostToolUse", {
+    config: CONFIG,
+    stdin: JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "ls -la" },
+      tool_response: "total 0",
+      session_id: "s3",
+      cwd: "/proj",
+    }),
+    fetchFn: fn,
+    gitRemoteFn: () => null,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://brain.test/capture/event");
+
+  const headers = new Headers(calls[0].init.headers);
+  assert.equal(headers.get("X-Vex-Key"), "ag_live_k");
+  assert.equal(headers.get("X-Vex-Agent"), "klio-test/claude-code");
+
+  const body = bodyOf(calls[0]);
+  assert.equal(body.memory_type, "observation");
+  assert.equal(body.session_id, "s3");
+  assert.equal(body.repo_root, "/proj");
+
+  // Content frames the tool, its input, and its response.
+  const content = body.content as string;
+  assert.ok(content.startsWith("Used tool Bash"), "content names the tool");
+  assert.match(content, /input: \{"command":"ls -la"\}/);
+  assert.match(content, /response: total 0/);
+
+  // Source must start with "hook" so the dashboard's
+  // `metadata->>'source' LIKE 'hook%'` counter picks it up.
+  const meta = body.metadata as Record<string, unknown>;
+  assert.equal(meta.source, "hook-tool");
+  assert.equal(meta.tool, "Bash");
+  assert.equal(meta.session_id, "s3");
+});
+
+test("PostToolUse with no tool_name is a no-op (no network)", async () => {
+  const { fn, calls } = makeFetch();
+  const code = await runHook("PostToolUse", {
+    config: CONFIG,
+    stdin: JSON.stringify({ tool_input: { command: "ls" }, tool_response: "ok" }),
+    fetchFn: fn,
+  });
+  assert.equal(code, 0);
+  assert.equal(calls.length, 0);
+});
+
+test("PostToolUse renders absent input/response as (none)", async () => {
+  const { fn, calls } = makeFetch();
+  await runHook("PostToolUse", {
+    config: CONFIG,
+    stdin: JSON.stringify({ tool_name: "Read" }),
+    fetchFn: fn,
+    gitRemoteFn: () => null,
+  });
+  const content = bodyOf(calls[0]).content as string;
+  assert.match(content, /input: \(none\)/);
+  assert.match(content, /response: \(none\)/);
+});
+
+test("PostToolUse truncates an oversized field with a marker", async () => {
+  const { fn, calls } = makeFetch();
+  const huge = "x".repeat(5000);
+  await runHook("PostToolUse", {
+    config: CONFIG,
+    stdin: JSON.stringify({
+      tool_name: "Bash",
+      tool_input: { command: "echo big" },
+      tool_response: huge,
+    }),
+    fetchFn: fn,
+    gitRemoteFn: () => null,
+  });
+
+  const content = bodyOf(calls[0]).content as string;
+  // The truncation marker is present and records the original length.
+  assert.match(content, /\.\.\. \(truncated, original 5000 chars\)/);
+  // The retained slice of the field is capped at 800 chars (≤ ~800), so the
+  // whole response field stays well under the embedder's window.
+  const responseLine = content.split("\nresponse: ")[1];
+  const retained = responseLine.split("... (truncated")[0];
+  assert.equal(retained.length, 800);
+});
+
+test("PostToolUse normalizes the 'post-tool' subcommand name", async () => {
+  const { fn, calls } = makeFetch();
+  await runHook("post-tool", {
+    config: CONFIG,
+    stdin: JSON.stringify({ tool_name: "Write", tool_input: { path: "/a" } }),
+    fetchFn: fn,
+    gitRemoteFn: () => null,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://brain.test/capture/event");
+  assert.equal(bodyOf(calls[0]).memory_type, "observation");
+});
+
 // --- Stop -------------------------------------------------------------
 
 test("Stop forwards transcript messages to /capture/transcript", async () => {

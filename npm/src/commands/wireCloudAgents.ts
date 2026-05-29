@@ -180,9 +180,10 @@ const CLOUD_WRITERS: Record<string, CloudWriter> = {
  * We patch ONLY permissions.allow in ~/.claude/settings.json (backed
  * up first), STRIP any lingering local-mode klio hooks (the six
  * `docker exec ... klio hook ...` entries a prior `klio init` wrote),
- * and then INSTALL the three cloud capture hooks (SessionStart /
- * UserPromptSubmit / Stop) that point at `npx -y @klio-tech/klio hook
- * <subcmd>` — the thin passive-capture client (src/commands/hook.ts).
+ * and then INSTALL the four cloud capture hooks (SessionStart /
+ * UserPromptSubmit / PostToolUse / Stop) that point at
+ * `npx -y @klio-tech/klio hook <subcmd>` — the thin passive-capture
+ * client (src/commands/hook.ts).
  * Strip-then-install keeps re-runs idempotent (the new cloud commands
  * also contain the `klio hook` marker, so the strip clears a prior
  * cloud install too before we re-add).
@@ -236,7 +237,7 @@ async function writeClaudeCodeCloud(args: CloudWriterArgs): Promise<void> {
  * belongs in cloud mode).
  *
  * hooks: `stripKlioHooks` then `installCloudHooks` — clear any prior
- * klio hooks (local docker OR a prior cloud install) and write the three
+ * klio hooks (local docker OR a prior cloud install) and write the four
  * cloud capture hooks fresh, so a re-run converges to exactly one set.
  */
 function patchClaudeSettings(): void {
@@ -271,16 +272,19 @@ function patchClaudeSettings(): void {
 }
 
 /**
- * The three Claude Code lifecycle events cloud mode captures, mapped to
+ * The four Claude Code lifecycle events cloud mode captures, mapped to
  * the `klio hook` subcommand the thin client (src/commands/hook.ts)
- * normalizes. Deliberately a SUBSET of the local adapter's six hooks:
- * cloud skips PreToolUse/PostToolUse/SubagentStop to avoid a network
- * round-trip (and embedding cost) on every tool call — the Stop
- * transcript ingest already mines the whole session.
+ * normalizes. A SUBSET of the local adapter's six hooks: cloud still
+ * skips PreToolUse (a recall round-trip per tool call) and SubagentStop,
+ * but DOES capture PostToolUse — the server stores that observation via
+ * embedding alone (no chat LLM), so it's cheap and restores parity with
+ * the local bridge's cross-agent tool visibility. The Stop transcript
+ * ingest remains the primary distillation pass.
  */
 const CLOUD_HOOK_DEFS: { event: string; matcher: string; subcmd: string }[] = [
   { event: "SessionStart", matcher: "*", subcmd: "session-start" },
   { event: "UserPromptSubmit", matcher: "*", subcmd: "user-prompt" },
+  { event: "PostToolUse", matcher: "*", subcmd: "post-tool" },
   { event: "Stop", matcher: "*", subcmd: "session-stop" },
 ];
 
@@ -293,7 +297,7 @@ const CLOUD_HOOK_DEFS: { event: string; matcher: string; subcmd: string }[] = [
 const CLOUD_HOOK_COMMAND_PREFIX = "npx -y @klio-tech/klio hook";
 
 /**
- * Append Klio's three cloud capture hooks to a Claude Code settings
+ * Append Klio's four cloud capture hooks to a Claude Code settings
  * object in place, preserving any non-Klio hooks. MUST run AFTER
  * `stripKlioHooks` (which clears prior klio entries, including a prior
  * cloud install), so this only ever adds — never duplicates. A fresh
