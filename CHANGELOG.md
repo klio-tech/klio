@@ -4,6 +4,66 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-05-29
+
+### Added — passive memory capture in Klio Cloud (Path B)
+
+Cloud mode could already *recall* and *remember* through the 7 MCP
+tools, but nothing was captured **passively** — so a cloud user's brain
+only grew when an agent explicitly wrote to it. 0.9.0 brings the
+local-first capture loop to the hosted brain, with no Docker and no
+local engine:
+
+  - **`klio hook <event>` client** — a thin, soft-fail passive-capture
+    forwarder Claude Code invokes on lifecycle events. It reads the
+    event JSON on stdin and POSTs to the hosted brain's capture API:
+      - **SessionStart** → fetch recent/relevant memories and inject
+        them as `additionalContext` (the same "## Klio context for this
+        session" block the local bridge emits).
+      - **UserPromptSubmit** → capture explicit "remember that …" /
+        "note that …" trigger phrases as durable memories (plain prompts
+        are mined from the transcript instead, keeping noise down).
+      - **Stop** → forward the session transcript so the brain distils
+        it into facts + a summary.
+    The command is **soft-fail by contract**: a missing config, a
+    malformed payload, or a network error all exit 0 silently — a hook
+    can never block or disrupt a Claude Code session.
+  - **Cloud capture hooks installed on wiring** — `klio init` (cloud
+    mode) now installs three Claude Code hooks (SessionStart /
+    UserPromptSubmit / Stop) pointing at `npx -y @klio-tech/klio hook
+    …`, replacing the previous "strip all hooks" behaviour. Stale local
+    `docker exec … klio hook …` entries are still stripped first, so a
+    re-run converges cleanly. Per-call events (Pre/PostToolUse) are
+    intentionally **not** wired in cloud mode to avoid a network
+    round-trip and embedding cost on every tool call.
+  - **Cloud credentials persisted** to `~/.klio/config.json` (0600) so
+    the hook client can authenticate on every event without an MCP
+    handshake.
+
+**Engine / MCP server (Vex-hosted):**
+
+  - **REST capture API** (`POST /capture/event`, `/capture/transcript`,
+    `/capture/recall`) — the passive counterpart to the MCP tools,
+    authenticated by the same `X-Vex-Key` (+ `X-Vex-Agent`) bridge and
+    scoped to the caller's org. Reuses the existing brain write/recall
+    primitives and `extract_facts` / `generate_summary`; best-effort
+    per-project tagging from the working repo's git remote.
+  - **In-process curator scheduler** — the org-scoped brain curator now
+    runs on a background loop in the service lifespan (configurable via
+    `CURATOR_ENABLED` / `CURATOR_INTERVAL_SECONDS`), so synthesised
+    summaries and facts accrue without an external cron.
+
+### Added — cloud wiring for Claude Desktop, OpenCode, and OpenClaw
+
+Cloud-mode `klio init` now also wires three more agents to the hosted
+brain (previously Claude Code, Cursor, and Codex only):
+
+  - **Claude Desktop** and **OpenClaw** (stdio-only configs) get an
+    `mcp-remote` bridge that forwards both auth headers upstream.
+  - **OpenCode** gets a native `{type:"remote"}` MCP entry.
+
+Each writer backs up the existing config and preserves peer servers.
+
 ## [0.8.0] — 2026-05-29
 
 ### Added — Klio Cloud onboarding (`klio init` cloud-default mode)

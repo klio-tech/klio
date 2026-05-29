@@ -17,11 +17,13 @@
 // the flow without a TTY or the network.
 
 import {
+  CLOUD_BASE_URL,
   CLOUD_MCP_URL,
   deriveAgentId,
   maskKey,
   verifyCloudKey,
 } from "../cloud.js";
+import { writeCloudConfig, type CloudConfig } from "../cloudConfig.js";
 import { phaseHeader, phaseRecap } from "../ui.js";
 import { prompt } from "../prompt.js";
 import {
@@ -60,6 +62,15 @@ export type InitCloudOptions = {
    * the real `claude` binary is spawned.
    */
   claudeCliFn?: ClaudeCliFn;
+  /**
+   * Override the cloud-config persister. Production leaves this undefined
+   * and the verified key + agent id are written to ~/.klio/config.json so
+   * the `klio hook` passive-capture client can authenticate on every
+   * Claude Code event (it runs as a bare subprocess with no other access
+   * to the key). Tests inject a stub so the suite never writes to the real
+   * home dir.
+   */
+  writeConfigFn?: (config: CloudConfig) => void;
   /** Single-line writer. Defaults to stdout. */
   log?: (line: string) => void;
 };
@@ -101,6 +112,13 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   // -----------------------------------------------------------------
   phaseHeader(2, 2, "Wire your agents");
   const agentId = deriveAgentId();
+
+  // Persist the verified key + agent id BEFORE wiring so the capture hooks
+  // we're about to install (and the `klio hook` client they invoke) can
+  // authenticate immediately on the very first Claude Code event.
+  const writeConfigFn = opts.writeConfigFn ?? writeCloudConfig;
+  writeConfigFn({ apiKey: key, agentId, baseUrl: CLOUD_BASE_URL });
+
   log("");
   log(`    Pointing your agents at ${CLOUD_MCP_URL}`);
   log(`    Agent id: ${agentId}`);

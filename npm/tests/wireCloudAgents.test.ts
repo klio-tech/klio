@@ -170,13 +170,28 @@ test("Claude Code: registers HTTP transport via add-json + allowlists tools", as
   // No stdio command/args — this is the HTTP transport.
   assert.equal(payload.command, undefined);
 
-  // permissions.allow carries the 7 klio tools; NO hooks written.
+  // permissions.allow carries the 7 klio tools; the 3 cloud capture
+  // hooks are installed pointing at the `klio hook` client.
   const settings = JSON.parse(
     readFileSync(join(home, ".claude", "settings.json"), "utf8"),
   );
   assert.ok(Array.isArray(settings.permissions.allow));
   assert.ok(settings.permissions.allow.includes("mcp__klio__recall"));
-  assert.equal(settings.hooks, undefined, "cloud mode writes no hooks");
+  assert.equal(
+    settings.hooks.SessionStart[0].hooks[0].command,
+    "npx -y @klio-tech/klio hook session-start",
+  );
+  assert.equal(
+    settings.hooks.UserPromptSubmit[0].hooks[0].command,
+    "npx -y @klio-tech/klio hook user-prompt",
+  );
+  assert.equal(
+    settings.hooks.Stop[0].hooks[0].command,
+    "npx -y @klio-tech/klio hook session-stop",
+  );
+  // Cloud captures a subset: no Pre/PostToolUse round-trips.
+  assert.equal(settings.hooks.PreToolUse, undefined);
+  assert.equal(settings.hooks.PostToolUse, undefined);
 });
 
 test("Claude Code: non-zero add-json exit is reported as an error, not a throw", async (t) => {
@@ -456,10 +471,29 @@ test("OpenClaw: preserves peer servers and backs up before patching", async (t) 
 });
 
 // ---------------------------------------------------------------------
-// Hook cleanup — strip stale local klio hooks during cloud Claude Code wiring
+// Hooks — strip stale local klio hooks, install the 3 cloud capture hooks
 // ---------------------------------------------------------------------
 
-test("Claude Code cloud wiring strips stale local klio hooks, keeps non-klio hooks", async (t) => {
+const CLOUD_HOOK_COMMANDS = {
+  SessionStart: "npx -y @klio-tech/klio hook session-start",
+  UserPromptSubmit: "npx -y @klio-tech/klio hook user-prompt",
+  Stop: "npx -y @klio-tech/klio hook session-stop",
+};
+
+function assertCloudHooksInstalled(settings: {
+  hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+}): void {
+  for (const [event, command] of Object.entries(CLOUD_HOOK_COMMANDS)) {
+    const blocks = settings.hooks[event];
+    assert.ok(blocks, `expected ${event} hook block`);
+    assert.ok(
+      blocks.some((b) => b.hooks.some((h) => h.command === command)),
+      `expected ${event} cloud hook command`,
+    );
+  }
+}
+
+test("Claude Code cloud wiring strips stale local klio hooks, installs cloud hooks, keeps non-klio hooks", async (t) => {
   const home = withFakeHome(t);
   mkdirSync(join(home, ".claude"));
   const { writeFileSync, readdirSync } = await import("node:fs");
@@ -520,32 +554,39 @@ test("Claude Code cloud wiring strips stale local klio hooks, keeps non-klio hoo
     readFileSync(join(home, ".claude", "settings.json"), "utf8"),
   );
 
-  // The SessionStart event was klio-only → event removed entirely.
-  assert.equal(settings.hooks.SessionStart, undefined);
-  // PreToolUse block kept, but only the non-klio linter survives.
+  // The stale docker SessionStart hook was stripped; the fresh cloud
+  // SessionStart hook replaced it (klio-only block → re-created clean).
+  assert.equal(
+    settings.hooks.SessionStart[0].hooks[0].command,
+    "npx -y @klio-tech/klio hook session-start",
+  );
+  assert.equal(settings.hooks.SessionStart[0].hooks.length, 1);
+  // PreToolUse block kept, but only the non-klio linter survives (cloud
+  // does not install a PreToolUse hook).
   const pre = settings.hooks.PreToolUse;
   assert.equal(pre.length, 1);
   assert.equal(pre[0].hooks.length, 1);
   assert.equal(pre[0].hooks[0].command, "/usr/local/bin/my-linter");
-  // The unrelated PostToolUse hook is untouched.
+  // The unrelated PostToolUse hook is untouched (and not added by cloud).
   assert.equal(settings.hooks.PostToolUse[0].hooks[0].command, "echo hi");
 
-  // No klio hook command survives anywhere in the file.
+  // The 3 cloud capture hooks are installed; no DOCKER klio hook survives.
+  assertCloudHooksInstalled(settings);
   const serialized = JSON.stringify(settings);
-  assert.doesNotMatch(serialized, /klio hook/);
+  assert.doesNotMatch(serialized, /docker exec/);
   assert.doesNotMatch(serialized, /klio-bridge/);
 
   // Allowlist behaviour still intact.
   assert.ok(settings.permissions.allow.includes("mcp__klio__recall"));
 
-  // Backup taken before the strip.
+  // Backup taken before the patch.
   const backups = readdirSync(join(home, ".claude")).filter((f) =>
     f.startsWith("settings.json.klio-backup-"),
   );
-  assert.equal(backups.length, 1, "must back up before stripping hooks");
+  assert.equal(backups.length, 1, "must back up before patching hooks");
 });
 
-test("Claude Code cloud wiring is a no-op for hooks when none are klio's", async (t) => {
+test("Claude Code cloud wiring installs cloud hooks alongside non-klio hooks", async (t) => {
   const home = withFakeHome(t);
   mkdirSync(join(home, ".claude"));
   const { writeFileSync } = await import("node:fs");
@@ -575,12 +616,13 @@ test("Claude Code cloud wiring is a no-op for hooks when none are klio's", async
   const settings = JSON.parse(
     readFileSync(join(home, ".claude", "settings.json"), "utf8"),
   );
-  // Non-klio hooks survive intact, no crash.
+  // Non-klio hooks survive intact; the 3 cloud hooks are added.
   assert.equal(settings.hooks.PostToolUse[0].hooks[0].command, "echo hi");
+  assertCloudHooksInstalled(settings);
   assert.ok(settings.permissions.allow.includes("mcp__klio__recall"));
 });
 
-test("Claude Code cloud wiring writes no hooks on a fresh machine", async (t) => {
+test("Claude Code cloud wiring installs the 3 capture hooks on a fresh machine", async (t) => {
   const home = withFakeHome(t);
   mkdirSync(join(home, ".claude"));
   const { fn } = recordingClaudeCli();
@@ -595,6 +637,11 @@ test("Claude Code cloud wiring writes no hooks on a fresh machine", async (t) =>
   const settings = JSON.parse(
     readFileSync(join(home, ".claude", "settings.json"), "utf8"),
   );
-  // No hooks key materialised from nothing.
-  assert.equal(settings.hooks, undefined, "cloud mode writes no hooks");
+  // Exactly the 3 cloud capture hooks materialised; no others.
+  assertCloudHooksInstalled(settings);
+  assert.deepEqual(Object.keys(settings.hooks).sort(), [
+    "SessionStart",
+    "Stop",
+    "UserPromptSubmit",
+  ]);
 });

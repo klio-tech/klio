@@ -173,11 +173,14 @@ const CLOUD_WRITERS: Record<string, CloudWriter> = {
  * The 7-tool allowlist is carried over from the local adapter so a
  * first-time cloud user doesn't face a permission prompt per klio tool.
  * We patch ONLY permissions.allow in ~/.claude/settings.json (backed
- * up first) — and, crucially, STRIP any lingering local-mode klio hooks
- * (the six `docker exec ... klio hook ...` entries a prior `klio init`
- * wrote) so a cloud user who has stopped Docker doesn't hit a hook
- * error on every Claude Code event. Unlike the local adapter we never
- * WRITE hooks here.
+ * up first), STRIP any lingering local-mode klio hooks (the six
+ * `docker exec ... klio hook ...` entries a prior `klio init` wrote),
+ * and then INSTALL the three cloud capture hooks (SessionStart /
+ * UserPromptSubmit / Stop) that point at `npx -y @klio-tech/klio hook
+ * <subcmd>` — the thin passive-capture client (src/commands/hook.ts).
+ * Strip-then-install keeps re-runs idempotent (the new cloud commands
+ * also contain the `klio hook` marker, so the strip clears a prior
+ * cloud install too before we re-add).
  */
 async function writeClaudeCodeCloud(args: CloudWriterArgs): Promise<void> {
   const payload = {
@@ -227,8 +230,9 @@ async function writeClaudeCodeCloud(args: CloudWriterArgs): Promise<void> {
  * also strips legacy mcpServers + WRITES hooks, neither of which
  * belongs in cloud mode).
  *
- * hooks: see `stripKlioHooks`. No-op on a fresh machine (no settings
- * file / no klio hooks).
+ * hooks: `stripKlioHooks` then `installCloudHooks` — clear any prior
+ * klio hooks (local docker OR a prior cloud install) and write the three
+ * cloud capture hooks fresh, so a re-run converges to exactly one set.
  */
 function patchClaudeSettings(): void {
   const path = join(homedir(), ".claude", "settings.json");
@@ -256,8 +260,63 @@ function patchClaudeSettings(): void {
   settings["permissions"] = permissions;
 
   stripKlioHooks(settings);
+  installCloudHooks(settings);
 
   writeJson(path, settings);
+}
+
+/**
+ * The three Claude Code lifecycle events cloud mode captures, mapped to
+ * the `klio hook` subcommand the thin client (src/commands/hook.ts)
+ * normalizes. Deliberately a SUBSET of the local adapter's six hooks:
+ * cloud skips PreToolUse/PostToolUse/SubagentStop to avoid a network
+ * round-trip (and embedding cost) on every tool call — the Stop
+ * transcript ingest already mines the whole session.
+ */
+const CLOUD_HOOK_DEFS: { event: string; matcher: string; subcmd: string }[] = [
+  { event: "SessionStart", matcher: "*", subcmd: "session-start" },
+  { event: "UserPromptSubmit", matcher: "*", subcmd: "user-prompt" },
+  { event: "Stop", matcher: "*", subcmd: "session-stop" },
+];
+
+/**
+ * Command each cloud hook runs. `npx -y` resolves+runs the published CLI
+ * without a global install (the same portability the `mcp-remote` bridge
+ * relies on), so a cloud user who onboarded via `npx @klio-tech/klio init`
+ * doesn't need `klio` on PATH for hooks to fire.
+ */
+const CLOUD_HOOK_COMMAND_PREFIX = "npx -y @klio-tech/klio hook";
+
+/**
+ * Append Klio's three cloud capture hooks to a Claude Code settings
+ * object in place, preserving any non-Klio hooks. MUST run AFTER
+ * `stripKlioHooks` (which clears prior klio entries, including a prior
+ * cloud install), so this only ever adds — never duplicates. A fresh
+ * machine materialises the `hooks` key; a machine with peer hooks keeps
+ * them and gains our blocks alongside.
+ */
+function installCloudHooks(settings: Record<string, unknown>): void {
+  const prev = settings["hooks"];
+  const hooks =
+    typeof prev === "object" && prev !== null && !Array.isArray(prev)
+      ? (prev as Record<string, unknown>)
+      : {};
+
+  for (const def of CLOUD_HOOK_DEFS) {
+    const block = {
+      matcher: def.matcher,
+      hooks: [
+        { type: "command", command: `${CLOUD_HOOK_COMMAND_PREFIX} ${def.subcmd}` },
+      ],
+    };
+    const existing = Array.isArray(hooks[def.event])
+      ? (hooks[def.event] as unknown[])
+      : [];
+    existing.push(block);
+    hooks[def.event] = existing;
+  }
+
+  settings["hooks"] = hooks;
 }
 
 /**

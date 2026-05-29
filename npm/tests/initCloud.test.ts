@@ -209,3 +209,23 @@ test("wiring runs after verify: Cursor entry written with headers", async (t) =>
   assert.equal(body.mcpServers.klio.headers["X-Vex-Key"], "sk-wire-key-7777");
   assert.match(body.mcpServers.klio.headers["X-Vex-Agent"], /^klio-/);
 });
+
+test("persists cloud config (key + agent id + base url) after verify", async (t) => {
+  withEmptyFakeHome(t);
+  let saved: { apiKey: string; agentId: string; baseUrl: string } | undefined;
+
+  await initCloud({
+    promptFn: async () => "sk-cfg-key-2468",
+    fetchFn: verifyFetch(200, JSON.stringify({ valid: true })),
+    claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+    writeConfigFn: (cfg) => {
+      saved = cfg;
+    },
+    log: () => {},
+  });
+
+  assert.ok(saved, "cloud config must be persisted");
+  assert.equal(saved!.apiKey, "sk-cfg-key-2468");
+  assert.match(saved!.agentId, /^klio-/);
+  assert.equal(saved!.baseUrl, "https://mcp.klio.tech");
+});
