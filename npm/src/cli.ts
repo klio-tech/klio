@@ -11,7 +11,7 @@ import { down, uninstall } from "./commands/down.js";
 import { runUpdate } from "./commands/update.js";
 import { packageVersion } from "./version.js";
 
-const SUBCOMMANDS = ["init", "status", "down", "uninstall", "update", "configure", "version"] as const;
+const SUBCOMMANDS = ["init", "status", "down", "uninstall", "update", "configure", "hook", "version"] as const;
 type Subcommand = (typeof SUBCOMMANDS)[number];
 
 async function main(): Promise<void> {
@@ -57,6 +57,17 @@ async function main(): Promise<void> {
     case "configure": {
       const { runConfigure } = await import("./commands/configure.js");
       await runConfigure({ args: rest });
+      return;
+    }
+    case "hook": {
+      // Invoked by Claude Code (and compatible agents) on lifecycle
+      // events in CLOUD mode, with the event JSON piped on stdin. This is
+      // a machine-facing command, not a user-facing one. It is SOFT-FAIL:
+      // it never throws and exits 0 even when unconfigured, so a stray
+      // hook can never block the user's session.
+      const { runHook, readStdin } = await import("./commands/hook.js");
+      const stdin = await readStdin();
+      process.exitCode = await runHook(rest[0] ?? "", { stdin });
       return;
     }
     case "version":

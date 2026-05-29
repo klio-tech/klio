@@ -15,12 +15,36 @@
 import { hostname } from "node:os";
 
 /**
+ * Origin of the hosted Klio brain. The MCP endpoint, the key-verify
+ * endpoint, and the passive-capture REST endpoints all hang off this
+ * single base so a self-hoster (or staging) only has to override one
+ * value. Persisted into `~/.klio/config.json` as `baseUrl` so the
+ * `klio hook` client targets the same brain `klio init` verified.
+ */
+export const CLOUD_BASE_URL = "https://mcp.klio.tech";
+
+/**
+ * Passive-capture REST paths (relative to {@link CLOUD_BASE_URL}) used
+ * by the thin `klio hook` client. These are the *passive* counterpart
+ * to the MCP tools: a Claude Code lifecycle hook POSTs here instead of
+ * doing an MCP handshake.
+ *   - `event`      ← UserPromptSubmit (store one observation)
+ *   - `transcript` ← Stop (distil the session into facts + a summary)
+ *   - `recall`     ← SessionStart (fetch memories for context injection)
+ */
+export const CLOUD_CAPTURE_PATHS = {
+  event: "/capture/event",
+  transcript: "/capture/transcript",
+  recall: "/capture/recall",
+} as const;
+
+/**
  * The hosted Streamable-HTTP MCP endpoint. Agents connect here over
  * HTTP (not stdio) once wired in cloud mode. Carries the user's
  * `X-Vex-Key` (auth) and `X-Vex-Agent` (stable per-machine id) on
  * every request.
  */
-export const CLOUD_MCP_URL = "https://mcp.klio.tech/mcp";
+export const CLOUD_MCP_URL = `${CLOUD_BASE_URL}/mcp`;
 
 /**
  * Key-verification endpoint. `GET` with header `X-Vex-Key: <key>`
@@ -33,7 +57,7 @@ export const CLOUD_MCP_URL = "https://mcp.klio.tech/mcp";
  * We rely on status + (optionally) `org_id` only — never on the rest
  * of the body shape.
  */
-export const CLOUD_VERIFY_URL = "https://mcp.klio.tech/verify";
+export const CLOUD_VERIFY_URL = `${CLOUD_BASE_URL}/verify`;
 
 /** Header carrying the user's API key (auth) on every cloud request. */
 export const VEX_KEY_HEADER = "X-Vex-Key";
