@@ -4,6 +4,23 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] — 2026-05-29
+
+### Changed — per-tool agent attribution
+
+Each wired tool now sends a distinct `X-Vex-Agent` header of the form
+`<machine-id>/<tool>` (e.g. `klio-host/claude-code`, `klio-host/cursor`)
+instead of all tools sharing one machine-level id. This lets the hosted
+brain — and the dashboard — attribute every captured/recalled memory to
+the exact tool that produced it (Claude Code vs Cursor vs Codex …),
+rather than just the machine. The passive `klio hook` client (Claude
+Code only) reports as `<machine-id>/claude-code`.
+
+Memories remain org-scoped and shared across tools; this only sharpens
+provenance. Re-run `klio init` (cloud mode) to adopt the per-tool ids —
+memories written under the old single id still display, attributed to
+the machine.
+
 ## [0.9.0] — 2026-05-29
 
 ### Added — passive memory capture in Klio Cloud (Path B)
