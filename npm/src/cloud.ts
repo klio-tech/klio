@@ -209,6 +209,16 @@ export function deriveAgentId(host: string = hostname()): string {
 }
 
 /**
+ * Compose a per-tool agent id from the stable machine id + a tool name, e.g.
+ * "klio-host" + "cursor" → "klio-host/cursor". The `/` is header-safe and lets
+ * the dashboard split on the last `/` to recover the tool. Memories stay
+ * org-scoped (shared); this only sharpens provenance.
+ */
+export function perToolAgentId(machineId: string, tool: string): string {
+  return `${machineId}/${tool}`;
+}
+
+/**
  * Mask an API key for display — shows only the last 4 characters so a
  * key never lands in scrollback or logs in full. Short keys (≤4 chars)
  * are fully masked since there's nothing safe to reveal.

@@ -88,7 +88,7 @@ test("SessionStart posts recall and prints additionalContext", async () => {
 
   const headers = new Headers(calls[0].init.headers);
   assert.equal(headers.get("X-Vex-Key"), "ag_live_k");
-  assert.equal(headers.get("X-Vex-Agent"), "klio-test");
+  assert.equal(headers.get("X-Vex-Agent"), "klio-test/claude-code");
 
   const body = bodyOf(calls[0]);
   assert.equal(body.query, "");

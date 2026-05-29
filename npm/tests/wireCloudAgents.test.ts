@@ -105,7 +105,7 @@ test("Cursor: writes remote-HTTP mcp.json with url + both headers, no docker", a
   const klio = body.mcpServers.klio;
   assert.equal(klio.url, CLOUD_MCP_URL);
   assert.equal(klio.headers["X-Vex-Key"], "sk-key-123");
-  assert.equal(klio.headers["X-Vex-Agent"], "klio-testhost");
+  assert.equal(klio.headers["X-Vex-Agent"], "klio-testhost/cursor");
   // No stdio/docker fields in cloud mode.
   assert.equal(klio.command, undefined);
   assert.equal(klio.args, undefined);
@@ -166,7 +166,7 @@ test("Claude Code: registers HTTP transport via add-json + allowlists tools", as
   assert.equal(payload.type, "http");
   assert.equal(payload.url, CLOUD_MCP_URL);
   assert.equal(payload.headers["X-Vex-Key"], "sk-cc");
-  assert.equal(payload.headers["X-Vex-Agent"], "klio-mac");
+  assert.equal(payload.headers["X-Vex-Agent"], "klio-mac/claude-code");
   // No stdio command/args — this is the HTTP transport.
   assert.equal(payload.command, undefined);
 
@@ -232,7 +232,7 @@ test("Codex: writes remote-HTTP TOML with url + http_headers, no docker", async 
   assert.match(body, /url = "https:\/\/mcp\.klio\.tech\/mcp"/);
   assert.match(body, /\[mcp_servers\.klio\.http_headers\]/);
   assert.match(body, /X-Vex-Key = "sk-codex"/);
-  assert.match(body, /X-Vex-Agent = "klio-box"/);
+  assert.match(body, /X-Vex-Agent = "klio-box\/codex"/);
   // No stdio/docker exec form in cloud mode.
   assert.doesNotMatch(body, /command = "docker"/);
 });
@@ -321,7 +321,7 @@ test("Claude Desktop: writes mcp-remote stdio bridge with URL + both headers", a
     "--header",
     "X-Vex-Key: sk-desk",
     "--header",
-    "X-Vex-Agent: klio-desktop",
+    "X-Vex-Agent: klio-desktop/claude-desktop",
   ]);
   // Bridge mode: no native url/headers fields on the entry itself.
   assert.equal(klio.url, undefined);
@@ -376,7 +376,7 @@ test("OpenCode: writes native remote MCP entry with url + both headers", async (
   assert.equal(klio.url, CLOUD_MCP_URL);
   assert.equal(klio.enabled, true);
   assert.equal(klio.headers["X-Vex-Key"], "sk-oc");
-  assert.equal(klio.headers["X-Vex-Agent"], "klio-oc");
+  assert.equal(klio.headers["X-Vex-Agent"], "klio-oc/opencode");
   // Native HTTP transport — never a stdio/docker command array.
   assert.equal(klio.command, undefined);
   assert.equal(body["$schema"], "https://opencode.ai/config.json");
@@ -439,7 +439,7 @@ test("OpenClaw: writes mcp-remote stdio bridge under mcp.servers with both heade
     "--header",
     "X-Vex-Key: sk-claw",
     "--header",
-    "X-Vex-Agent: klio-claw",
+    "X-Vex-Agent: klio-claw/openclaw",
   ]);
 });
 

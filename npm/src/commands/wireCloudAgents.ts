@@ -41,6 +41,7 @@ import {
   VEX_AGENT_HEADER,
   VEX_KEY_HEADER,
   mcpRemoteBridge,
+  perToolAgentId,
 } from "../cloud.js";
 
 /** Inputs for `wireCloudAgents`. */
@@ -116,7 +117,11 @@ export async function wireCloudAgents(
     try {
       await writer({
         apiKey: opts.apiKey,
-        agentId: opts.agentId,
+        // Tag each tool with a distinct `<machineId>/<tool>` agent id so the
+        // hosted brain can attribute provenance per tool. The writer's
+        // `args.agentId` flows straight into its header / mcp-remote bridge,
+        // so this single substitution covers every adapter uniformly.
+        agentId: perToolAgentId(opts.agentId, name),
         claudeCliFn,
       });
       configured.push(name);

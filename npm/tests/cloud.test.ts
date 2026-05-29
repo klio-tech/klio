@@ -12,6 +12,7 @@ import {
   VEX_KEY_HEADER,
   deriveAgentId,
   maskKey,
+  perToolAgentId,
   verifyCloudKey,
 } from "../src/cloud.js";
 
@@ -121,6 +122,11 @@ test("deriveAgentId: caps the sanitized label length", () => {
   // "klio-" prefix + at most 63 sanitized chars.
   assert.ok(id.startsWith("klio-"));
   assert.ok(id.length <= "klio-".length + 63, `id too long: ${id.length}`);
+});
+
+test("perToolAgentId: appends the tool to the machine id with a `/`", () => {
+  assert.equal(perToolAgentId("klio-mac", "cursor"), "klio-mac/cursor");
+  assert.equal(perToolAgentId("klio-mac", "claude-code"), "klio-mac/claude-code");
 });
 
 test("maskKey: shows only the last 4 chars", () => {

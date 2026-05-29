@@ -34,6 +34,7 @@ import {
   CLOUD_CAPTURE_PATHS,
   VEX_AGENT_HEADER,
   VEX_KEY_HEADER,
+  perToolAgentId,
 } from "../cloud.js";
 import { type CloudConfig, readCloudConfig } from "../cloudConfig.js";
 
@@ -361,6 +362,11 @@ function extractContent(rec: Record<string, unknown>): string {
  * POST a capture request, returning the parsed JSON body or `null` on any
  * failure (non-2xx, network error, timeout, unparseable body). Carries the
  * `X-Vex-Key` / `X-Vex-Agent` auth headers and a hard timeout.
+ *
+ * This client runs ONLY as Claude Code's passive lifecycle hook, so the
+ * `X-Vex-Agent` header is tagged with the `claude-code` tool suffix
+ * (`<machineId>/claude-code`) to mirror the per-tool attribution the MCP
+ * wiring applies. `config.agentId` itself stays the bare machine id.
  */
 async function postCapture(
   config: CloudConfig,
@@ -377,7 +383,7 @@ async function postCapture(
       headers: {
         "Content-Type": "application/json",
         [VEX_KEY_HEADER]: config.apiKey,
-        [VEX_AGENT_HEADER]: config.agentId,
+        [VEX_AGENT_HEADER]: perToolAgentId(config.agentId, "claude-code"),
       },
       body: JSON.stringify(body),
       signal: controller.signal,
