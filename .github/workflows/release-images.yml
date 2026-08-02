@@ -1,4 +1,4 @@
-# Build + push the three Klio container images to GHCR.
+# Build + push the Klio container images to GHCR.
 #
 # Why GHCR (and not Docker Hub): the klio-tech GitHub org already
 # owns the namespace, GITHUB_TOKEN is auto-provisioned per workflow
@@ -12,7 +12,7 @@
 #   - tag push v*            → :v0.1.0 + :latest   (stable release)
 #   - manual workflow_dispatch (for re-publishing without a code change)
 #
-# The matrix runs three independent jobs in parallel (one per image).
+# The matrix runs one independent job per image, in parallel.
 # Each job uses the same recipe: setup-buildx, login, metadata-action,
 # build-push with multi-arch (linux/amd64 + linux/arm64) and GHA-cache.
 #
@@ -36,6 +36,7 @@ on:
     paths:
       - 'engine/**'
       - 'bridge/**'
+      - 'proxy/**'
       - 'trust-app/**'
       - 'docker-compose.yml'
       - 'npm/package.json'
@@ -85,6 +86,12 @@ jobs:
             # build step so we can interpolate `steps.pkg.outputs.version`
             # — matrix-scoped expressions can't reference step outputs.
             needs_version_arg: true
+          # Compression proxy. No build args and no version baking —
+          # it holds no state and reports nothing about itself, so
+          # there is nothing for a version string to disambiguate.
+          # The image tag is the version.
+          - name: klio-proxy
+            context: ./proxy
           - name: klio-trust-app
             context: ./trust-app
             build_args: |

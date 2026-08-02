@@ -150,6 +150,39 @@ services:
     # daemon panic auto-recovers.
     restart: unless-stopped
 
+  # Compression proxy — sits between your coding agent and
+  # api.anthropic.com. `klio init` points ANTHROPIC_BASE_URL at it.
+  #
+  # SHIPS PASS-THROUGH ONLY. It forwards traffic unchanged; the
+  # compressors plug into proxy/src/klio_proxy/seam.py in a later stage.
+  #
+  # Three things about this service differ from the rest of the stack,
+  # all for the same reason — once ANTHROPIC_BASE_URL points here, a
+  # dead proxy means the agent cannot reach a model at all:
+  #
+  #   1. No `depends_on`. The proxy needs neither postgres, redis, nor
+  #      the engine. A database that fails to come up must not be able
+  #      to take the user's agent offline with it.
+  #   2. `restart: unless-stopped`, so a crash self-heals and a Docker
+  #      Desktop restart brings it back. The host-side launchd/systemd
+  #      unit written by `klio init` covers the case Docker cannot:
+  #      the Docker daemon itself not running after a reboot.
+  #   3. Published on 127.0.0.1 only. The proxy forwards your Anthropic
+  #      credentials; on 0.0.0.0 the machine becomes an open relay for
+  #      anyone who can reach the port.
+  proxy:
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile
+    container_name: klio-proxy
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      KLIO_PROXY_UPSTREAM_URL: ${KLIO_PROXY_UPSTREAM_URL:-https://api.anthropic.com}
+      KLIO_PROXY_HOST: 0.0.0.0
+      KLIO_PROXY_PORT: 8787
+    restart: unless-stopped
+
   # Trust app — Next.js dashboard for browsing your memories, spaces,
   # and access requests. Talks to the engine on the compose network
   # (service name `engine`), which is also reachable on the host at
