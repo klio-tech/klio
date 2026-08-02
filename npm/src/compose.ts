@@ -14,6 +14,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { PROXY_CONTAINER, PROXY_PORT } from "./proxy/constants.js";
+
 const REGISTRY = "ghcr.io/klio-tech";
 
 // Default models. The `openrouter/<vendor>/<model>` format is the
@@ -173,6 +175,7 @@ export function renderComposeBody(opts: ComposeBodyOptions): string {
 #   redis      — pub/sub for cross-agent realtime + caches
 #   engine     — FastAPI REST API + audit chain
 #   bridge     — Go daemon + MCP shim (klio hook / klio-mcp targets)
+#   proxy      — Anthropic API pass-through at http://127.0.0.1:${PROXY_PORT}
 #   trust-app  — Next.js dashboard at http://127.0.0.1:3000
 
 services:
@@ -305,6 +308,45 @@ services:
       # already used for the compose file and .env). Engine + trust-app
       # read the same file via the same mount.
       - \${HOME}/.klio:/host/.klio:rw
+    restart: unless-stopped
+
+  # Compression proxy — sits between your coding agent and
+  # api.anthropic.com. \`klio init\` points ANTHROPIC_BASE_URL here.
+  #
+  # SHIPS PASS-THROUGH ONLY: it forwards traffic unchanged. The
+  # compressors plug into its seam in a later stage.
+  #
+  # Three deliberate differences from every other service here, all
+  # following from the same fact — once ANTHROPIC_BASE_URL points at
+  # this port, a dead proxy means the agent cannot reach a model at
+  # all, which is far worse than having no compression:
+  #
+  #   1. NO \`depends_on\`. The proxy needs neither postgres, redis nor
+  #      the engine. A database that fails to start must not be able
+  #      to take the user's coding agent down with it.
+  #   2. \`restart: unless-stopped\` — a crash self-heals, and the
+  #      containers come back when Docker Desktop does. The host-side
+  #      launchd / systemd unit \`klio init\` writes covers the one case
+  #      Docker cannot: the Docker daemon itself not running.
+  #   3. Published on 127.0.0.1 only. Every request through this port
+  #      carries the user's Anthropic credentials; bound to 0.0.0.0
+  #      the machine becomes an open relay.
+  proxy:
+    image: ${REGISTRY}/klio-proxy:${tag}
+    container_name: ${PROXY_CONTAINER}
+    pull_policy: missing
+    ports:
+      - "127.0.0.1:${PROXY_PORT}:${PROXY_PORT}"
+    environment:
+      # Overridable so a user behind a corporate LLM gateway can point
+      # the proxy at it instead of Anthropic directly.
+      KLIO_PROXY_UPSTREAM_URL: \${KLIO_PROXY_UPSTREAM_URL:-https://api.anthropic.com}
+      # 0.0.0.0 INSIDE the container is not a weaker posture — the
+      # published-port binding above is what enforces loopback-only
+      # access. Binding 127.0.0.1 inside would make the published port
+      # unreachable from the host.
+      KLIO_PROXY_HOST: 0.0.0.0
+      KLIO_PROXY_PORT: "${PROXY_PORT}"
     restart: unless-stopped
 
   trust-app:

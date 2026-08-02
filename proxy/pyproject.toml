@@ -1,0 +1,66 @@
+[project]
+name = "klio-proxy"
+version = "0.0.1"
+description = "Klio compression proxy — a local, fail-open pass-through in front of the Anthropic Messages API."
+readme = "README.md"
+authors = [{ name = "Abhishek Singh", email = "contact@klio.tech" }]
+maintainers = [{ name = "Abhishek Singh", email = "contact@klio.tech" }]
+license = { text = "AGPL-3.0-or-later" }
+keywords = ["klio", "proxy", "anthropic", "claude-code", "compression", "tokens"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: Proxy Servers",
+]
+requires-python = ">=3.12"
+
+# Deliberately minimal. The proxy sits in the critical path of every
+# model call the agent makes: once ANTHROPIC_BASE_URL points here, a
+# proxy that cannot start means the agent cannot reach a model at all.
+# Every dependency added below is another way for that to happen, so
+# the list stays at "HTTP server + HTTP client" and nothing else.
+#
+# In particular the proxy does NOT depend on the Klio engine, on
+# postgres, or on redis. It must be able to boot and serve traffic
+# with the rest of the stack down.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+]
+
+[project.urls]
+Homepage   = "https://klio.tech"
+Repository = "https://github.com/klio-tech/klio"
+Issues     = "https://github.com/klio-tech/klio/issues"
+
+[project.scripts]
+klio-proxy = "klio_proxy.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/klio_proxy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501"]

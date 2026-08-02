@@ -96,6 +96,14 @@ import {
   type CuratorConfig,
 } from "../curatorConfig.js";
 import { initCloud, type InitCloudOptions } from "./initCloud.js";
+import { describeTradeoffs, describeWiring, wireProxy } from "../proxy/wiring.js";
+import {
+  installSupervisor,
+  probeProxy,
+  resolveKlioCommand,
+} from "../proxy/supervisor.js";
+import { PROXY_SERVICE } from "../proxy/constants.js";
+import { packageVersion } from "../version.js";
 import { selectInitMode, type InitMode } from "../initModeMenu.js";
 
 const ENGINE_URL = "http://127.0.0.1:8000";
@@ -368,6 +376,7 @@ export async function init(opts: InitOptions): Promise<void> {
   phaseHeader(4, 6, "Wire your AI agents");
   await runAdapterStep(state);
   await runSteps(buildPostWireSteps(state, envFile));
+  await runProxyStep();
   for (const e of state.adaptersErrored) {
     process.stderr.write(`! ${e}\n`);
   }
@@ -536,19 +545,19 @@ function buildStackSteps(
         );
         return composePull(state.composeBin!, {
           cwd: runtimeDir(),
-          services: ["postgres", "redis", "engine", "bridge", "trust-app"],
+          services: ["postgres", "redis", "engine", "bridge", "trust-app", PROXY_SERVICE],
         });
       },
     },
     {
-      title: "Start services (postgres, redis, engine, bridge)",
+      title: "Start services (postgres, redis, engine, bridge, proxy)",
       run: async () => {
         narrate(
-          "Postgres + pgvector for memory storage, Redis for cross-agent realtime, the engine API, the bridge daemon.",
+          "Postgres + pgvector for memory storage, Redis for cross-agent realtime, the engine API, the bridge daemon, and the compression proxy.",
         );
         return composeUp(state.composeBin!, {
           cwd: runtimeDir(),
-          services: ["postgres", "redis", "engine", "bridge"],
+          services: ["postgres", "redis", "engine", "bridge", PROXY_SERVICE],
         });
       },
     },
@@ -735,6 +744,63 @@ async function runAdapterStep(state: {
   for (const e of result.errored) {
     state.adaptersErrored.push(`${e.name}: ${e.message}`);
   }
+}
+
+/**
+ * Phase 4 tail — point the agents at the compression proxy.
+ *
+ * Runs AFTER the MCP/hook wiring so that if this step fails, the user
+ * still has a working Klio memory setup. It is also the only step in
+ * init that can leave the user worse off than before they ran it: an
+ * ANTHROPIC_BASE_URL pointing at a proxy that is not up means the agent
+ * cannot reach a model at all.
+ *
+ * So the order inside the step is deliberate:
+ *
+ *   1. Confirm the proxy is actually answering. If it is not, DO NOT
+ *      wire anything — a config change we cannot back up with a live
+ *      proxy is strictly worse than no config change.
+ *   2. Wire the agents.
+ *   3. Install the supervisor, so it comes back after a reboot.
+ *   4. Print what changed and what it costs.
+ *
+ * Never throws. The rest of init succeeded; a proxy that could not be
+ * wired is a missing feature, not a failed install.
+ */
+async function runProxyStep(): Promise<void> {
+  process.stdout.write("\n");
+  process.stdout.write("▸ Wiring the compression proxy…\n");
+  narrate(
+    "Klio can sit between your agent and Anthropic. This release forwards traffic unchanged — the plumbing ships before the compression does.",
+  );
+
+  const probe = await probeProxy();
+  if (!probe.alive) {
+    // Refusing to wire is the correct outcome, not a fallback. The
+    // alternative is a config pointing at a dead port, which breaks the
+    // agent completely.
+    writeLine("");
+    writeLine(`    ! The proxy is not answering (${probe.detail}).`);
+    writeLine("      Skipping the wiring — pointing your agent at a proxy that");
+    writeLine("      is not running would stop it reaching a model at all.");
+    writeLine("      Run `klio doctor` once Docker is healthy to finish this step.");
+    return;
+  }
+
+  const wiring = wireProxy({ log: writeLine });
+  writeLine("");
+  describeWiring(wiring, writeLine);
+
+  const supervisor = await installSupervisor(
+    resolveKlioCommand(process.argv[1], process.execPath, packageVersion()),
+  );
+  writeLine(
+    supervisor.installed
+      ? `    · ${supervisor.detail}`
+      : `    ! ${supervisor.detail}`,
+  );
+
+  describeTradeoffs(writeLine);
 }
 
 /**

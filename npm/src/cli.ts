@@ -11,7 +11,7 @@ import { down, uninstall } from "./commands/down.js";
 import { runUpdate } from "./commands/update.js";
 import { packageVersion } from "./version.js";
 
-const SUBCOMMANDS = ["init", "status", "down", "uninstall", "update", "configure", "hook", "version"] as const;
+const SUBCOMMANDS = ["init", "status", "down", "uninstall", "uninit", "doctor", "proxy", "update", "configure", "hook", "version"] as const;
 type Subcommand = (typeof SUBCOMMANDS)[number];
 
 async function main(): Promise<void> {
@@ -51,6 +51,26 @@ async function main(): Promise<void> {
     case "uninstall":
       await uninstall();
       return;
+    case "uninit": {
+      // Scoped to the proxy wiring — NOT the same as `uninstall`,
+      // which deletes memory. Someone reaching for "stop routing my
+      // traffic" must not lose their data as a side effect.
+      const { uninit } = await import("./commands/uninit.js");
+      process.exitCode = await uninit(parseUninitArgs(rest));
+      return;
+    }
+    case "doctor": {
+      const { doctor } = await import("./commands/doctor.js");
+      process.exitCode = await doctor(parseDoctorArgs(rest));
+      return;
+    }
+    case "proxy": {
+      // Machine-facing: this is what the launchd/systemd unit runs
+      // every 60s. Its exit code is the supervisor's only signal.
+      const { runProxyCommand } = await import("./commands/proxy.js");
+      process.exitCode = await runProxyCommand({ args: rest });
+      return;
+    }
     case "update":
       await runUpdate({ args: rest });
       return;
@@ -123,6 +143,51 @@ function parseInitArgs(rest: string[]): Parameters<typeof init>[0] {
   return opts;
 }
 
+function parseUninitArgs(rest: string[]): { keepRunning?: boolean } {
+  const opts: { keepRunning?: boolean } = {};
+  for (const a of rest) {
+    if (a === "--keep-running") {
+      opts.keepRunning = true;
+    } else if (a === "-h" || a === "--help") {
+      process.stdout.write(
+        "usage: klio uninit [--keep-running]\n\n" +
+          "Removes the compression-proxy wiring from your agents' configs and\n" +
+          "stops the proxy. Your memory, MCP server and hooks are untouched —\n" +
+          "use `klio uninstall` for those.\n\n" +
+          "  --keep-running   leave the proxy container up; only undo the config\n",
+      );
+      process.exit(0);
+    } else {
+      process.stderr.write(`klio uninit: unknown flag: ${a}\n`);
+      process.exit(2);
+    }
+  }
+  return opts;
+}
+
+function parseDoctorArgs(rest: string[]): { skipEndToEnd?: boolean; dryRun?: boolean } {
+  const opts: { skipEndToEnd?: boolean; dryRun?: boolean } = {};
+  for (const a of rest) {
+    if (a === "--offline") {
+      opts.skipEndToEnd = true;
+    } else if (a === "--dry-run") {
+      opts.dryRun = true;
+    } else if (a === "-h" || a === "--help") {
+      process.stdout.write(
+        "usage: klio doctor [--offline] [--dry-run]\n\n" +
+          "Checks the compression proxy end to end and repairs what it can.\n\n" +
+          "  --offline   skip the live request to api.anthropic.com\n" +
+          "  --dry-run   report problems without fixing them\n",
+      );
+      process.exit(0);
+    } else {
+      process.stderr.write(`klio doctor: unknown flag: ${a}\n`);
+      process.exit(2);
+    }
+  }
+  return opts;
+}
+
 function expectValue(argv: string[], idx: number, flag: string): string {
   const v = argv[idx];
   if (v === undefined || v.startsWith("--")) {
@@ -148,6 +213,9 @@ commands:
               --watch runs a long-lived host-side process that applies background
               auto-updates the bridge has detected (no docker-in-docker needed).
   configure   Tweak runtime settings (auto-update mode, claim email, etc.)
+  doctor      Check the compression proxy end to end, and repair what it can
+  uninit      Remove the compression-proxy wiring (memory + MCP are untouched)
+  proxy       Proxy liveness: \`klio proxy status\` / \`klio proxy ensure\`
   down        Stop the stack (data is preserved)
   uninstall   Stop and delete all data; restore agent configs from backup
   version     Print the package version
