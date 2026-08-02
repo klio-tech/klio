@@ -140,3 +140,55 @@ class TestConfig:
         assert ProxyConfig(upstream_base_url="https://api.anthropic.com/").upstream_origin == (
             "https://api.anthropic.com"
         )
+
+
+class TestUpstreamRouting:
+    """Unit-level checks on the prefix split."""
+
+    def _config(self) -> ProxyConfig:
+        return ProxyConfig(
+            upstream_base_url="https://api.anthropic.com",
+            openai_base_url="https://api.openai.com",
+        )
+
+    def test_unprefixed_path_uses_default_upstream(self) -> None:
+        from klio_proxy.app import _resolve_upstream
+
+        assert _resolve_upstream("/v1/messages", self._config()) == (
+            "https://api.anthropic.com",
+            "/v1/messages",
+        )
+
+    def test_prefix_is_stripped(self) -> None:
+        from klio_proxy.app import _resolve_upstream
+
+        assert _resolve_upstream("/__klio/upstream/openai/v1/responses", self._config()) == (
+            "https://api.openai.com",
+            "/v1/responses",
+        )
+
+    def test_bare_prefix_forwards_root(self) -> None:
+        from klio_proxy.app import _resolve_upstream
+
+        assert _resolve_upstream("/__klio/upstream/openai", self._config()) == (
+            "https://api.openai.com",
+            "/",
+        )
+
+    def test_a_path_that_merely_mentions_the_prefix_is_not_routed(self) -> None:
+        """Only a LEADING prefix routes; the string appearing later does not."""
+        from klio_proxy.app import _resolve_upstream
+
+        path = "/v1/messages/__klio/upstream/openai"
+        assert _resolve_upstream(path, self._config()) == ("https://api.anthropic.com", path)
+
+    def test_unknown_name_raises_rather_than_defaulting(self) -> None:
+        from klio_proxy.app import UnknownUpstreamError, _resolve_upstream
+
+        with pytest.raises(UnknownUpstreamError) as excinfo:
+            _resolve_upstream("/__klio/upstream/gemini/v1/x", self._config())
+        assert excinfo.value.name == "gemini"
+
+    def test_openai_upstream_url_is_validated(self) -> None:
+        with pytest.raises(ValueError, match="KLIO_PROXY_OPENAI_URL"):
+            ProxyConfig(openai_base_url="localhost:1234")

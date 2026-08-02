@@ -18,6 +18,34 @@ from dataclasses import dataclass
 #: Where the proxy forwards to when nothing overrides it.
 DEFAULT_UPSTREAM_BASE_URL = "https://api.anthropic.com"
 
+#: Where OpenAI-protocol traffic goes.
+#:
+#: The proxy serves two agents that do NOT speak the same protocol.
+#: Claude Code speaks the Anthropic Messages API; Codex speaks OpenAI's.
+#: The compression design lists both under "point the base URL at the
+#: proxy", which is true but incomplete: a single upstream would send
+#: Codex's OpenAI-shaped requests to api.anthropic.com, where every one
+#: of them 404s. Codex would be wired and broken.
+#:
+#: So the upstream is selectable per request by a path prefix (see
+#: :data:`UPSTREAM_PREFIX`), and Codex is pointed at the prefixed URL.
+#: This does not weaken the pass-through guarantee — choosing where to
+#: forward is the proxy's entire job; bodies, headers and status codes
+#: are still untouched.
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com"
+
+#: Path prefix that selects a named upstream, e.g.
+#: ``/__klio/upstream/openai/v1/responses`` → ``https://api.openai.com/v1/responses``.
+#:
+#: Namespaced under ``__klio`` so it can never collide with a real API
+#: path — Anthropic's and OpenAI's both begin ``/v1/``. Requests without
+#: the prefix go to the default upstream, which keeps the Claude Code
+#: configuration a plain ``http://localhost:8787`` with no path at all.
+UPSTREAM_PREFIX = "/__klio/upstream/"
+
+#: Name of the default upstream, usable explicitly via the prefix.
+DEFAULT_UPSTREAM_NAME = "anthropic"
+
 #: Port from the Klio Compression design doc. Chosen to be memorable and
 #: outside the range agents and dev servers usually squat on.
 DEFAULT_PORT = 8787
@@ -48,6 +76,7 @@ class ProxyConfig:
     """Immutable snapshot of the proxy's configuration."""
 
     upstream_base_url: str = DEFAULT_UPSTREAM_BASE_URL
+    openai_base_url: str = DEFAULT_OPENAI_BASE_URL
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
@@ -58,6 +87,11 @@ class ProxyConfig:
             raise ValueError(
                 f"KLIO_PROXY_UPSTREAM_URL must start with http:// or https://, got "
                 f"{self.upstream_base_url!r}"
+            )
+        if not self.openai_base_url.startswith(("http://", "https://")):
+            raise ValueError(
+                f"KLIO_PROXY_OPENAI_URL must start with http:// or https://, got "
+                f"{self.openai_base_url!r}"
             )
         if not 1 <= self.port <= 65535:
             raise ValueError(f"KLIO_PROXY_PORT must be 1-65535, got {self.port}")
@@ -77,6 +111,18 @@ class ProxyConfig:
         """
         return self.upstream_base_url.rstrip("/")
 
+    @property
+    def upstreams(self) -> dict[str, str]:
+        """Named upstreams addressable via :data:`UPSTREAM_PREFIX`.
+
+        Rebuilt per access rather than cached: the config is frozen, so
+        this is cheap and there is no stale-copy failure mode.
+        """
+        return {
+            DEFAULT_UPSTREAM_NAME: self.upstream_origin,
+            "openai": self.openai_base_url.rstrip("/"),
+        }
+
 
 def load_config(environ: dict[str, str] | None = None) -> ProxyConfig:
     """Build a :class:`ProxyConfig` from the environment.
@@ -92,6 +138,7 @@ def load_config(environ: dict[str, str] | None = None) -> ProxyConfig:
 
     return ProxyConfig(
         upstream_base_url=env.get("KLIO_PROXY_UPSTREAM_URL", DEFAULT_UPSTREAM_BASE_URL),
+        openai_base_url=env.get("KLIO_PROXY_OPENAI_URL", DEFAULT_OPENAI_BASE_URL),
         host=env.get("KLIO_PROXY_HOST", DEFAULT_HOST),
         port=_int_env(env, "KLIO_PROXY_PORT", DEFAULT_PORT),
         connect_timeout=_float_env(env, "KLIO_PROXY_CONNECT_TIMEOUT", DEFAULT_CONNECT_TIMEOUT),

@@ -42,7 +42,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from .config import ProxyConfig, load_config
+from .config import UPSTREAM_PREFIX, ProxyConfig, load_config
 from .headers import (
     ensure_no_transparent_decoding,
     forwardable_request_headers,
@@ -146,6 +146,9 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         return {
             "status": "ok",
             "upstream": resolved.upstream_origin,
+            # Named upstreams, so `klio doctor` can report where each
+            # wired agent's traffic actually goes rather than assuming.
+            "upstreams": resolved.upstreams,
             # Stage 3 ships pass-through only. Surfacing it here means
             # `klio doctor` can state plainly what the proxy is doing
             # rather than implying savings that do not exist yet.
@@ -165,7 +168,17 @@ async def _forward(
     config: ProxyConfig,
 ) -> Response:
     """Forward one request upstream and stream the response back."""
-    url = _upstream_url(request, config)
+    try:
+        url = _upstream_url(request, config)
+    except UnknownUpstreamError as exc:
+        return _proxy_error(
+            "unknown_upstream",
+            f"klio-proxy has no upstream named {exc.name!r}. "
+            f"Known upstreams: {', '.join(sorted(config.upstreams))}. "
+            f"Re-run `klio init` to rewrite your agent's base URL.",
+            exc,
+            status_code=404,
+        )
 
     # The request body is read in full rather than streamed. Two
     # reasons: the compression seam needs the whole body to reason about
@@ -285,25 +298,71 @@ async def _stream_upstream(response: httpx.Response) -> AsyncIterator[bytes]:
         return
 
 
+class UnknownUpstreamError(Exception):
+    """Raised when a request names an upstream the proxy does not know."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"unknown upstream: {name!r}")
+        self.name = name
+
+
 def _upstream_url(request: Request, config: ProxyConfig) -> str:
-    """Rebuild the target URL against the upstream origin.
+    """Rebuild the target URL against the correct upstream origin.
 
     The raw, still-percent-encoded path from the ASGI scope is preferred
     over the decoded ``request.url.path`` so an encoded character in a
     path segment is not silently normalised into a different path. The
     query string is taken raw for the same reason: re-encoding it
     through a parser would reorder repeated keys and rewrite ``+``.
+
+    A leading ``/__klio/upstream/<name>`` selects a named upstream and is
+    stripped before forwarding. Everything else goes to the default
+    (Anthropic), which keeps Claude Code's configuration a bare
+    ``http://localhost:8787`` with no path component.
     """
     raw_path: bytes = request.scope.get("raw_path") or request.scope["path"].encode("utf-8")
     query: bytes = request.scope.get("query_string", b"")
 
-    target = config.upstream_origin + raw_path.decode("utf-8")
+    path = raw_path.decode("utf-8")
+    origin, path = _resolve_upstream(path, config)
+
+    target = origin + path
     if query:
         target += "?" + query.decode("utf-8")
     return target
 
 
-def _proxy_error(kind: str, message: str, exc: BaseException) -> JSONResponse:
+def _resolve_upstream(path: str, config: ProxyConfig) -> tuple[str, str]:
+    """Split ``path`` into (upstream origin, path to forward).
+
+    Returns the default upstream unchanged for any path that does not
+    carry the prefix — which is every request Claude Code makes.
+    """
+    if not path.startswith(UPSTREAM_PREFIX):
+        return config.upstream_origin, path
+
+    remainder = path[len(UPSTREAM_PREFIX) :]
+    name, slash, rest = remainder.partition("/")
+
+    upstreams = config.upstreams
+    if name not in upstreams:
+        # Fail loudly rather than silently forwarding to the default.
+        # A misconfigured agent quietly sending OpenAI-shaped requests
+        # to Anthropic produces 404s that look like an Anthropic
+        # problem; naming the misconfiguration is what makes it fixable.
+        raise UnknownUpstreamError(name)
+
+    # `slash` is empty when the URL was exactly the prefix plus a name,
+    # in which case the forwarded path is "/" rather than "".
+    return upstreams[name], (slash + rest) if slash else "/"
+
+
+def _proxy_error(
+    kind: str,
+    message: str,
+    exc: BaseException,
+    status_code: int = 502,
+) -> JSONResponse:
     """Render a proxy-originated failure the client can act on.
 
     Shaped as Anthropic's error envelope so a client that parses error
@@ -318,7 +377,7 @@ def _proxy_error(kind: str, message: str, exc: BaseException) -> JSONResponse:
     """
     logger.error("klio-proxy: %s: %s", kind, exc)
     return JSONResponse(
-        status_code=502,
+        status_code=status_code,
         content={
             "type": "error",
             "error": {"type": "api_error", "message": message},

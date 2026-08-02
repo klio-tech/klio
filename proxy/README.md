@@ -34,6 +34,26 @@ Search by default. `klio init` re-enables it with
 schemas — silently, while Klio claims to be saving tokens. A net loss
 nobody can see is worse than no product at all.
 
+## Two agents, two protocols
+
+Claude Code speaks the Anthropic Messages API. Codex speaks OpenAI's.
+The compression design lists both under "point the base URL at the
+proxy", which is true but incomplete — a single-upstream proxy would
+send every Codex request to `api.anthropic.com`, where it 404s. Codex
+would be wired and broken, which is worse than Codex being unsupported.
+
+So an upstream is selectable per request by path prefix:
+
+| Agent | Base URL | Forwards to |
+|---|---|---|
+| Claude Code | `http://localhost:8787` | `https://api.anthropic.com` |
+| Codex | `http://localhost:8787/__klio/upstream/openai/v1` | `https://api.openai.com/v1` |
+
+The prefix is stripped before forwarding, and an unknown upstream name
+returns a 404 that names it rather than silently defaulting to
+Anthropic. Deciding where to forward is the proxy's whole job; bodies,
+headers and status codes are still untouched either way.
+
 ## Running it
 
 Normally you do not: `klio init` wires it up and a platform supervisor
@@ -49,7 +69,8 @@ All environment, no config file to go stale.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `KLIO_PROXY_UPSTREAM_URL` | `https://api.anthropic.com` | Must be `http://` or `https://`. |
+| `KLIO_PROXY_UPSTREAM_URL` | `https://api.anthropic.com` | Default upstream. Must be `http://` or `https://`. |
+| `KLIO_PROXY_OPENAI_URL` | `https://api.openai.com` | Upstream behind `/__klio/upstream/openai`. |
 | `KLIO_PROXY_HOST` | `127.0.0.1` | Loopback by default — the proxy carries your API key. The container image sets `0.0.0.0` because Docker's `127.0.0.1:8787:8787` publishing enforces the boundary there instead. |
 | `KLIO_PROXY_PORT` | `8787` | |
 | `KLIO_PROXY_CONNECT_TIMEOUT` | `10` | Seconds. Fail fast rather than hang. |
