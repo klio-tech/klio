@@ -18,7 +18,7 @@ session.
 [How it works](#how-it-works) ·
 [Why Klio](#why-klio) ·
 [Discord](https://discord.gg/xRRPnW3fN2) ·
-[Cloud (waitlist)](https://klio.tech/cloud)
+[Klio Cloud](https://app.klio.tech)
 
 <!-- Live status badges. The CI ones pull workflow state from
      GitHub Actions automatically; npm pulls from the registry. The
@@ -94,6 +94,15 @@ Postgres, Redis, and your embeddings all live in Docker on your machine.
 The encrypted entries are sealed under an AES-256 envelope key that's
 itself wrapped by a master key in `~/.klio/dev-kms.key` (mode `0600`,
 owned by you). No cloud, no telemetry, no phone-home, no analytics.
+
+### Future-proof — your accumulated knowledge outlives any model
+
+As models, providers and tools change, everything your agents have
+learned — decisions, constraints, proven solutions — stays yours, in a
+store you run. Swap Claude for whatever comes next and the memory comes
+with you. Klio doesn't just give your agents memory; it lets you build
+your own intelligence layer that works with whatever AI arrives after
+this one.
 
 ### MCP-native — works with every agent that speaks the protocol
 
@@ -532,7 +541,7 @@ deployment.
 
 - PyPI `klio-engine` package (the engine as a library, not just a container)
 - Signed releases (Sigstore / Cosign)
-- Klio Cloud beta (waitlist at https://klio.tech/cloud)
+- ~~Klio Cloud beta~~ — **live** at [app.klio.tech](https://app.klio.tech) (magic-link sign-up, free to start)
 - Pre-launch external security review
 
 **v1.x — cross-agent intelligence**
