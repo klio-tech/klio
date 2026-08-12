@@ -33,9 +33,28 @@ session.
 [![MCP Shim: Apache-2.0](https://img.shields.io/badge/MCP%20Shim-Apache--2.0-green.svg)](LICENSE-APACHE-2.0)
 [![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-native-purple)](https://modelcontextprotocol.io)
 
+**Fastest path — Klio Cloud.** Nothing to install or run; free for one
+person with unlimited memories:
+
+```bash
+claude mcp add --transport http klio https://mcp.klio.tech/mcp \
+  --header "X-Klio-Key: YOUR_KEY" \
+  --header "X-Klio-Agent: claude-code"
 ```
+
+Get a key at [app.klio.tech](https://app.klio.tech) — the dashboard hands
+you this exact command with the key filled in.
+
+**Or self-host this repo** — the open-source core engine on your own
+hardware, keys you hold, hash-chained history:
+
+```bash
 npx @klio-tech/klio init
 ```
+
+These are different deployments of the same product: self-hosting is the
+core memory engine, while the knowledge graph, hybrid recall, artifacts and
+contradiction reconciliation run in Klio Cloud.
 
 **[★ Star Klio on GitHub](https://github.com/klio-tech/klio)** if memory-that-survives-the-window-close sounds like a primitive every AI agent should have.
 
