@@ -12,6 +12,7 @@ import type { Memory } from "./inject.js";
 const DEFAULT_BUDGET_MS = 300;
 const DEFAULT_TTL_MS = 60_000;
 const RECALL_LIMIT = 8;
+const MAX_CACHE_ENTRIES = 256;
 
 export type RecallerOptions = {
   config: CloudConfig;
@@ -37,25 +38,45 @@ export function createRecaller(opts: RecallerOptions): (query: string) => Promis
     if (cached && now() - cached.at < ttlMs) return cached.memories;
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), budgetMs);
+    const abortTimer = setTimeout(() => controller.abort(), budgetMs);
+    const budgetTimer = new Promise<null>((resolve) => {
+      setTimeout(() => resolve(null), budgetMs);
+    });
+
     try {
-      const res = await doFetch(`${opts.config.baseUrl}/capture/recall`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Vex-Key": opts.config.apiKey,
-          "X-Vex-Agent": opts.config.agentId,
-        },
-        body: JSON.stringify({ query, limit: RECALL_LIMIT, scope: "org" }),
-        signal: controller.signal,
-      });
-      if (!res.ok) return [];
-      const payload = (await res.json()) as { memories?: unknown };
+      const res = await Promise.race([
+        doFetch(`${opts.config.baseUrl}/capture/recall`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Vex-Key": opts.config.apiKey,
+            "X-Vex-Agent": opts.config.agentId,
+          },
+          body: JSON.stringify({ query, limit: RECALL_LIMIT, scope: "org" }),
+          signal: controller.signal,
+        }),
+        budgetTimer,
+      ]);
+
+      // If budgetTimer won the race, res is null
+      if (!res) return [];
+
+      const response = res as Response;
+      if (!response.ok) return [];
+      const payload = (await response.json()) as { memories?: unknown };
       const raw = Array.isArray(payload.memories) ? payload.memories : [];
       const memories: Memory[] = raw
         .map((r) => r as Record<string, unknown>)
         .filter((r) => typeof r["content"] === "string" && (r["content"] as string).trim() !== "")
         .map((r) => ({ id: String(r["id"] ?? ""), content: String(r["content"]) }));
+
+      // Enforce cache cap with oldest-out eviction
+      if (cache.size >= MAX_CACHE_ENTRIES) {
+        const firstKey = cache.keys().next().value;
+        if (firstKey !== undefined) {
+          cache.delete(firstKey);
+        }
+      }
       cache.set(query, { at: now(), memories });
       return memories;
     } catch {
@@ -63,7 +84,7 @@ export function createRecaller(opts: RecallerOptions): (query: string) => Promis
       // answer: no injection this turn.
       return [];
     } finally {
-      clearTimeout(timer);
+      clearTimeout(abortTimer);
     }
   };
 }
