@@ -18,6 +18,16 @@
 export const PROXY_PORT = 8787;
 
 /**
+ * The literal address the server binds. Loopback only, always — the
+ * proxy forwards the user's Anthropic credentials on every request, so
+ * binding anything other than the IPv4 loopback literal would turn a
+ * local dev tool into an open relay for anyone who can route to the
+ * machine. `127.0.0.1` rather than `localhost`: binding must not depend
+ * on how the host's resolver happens to order `localhost`'s addresses.
+ */
+export const PROXY_HOST = "127.0.0.1";
+
+/**
  * Loopback only, always. The proxy forwards the user's Anthropic
  * credentials on every request; a proxy reachable from the local
  * network is an open relay for anyone who can route to the machine.
