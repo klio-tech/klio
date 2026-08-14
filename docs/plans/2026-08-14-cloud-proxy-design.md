@@ -32,23 +32,97 @@ that are.
 | **Wire Claude Code AND Codex** | `codexProxy.ts` already exists and works. Shipping only Claude Code would leave working code unused. |
 | **Default the prompt to NO** | Pointing `ANTHROPIC_BASE_URL` at localhost is the most invasive thing this tool does. A cloud user signed up to avoid running things; they must opt in, not opt out. |
 
-## What the proxy does — stated honestly
+## What the proxy does: injection + capture, shipped
 
-**Today it does nothing.** Pass-through only; it does not alter a single byte.
-That is deliberate and should stay deliberate: once `ANTHROPIC_BASE_URL` points
-at localhost, a proxy that is down, slow, or subtly wrong does not degrade the
-agent — it makes the agent **unable to reach a model at all**. The plumbing ships
-and gets proven survivable while the blast radius is zero.
+A pass-through proxy is worth nothing to a cloud user. The Python proxy shipped
+pass-through-only to prove the *shape* survivable, and it has — in the local
+stack, under a supervisor, in real use. That trust does not need re-earning from
+zero. **This build ships the injection transform**, because injection is the
+entire reason the proxy is worth having:
 
-Its value is the named seam (`klio_proxy.seam`, and its Node equivalent) where
-two things eventually live:
+> It is the only mechanism that puts Klio's memory into a request without the
+> agent's cooperation — no hook support required, no tool call required, no
+> agent-side code at all. Any agent that lets you override its base URL gets
+> team memory, including one someone wrote themselves last night.
 
-- **Compression** — token reduction on the request leg.
-- **Context injection** — the only mechanism by which Klio can put memory into a
-  request for an agent that supports neither hooks nor MCP.
+Compression stays out of scope. Two capabilities — inject on the way out,
+capture on the way back — both done carefully.
 
-Seam errors fail open: any exception a transform raises forwards the original
-bytes unchanged.
+### Capture: the proxy closes the loop for hookless agents
+
+Capture today lives in `bridge/internal/hooks` and reaches only agents whose
+harness supports hooks — in practice, Claude Code. Codex, Cursor and Claude
+Desktop all write memories through MCP, and **not one of their sessions is ever
+retained, graded, or attributed.** Most agents contribute nothing to the
+evidence loop.
+
+The proxy sees the entire conversation on every request. That makes it the one
+place a hookless agent's session can be captured, so a proxied agent becomes
+self-sufficient: **it receives context and it contributes evidence**, with no
+harness support at all.
+
+- On each proxied messages request, the injector already parses the body. The
+  same parse yields the conversation.
+- Capture is emitted **after the response is fully forwarded** — never in the
+  request path, never blocking the model call.
+- It POSTs to the engine's existing `/capture/transcript` with a
+  proxy-derived session id (`klio-proxy:<agent>:<conversation-hash>`), the same
+  endpoint and shape the hooks use, so traces, grading and attribution all work
+  unchanged downstream.
+- Emission is best-effort and fire-and-forget: a capture failure is logged and
+  dropped. It can never affect the agent.
+- Governed by `KLIO_PROXY_CAPTURE=on|off`, and off whenever injection is off.
+
+### The constraint that actually binds
+
+Not "never parse bodies" — that is a description of how the pass-through stage
+achieves its guarantee, not a prohibition on later stages; the same README
+plans for compressors in the seam, and a compressor must read the body.
+
+The real constraint, from `proxy/README.md`, is narrower and sharper:
+**do not break `tool_reference` blocks.** Pointing `ANTHROPIC_BASE_URL` at a
+non-Anthropic host disables MCP Tool Search; `klio init` re-enables it with
+`ENABLE_TOOL_SEARCH=true`, and that only works if `tool_reference` blocks are
+forwarded correctly. Getting it wrong costs ~85% on tool schemas — *silently*,
+while Klio claims to be saving tokens. A net loss nobody can see is worse than
+no product at all.
+
+So: **parse narrowly, mutate one field, never touch `tools`, and forward the
+original bytes on any doubt.** Six rules make that safe:
+
+1. **Path allowlist.** Only `POST` to the messages endpoint is ever parsed.
+   Every other request keeps the existing byte-exact path, untouched.
+2. **One field, append-only.** Injection appends a single block to `system`.
+   `messages`, `tools`, `tool_choice` and every `tool_reference` block are never
+   read, never rewritten, never re-ordered. The Anthropic API accepts `system`
+   as a string or an array of blocks; a string is promoted to a two-element
+   array with the original first.
+3. **Structural round-trip check.** After mutation, the serialized body is
+   re-parsed and compared against the original for every top-level key except
+   `system`. Any difference — key order is not a difference, key *content* is —
+   forwards the original bytes.
+4. **Fail open, always.** Parse failure, recall failure, timeout, oversize body,
+   unexpected shape: forward the original bytes. There is no error path in which
+   the agent's request does not reach the model.
+5. **Bounded latency.** The recall runs with a hard **300 ms** timeout. Late
+   answer, no injection — the request has already gone. The proxy must never make
+   a model call slower in a way a user would notice.
+6. **Off by default per-request via kill switch.** `KLIO_PROXY_INJECT=off`
+   restores exact pass-through without uninstalling anything.
+
+### Cost control
+
+Recalling on every request would be both slow and expensive. The injector keeps
+a small in-process cache keyed by a hash of the conversation's last user
+message, TTL 60 s. A tight agent loop on one task therefore recalls once, not
+forty times. Cache misses that exceed the 300 ms budget simply do not inject.
+
+### Observability
+
+Every response carries `x-klio-injected: <n>` — the number of memories added,
+`0` when injection was skipped. One header answers "is this thing doing
+anything?" without reading logs, and makes the no-op case visible rather than
+ambiguous.
 
 ## Architecture
 
@@ -149,7 +223,7 @@ A Node proxy that passes all of these is behaviourally the Python one.
 
 ## Out of scope
 
-- Any transform in the seam (compression, context injection). Plumbing only.
+- Compression. Injection and capture only.
 - Converting the local stack to the Node proxy.
 - Agents without a base-URL override. Cursor routes most models through its own
   backend; there is frequently no request of yours to intercept. Cloud agents
