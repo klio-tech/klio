@@ -76,8 +76,19 @@ jobs:
           echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
           echo "local=$LOCAL" >> "$GITHUB_OUTPUT"
           if [ "$PUBLISHED" = "$LOCAL" ]; then
-            echo "Version $LOCAL already published — skipping."
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            # A source change under npm/src that forgets the version bump used
+            # to end here as a silent green "skipping" — the fix looked shipped
+            # and nobody's npx ever saw it. Fail loudly instead: if this run was
+            # triggered by a change to npm/src, an unbumped version is a mistake.
+            if git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" \
+                 2>/dev/null | grep -q '^npm/src/'; then
+              echo "::error::npm/src changed but package.json is still $LOCAL, \
+            which is already on npm. Bump the version — otherwise this fix ships \
+            to nobody."
+              exit 1
+            fi
+            echo "Version $LOCAL already published, and npm/src is unchanged — nothing to do."
           else
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
           fi
