@@ -103,35 +103,42 @@ test("a never-resolving, signal-ignoring fetchImpl times out at the budget", asy
 });
 
 test("the cache cap evicts oldest entries when exceeded", async () => {
-  const recall = createRecaller({
-    config: CONFIG,
-    fetchImpl: okFetch([{ id: "m1", content: "c" }]) as unknown as typeof fetch,
-  });
-  // Insert 300 distinct queries
-  for (let i = 0; i < 300; i++) {
-    await recall(`query-${i}`);
-  }
-  // Create a fresh recaller to inspect the cache size indirectly
-  // by testing that only the newest 256 queries are cached
-  let cacheHits = 0;
   const calls: string[] = [];
-  const recallWithTracking = createRecaller({
+  const recall = createRecaller({
     config: CONFIG,
     fetchImpl: okFetch([{ id: "m1", content: "c" }], calls) as unknown as typeof fetch,
   });
   // Prime the cache with 256 queries
   for (let i = 0; i < 256; i++) {
-    await recallWithTracking(`new-query-${i}`);
+    await recall(`query-${i}`);
   }
   const callsAfterPrime = calls.length;
-  // Now query all of them again - they should all be cached
+  // Verify all 256 are cached by querying them again
   for (let i = 0; i < 256; i++) {
-    await recallWithTracking(`new-query-${i}`);
+    await recall(`query-${i}`);
   }
   assert.equal(calls.length, callsAfterPrime, "all 256 queries must be cached");
-  // Now add one more query, which should evict the oldest
-  await recallWithTracking(`new-query-256`);
-  // Query the first one again - it should NOT be cached (was evicted)
-  await recallWithTracking(`new-query-0`);
-  assert.ok(calls.length > callsAfterPrime + 1, "oldest entry must be evicted when cap is exceeded");
+  // Add one more query (257th), which should evict the oldest (query-0)
+  await recall(`query-256`);
+  // Verify newest entry (query-256) is still cached
+  const callsBeforeNewest = calls.length;
+  await recall(`query-256`);
+  assert.equal(calls.length, callsBeforeNewest, "newest entry must survive eviction");
+  // Verify oldest entry was evicted
+  await recall(`query-0`);
+  assert.ok(calls.length > callsBeforeNewest, "oldest entry must be evicted when cap is exceeded");
+});
+
+test("no timer outlives a successful recall call", async () => {
+  const recall = createRecaller({
+    config: CONFIG,
+    budgetMs: 5000,
+    fetchImpl: (async () => new Response(JSON.stringify({ memories: [{ id: "m1", content: "c" }] }), { status: 200 })) as unknown as typeof fetch,
+  });
+  const resourcesBefore = process.getActiveResourcesInfo?.() ?? [];
+  const timeoutsBefore = resourcesBefore.filter((r) => r === "Timeout").length;
+  await recall("quick");
+  const resourcesAfter = process.getActiveResourcesInfo?.() ?? [];
+  const timeoutsAfter = resourcesAfter.filter((r) => r === "Timeout").length;
+  assert.equal(timeoutsAfter, timeoutsBefore, "no timeout timer should outlive the recall call");
 });

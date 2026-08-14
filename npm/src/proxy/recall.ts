@@ -39,8 +39,9 @@ export function createRecaller(opts: RecallerOptions): (query: string) => Promis
 
     const controller = new AbortController();
     const abortTimer = setTimeout(() => controller.abort(), budgetMs);
+    let budgetTimerId: NodeJS.Timeout | undefined;
     const budgetTimer = new Promise<null>((resolve) => {
-      setTimeout(() => resolve(null), budgetMs);
+      budgetTimerId = setTimeout(() => resolve(null), budgetMs);
     });
 
     try {
@@ -70,8 +71,8 @@ export function createRecaller(opts: RecallerOptions): (query: string) => Promis
         .filter((r) => typeof r["content"] === "string" && (r["content"] as string).trim() !== "")
         .map((r) => ({ id: String(r["id"] ?? ""), content: String(r["content"]) }));
 
-      // Enforce cache cap with oldest-out eviction
-      if (cache.size >= MAX_CACHE_ENTRIES) {
+      // Enforce cache cap with oldest-out eviction only on new entries
+      if (!cache.has(query) && cache.size >= MAX_CACHE_ENTRIES) {
         const firstKey = cache.keys().next().value;
         if (firstKey !== undefined) {
           cache.delete(firstKey);
@@ -85,6 +86,9 @@ export function createRecaller(opts: RecallerOptions): (query: string) => Promis
       return [];
     } finally {
       clearTimeout(abortTimer);
+      if (budgetTimerId !== undefined) {
+        clearTimeout(budgetTimerId);
+      }
     }
   };
 }
