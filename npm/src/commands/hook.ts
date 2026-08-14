@@ -163,6 +163,11 @@ async function handleSessionStart(
   const res = await postCapture(config, fetchFn, CLOUD_CAPTURE_PATHS.recall, {
     query: "",
     limit: 12,
+    // The engine derives one session identity from this; the Stop hook's
+    // transcript sends it too. Omit it here and the recall is filed under
+    // "default", which never joins its own session's trace — the outcome
+    // grader then finds no recalls to attribute and the session goes ungraded.
+    session_id: payload.session_id,
     ...resolveProject(payload.cwd, deps),
   });
   if (!res) return;

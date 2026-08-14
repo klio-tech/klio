@@ -76,7 +76,7 @@ test("SessionStart posts recall and prints additionalContext", async () => {
   const lines: string[] = [];
   const code = await runHook("SessionStart", {
     config: CONFIG,
-    stdin: JSON.stringify({ cwd: "/x" }),
+    stdin: JSON.stringify({ cwd: "/x", session_id: "s-start" }),
     fetchFn: fn,
     stdout: (l) => lines.push(l),
     gitRemoteFn: () => null,
@@ -93,6 +93,10 @@ test("SessionStart posts recall and prints additionalContext", async () => {
   const body = bodyOf(calls[0]);
   assert.equal(body.query, "");
   assert.equal(body.repo_root, "/x");
+  // The session must ride the recall: the engine derives one identity from it,
+  // and without it the recall files under "default" and never joins the Stop
+  // hook's trace for the same session — leaving the session ungraded.
+  assert.equal(body.session_id, "s-start");
 
   const out = JSON.parse(lines.join("")) as {
     hookSpecificOutput: { hookEventName: string; additionalContext: string };
