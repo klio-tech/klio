@@ -1289,8 +1289,14 @@ Expected: the answer references real memories from the org — proof the injecte
 - [ ] **Step 5: Capture landed**
 
 ```sql
+-- NOT `LIKE 'klio-proxy:%'` — that matches NOTHING. The engine
+-- namespaces the id it is given, storing
+-- `klio-hook:<org_id>:u:<user_id>:klio-proxy:<agent>:<hash>`, so the
+-- proxy's own prefix is in the MIDDLE of the stored value. Anyone
+-- running the anchored form would conclude, wrongly, that proxy capture
+-- is broken. Confirmed against the production database on 2026-08-15.
 SELECT session_id, message_count FROM session_traces
- WHERE session_id LIKE 'klio-proxy:%' ORDER BY created_at DESC LIMIT 3;
+ WHERE session_id LIKE '%klio-proxy:%' ORDER BY created_at DESC LIMIT 3;
 ```
 Expected: at least one row from the calls above.
 

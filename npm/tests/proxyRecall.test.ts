@@ -1,144 +1,325 @@
+// Unit-level contract of the warming recaller.
+//
+// The BEHAVIOUR that matters — that the request path never waits, that
+// warming actually warms, that a stampede collapses to one fetch — is
+// driven end to end through a real proxy against a deliberately SLOW
+// recall endpoint in tests/proxyWarming.test.ts, and against the real
+// engine in docs/proxy-manual-verification.md. What is left here is the
+// wire contract and the fail-open guarantees, where a fast stub is the
+// right tool.
+
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { createRecaller } from "../src/proxy/recall.js";
+import { AMBIENT_QUERY, createWarmingRecaller } from "../src/proxy/recall.js";
 
 const CONFIG = { apiKey: "k", agentId: "a", baseUrl: "https://api.example" };
 
 function okFetch(memories: unknown[], calls: string[] = []) {
-  return async (url: string | URL | Request, init?: RequestInit) => {
+  return async (url: string | URL | Request, _init?: RequestInit) => {
     calls.push(String(url));
     return new Response(JSON.stringify({ memories }), { status: 200 });
   };
 }
 
-test("returns memories and sends the key + agent headers", async () => {
-  let seen: Record<string, string> = {};
-  const recall = createRecaller({
-    config: CONFIG,
-    fetchImpl: (async (_u: any, init: any) => {
-      seen = init.headers;
-      return new Response(JSON.stringify({ memories: [{ id: "m1", content: "c" }] }), { status: 200 });
-    }) as unknown as typeof fetch,
-  });
-  const out = await recall("why postgres");
-  assert.equal(out.length, 1);
-  assert.equal(seen["X-Vex-Key"], "k");
-  assert.equal(seen["X-Vex-Agent"], "a");
+/** Build a recaller, warm one query, and hand back the lookup. */
+async function warmed(opts: Parameters<typeof createWarmingRecaller>[0], query: string) {
+  const recaller = createWarmingRecaller({ ambient: false, log: () => {}, ...opts });
+  recaller.lookup(query);
+  await recaller.idle();
+  return recaller;
+}
+
+test("sends the key + agent headers, and the documented body", async () => {
+  let seenUrl = "";
+  let seenHeaders: Record<string, string> = {};
+  let seenBody: Record<string, unknown> = {};
+  const recaller = await warmed(
+    {
+      config: CONFIG,
+      fetchImpl: (async (u: any, init: any) => {
+        seenUrl = String(u);
+        seenHeaders = init.headers;
+        seenBody = JSON.parse(init.body);
+        return new Response(JSON.stringify({ memories: [{ id: "m1", content: "c" }] }), { status: 200 });
+      }) as unknown as typeof fetch,
+    },
+    "why postgres",
+  );
+
+  assert.equal(seenUrl, "https://api.example/capture/recall");
+  assert.equal(seenHeaders["X-Vex-Key"], "k");
+  assert.equal(seenHeaders["X-Vex-Agent"], "a");
+  assert.deepEqual(seenBody, { query: "why postgres", limit: 8, scope: "org" });
+
+  const out = recaller.lookup("why postgres");
+  assert.equal(out.memories.length, 1);
+  assert.equal(out.reason, "hit");
+  recaller.stop();
 });
 
-test("a slow recall is abandoned at the budget and yields nothing", async () => {
-  const recall = createRecaller({
+test("the request path is a cache read: a miss returns immediately", async () => {
+  const recaller = createWarmingRecaller({
     config: CONFIG,
-    budgetMs: 20,
-    fetchImpl: ((_u: any, init: any) =>
-      new Promise((_resolve, reject) => {
-        init.signal.addEventListener("abort", () => reject(new Error("aborted")));
-      })) as unknown as typeof fetch,
+    ambient: false,
+    log: () => {},
+    fetchImpl: (() => new Promise<Response>(() => {})) as unknown as typeof fetch, // never resolves
   });
   const started = Date.now();
-  const out = await recall("slow");
-  assert.deepEqual(out, []);
-  assert.ok(Date.now() - started < 200, "must not wait beyond the budget");
+  const out = recaller.lookup("anything");
+  const elapsed = Date.now() - started;
+  assert.deepEqual(out.memories, []);
+  assert.equal(out.reason, "cold");
+  assert.ok(elapsed < 50, `lookup must not wait (took ${elapsed}ms)`);
+  recaller.stop();
 });
 
-test("a non-2xx response yields nothing, never throws", async () => {
-  const recall = createRecaller({
-    config: CONFIG,
-    fetchImpl: (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch,
-  });
-  assert.deepEqual(await recall("q"), []);
+test("a non-2xx response yields nothing and reads as an error, never throws", async () => {
+  const recaller = await warmed(
+    { config: CONFIG, fetchImpl: (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch },
+    "q",
+  );
+  assert.deepEqual(recaller.lookup("q"), { memories: [], reason: "error" });
+  recaller.stop();
 });
 
-test("a network error yields nothing, never throws", async () => {
-  const recall = createRecaller({
-    config: CONFIG,
-    fetchImpl: (async () => { throw new Error("ECONNREFUSED"); }) as unknown as typeof fetch,
-  });
-  assert.deepEqual(await recall("q"), []);
+test("a network error yields nothing and reads as an error, never throws", async () => {
+  const recaller = await warmed(
+    { config: CONFIG, fetchImpl: (async () => { throw new Error("ECONNREFUSED"); }) as unknown as typeof fetch },
+    "q",
+  );
+  assert.deepEqual(recaller.lookup("q"), { memories: [], reason: "error" });
+  recaller.stop();
 });
 
-test("identical queries inside the TTL hit the cache once", async () => {
+test("malformed JSON yields nothing, never throws", async () => {
+  const recaller = await warmed(
+    { config: CONFIG, fetchImpl: (async () => new Response("{not json", { status: 200 })) as unknown as typeof fetch },
+    "q",
+  );
+  assert.equal(recaller.lookup("q").reason, "error");
+  recaller.stop();
+});
+
+test("memories without usable content are dropped", async () => {
+  const recaller = await warmed(
+    {
+      config: CONFIG,
+      fetchImpl: okFetch([
+        { id: "1", content: "kept" },
+        { id: "2", content: "   " },
+        { id: "3" },
+        { id: "4", content: 7 },
+        "not an object",
+      ]) as unknown as typeof fetch,
+    },
+    "q",
+  );
+  assert.deepEqual(recaller.lookup("q").memories, [{ id: "1", content: "kept" }]);
+  recaller.stop();
+});
+
+test("a blank query never reaches the network", async () => {
   const calls: string[] = [];
-  const recall = createRecaller({
+  const recaller = createWarmingRecaller({
     config: CONFIG,
-    ttlMs: 60_000,
-    now: () => 1_000,
+    ambient: false,
+    log: () => {},
     fetchImpl: okFetch([{ id: "m1", content: "c" }], calls) as unknown as typeof fetch,
   });
-  await recall("same");
-  await recall("same");
-  assert.equal(calls.length, 1, "second identical query must be served from cache");
+  assert.deepEqual(recaller.lookup("   "), { memories: [], reason: "no-query" });
+  await recaller.idle();
+  assert.equal(calls.length, 0);
+  recaller.stop();
 });
 
-test("the cache expires after the TTL", async () => {
+test("no config key means no recall and no network", async () => {
+  const calls: string[] = [];
+  const recaller = createWarmingRecaller({
+    config: { ...CONFIG, apiKey: "" },
+    ambient: false,
+    log: () => {},
+    fetchImpl: okFetch([{ id: "m1", content: "c" }], calls) as unknown as typeof fetch,
+  });
+  assert.deepEqual(recaller.lookup("q"), { memories: [], reason: "no-config" });
+  await recaller.idle();
+  assert.equal(calls.length, 0);
+  recaller.stop();
+});
+
+test("a fresh entry is not re-fetched", async () => {
+  const calls: string[] = [];
+  const recaller = await warmed(
+    {
+      config: CONFIG,
+      ttlMs: 60_000,
+      now: () => 1_000,
+      fetchImpl: okFetch([{ id: "m1", content: "c" }], calls) as unknown as typeof fetch,
+    },
+    "same",
+  );
+  recaller.lookup("same");
+  recaller.lookup("same");
+  await recaller.idle();
+  assert.equal(calls.length, 1, "a fresh entry must be served without another fetch");
+  recaller.stop();
+});
+
+test("a stale entry is refreshed behind the caller, not dropped", async () => {
   const calls: string[] = [];
   let clock = 1_000;
-  const recall = createRecaller({
+  const recaller = createWarmingRecaller({
     config: CONFIG,
+    ambient: false,
+    log: () => {},
     ttlMs: 100,
     now: () => clock,
     fetchImpl: okFetch([{ id: "m1", content: "c" }], calls) as unknown as typeof fetch,
   });
-  await recall("same");
+  recaller.lookup("same");
+  await recaller.idle();
+  assert.equal(calls.length, 1);
+
   clock += 500;
-  await recall("same");
-  assert.equal(calls.length, 2);
+  const stale = recaller.lookup("same");
+  assert.equal(stale.memories.length, 1, "a stale entry is still served");
+  assert.equal(stale.reason, "hit");
+  await recaller.idle();
+  assert.equal(calls.length, 2, "and refreshed behind the caller");
+  recaller.stop();
 });
 
-test("a never-resolving, signal-ignoring fetchImpl times out at the budget", async () => {
-  const recall = createRecaller({
+test("the ambient set is fetched at start() with the broad query", async () => {
+  const bodies: string[] = [];
+  const recaller = createWarmingRecaller({
     config: CONFIG,
-    budgetMs: 50,
-    fetchImpl: ((_u: any, _init: any) =>
-      new Promise((_resolve, _reject) => {
-        // Never resolves, never checks signal
-      })) as unknown as typeof fetch,
+    ambient: true,
+    log: () => {},
+    fetchImpl: (async (_u: any, init: any) => {
+      bodies.push(JSON.parse(init.body).query);
+      return new Response(JSON.stringify({ memories: [{ id: "a", content: "ambient" }] }), { status: 200 });
+    }) as unknown as typeof fetch,
   });
-  const started = Date.now();
-  const out = await recall("hanging");
-  const elapsed = Date.now() - started;
-  assert.deepEqual(out, []);
-  assert.ok(elapsed < 150, `must return within ~budget (elapsed ${elapsed}ms > 150ms)`);
+  recaller.start();
+  await recaller.idle();
+  assert.deepEqual(bodies, [AMBIENT_QUERY]);
+  assert.equal(recaller.lookup("never asked before").reason, "ambient");
+  recaller.stop();
 });
 
-test("the cache cap evicts oldest entries when exceeded", async () => {
-  const calls: string[] = [];
-  const recall = createRecaller({
+test("ambient: false builds layer 2 only", async () => {
+  const bodies: string[] = [];
+  const recaller = createWarmingRecaller({
     config: CONFIG,
+    ambient: false,
+    log: () => {},
+    fetchImpl: (async (_u: any, init: any) => {
+      bodies.push(JSON.parse(init.body).query);
+      return new Response(JSON.stringify({ memories: [{ id: "a", content: "x" }] }), { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+  recaller.start();
+  await recaller.idle();
+  assert.deepEqual(bodies, []);
+  assert.equal(recaller.lookup("q").reason, "cold");
+  recaller.stop();
+});
+
+test("a signal-ignoring fetch is still bounded by the budget", async () => {
+  const recaller = createWarmingRecaller({
+    config: CONFIG,
+    ambient: false,
+    log: () => {},
+    budgetMs: 50,
+    fetchImpl: (() => new Promise<Response>(() => {})) as unknown as typeof fetch,
+  });
+  recaller.lookup("hanging");
+  const started = Date.now();
+  await recaller.idle();
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 500, `the background fetch must end at the budget (took ${elapsed}ms)`);
+  assert.equal(recaller.lookup("hanging").reason, "error");
+  recaller.stop();
+});
+
+test("no timer outlives a completed background recall", async () => {
+  const recaller = createWarmingRecaller({
+    config: CONFIG,
+    ambient: false,
+    log: () => {},
+    budgetMs: 5000,
+    fetchImpl: (async () =>
+      new Response(JSON.stringify({ memories: [{ id: "m1", content: "c" }] }), { status: 200 })) as unknown as typeof fetch,
+  });
+  const before = (process.getActiveResourcesInfo?.() ?? []).filter((r) => r === "Timeout").length;
+  recaller.lookup("quick");
+  await recaller.idle();
+  const after = (process.getActiveResourcesInfo?.() ?? []).filter((r) => r === "Timeout").length;
+  assert.equal(after, before, "no timeout timer should outlive the recall it bounded");
+  recaller.stop();
+});
+
+test("a failure is logged once, without the query or the key", async () => {
+  const logged: string[] = [];
+  const recaller = createWarmingRecaller({
+    config: { ...CONFIG, apiKey: "super-secret-key" },
+    ambient: false,
+    log: (l) => logged.push(l),
+    fetchImpl: (async () => new Response("nope", { status: 503 })) as unknown as typeof fetch,
+  });
+  recaller.lookup("a very distinctive query string");
+  await recaller.idle();
+  recaller.lookup("another distinctive query string");
+  await recaller.idle();
+
+  assert.equal(logged.length, 1, "the throttle must collapse a flood into one line");
+  assert.match(logged[0]!, /recall failed \(HTTP 503\)/);
+  assert.ok(!logged[0]!.includes("distinctive"), "no query text");
+  assert.ok(!logged[0]!.includes("super-secret-key"), "no credentials");
+  recaller.stop();
+});
+
+test("the cache is capped at 256 entries with oldest-out eviction", async () => {
+  const calls: string[] = [];
+  const recaller = createWarmingRecaller({
+    config: CONFIG,
+    ambient: false,
+    log: () => {},
     fetchImpl: okFetch([{ id: "m1", content: "c" }], calls) as unknown as typeof fetch,
   });
-  // Prime the cache with 256 queries
   for (let i = 0; i < 256; i++) {
-    await recall(`query-${i}`);
+    recaller.lookup(`query-${i}`);
+    await recaller.idle();
   }
-  const callsAfterPrime = calls.length;
-  // Verify all 256 are cached by querying them again
-  for (let i = 0; i < 256; i++) {
-    await recall(`query-${i}`);
-  }
-  assert.equal(calls.length, callsAfterPrime, "all 256 queries must be cached");
-  // Add one more query (257th), which should evict the oldest (query-0)
-  await recall(`query-256`);
-  // Verify newest entry (query-256) is still cached
-  const callsBeforeNewest = calls.length;
-  await recall(`query-256`);
-  assert.equal(calls.length, callsBeforeNewest, "newest entry must survive eviction");
-  // Verify oldest entry was evicted
-  await recall(`query-0`);
-  assert.ok(calls.length > callsBeforeNewest, "oldest entry must be evicted when cap is exceeded");
+  assert.equal(recaller.size(), 256);
+  assert.equal(recaller.lookup("query-0").reason, "hit");
+
+  recaller.lookup("query-256");
+  await recaller.idle();
+  assert.equal(recaller.size(), 256, "the cap must hold");
+  assert.equal(recaller.lookup("query-256").reason, "hit", "the newest entry survives");
+  assert.equal(recaller.lookup("query-0").reason, "cold", "the oldest was evicted");
+  recaller.stop();
 });
 
-test("no timer outlives a successful recall call", async () => {
-  const recall = createRecaller({
+test("updating an existing entry does not shrink the cache below the cap", async () => {
+  let clock = 0;
+  const recaller = createWarmingRecaller({
     config: CONFIG,
-    budgetMs: 5000,
-    fetchImpl: (async () => new Response(JSON.stringify({ memories: [{ id: "m1", content: "c" }] }), { status: 200 })) as unknown as typeof fetch,
+    ambient: false,
+    log: () => {},
+    ttlMs: 10,
+    now: () => clock,
+    fetchImpl: okFetch([{ id: "m1", content: "c" }]) as unknown as typeof fetch,
   });
-  const resourcesBefore = process.getActiveResourcesInfo?.() ?? [];
-  const timeoutsBefore = resourcesBefore.filter((r) => r === "Timeout").length;
-  await recall("quick");
-  const resourcesAfter = process.getActiveResourcesInfo?.() ?? [];
-  const timeoutsAfter = resourcesAfter.filter((r) => r === "Timeout").length;
-  assert.equal(timeoutsAfter, timeoutsBefore, "no timeout timer should outlive the recall call");
+  for (let i = 0; i < 256; i++) {
+    recaller.lookup(`q-${i}`);
+    await recaller.idle();
+  }
+  assert.equal(recaller.size(), 256);
+  clock += 1000; // everything is stale now
+  recaller.lookup("q-255");
+  await recaller.idle();
+  assert.equal(recaller.size(), 256, "refreshing an existing key must not evict anything");
+  recaller.stop();
 });

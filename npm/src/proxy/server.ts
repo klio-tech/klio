@@ -37,8 +37,14 @@ import {
 } from "./constants.js";
 import { emitCapture, type EmitCaptureOptions } from "./capture.js";
 import { filterRequestHeaders, filterResponseHeaders } from "./headers.js";
-import { injectMemories, type Memory } from "./inject.js";
-import { createRecaller } from "./recall.js";
+import { injectMemories } from "./inject.js";
+import {
+  INJECT_REASON_HEADER,
+  createWarmingRecaller,
+  type InjectReason,
+  type LookupFn,
+  type RecallLookup,
+} from "./recall.js";
 import { resolveProxyToggles } from "./toggles.js";
 
 /** Above this, a request body is forwarded raw, unbuffered, uninjected. */
@@ -57,7 +63,12 @@ export type ProxyUpstreams = Record<string, string>;
 export type CreateProxyServerOptions = {
   config: CloudConfig | null;
   upstreams?: ProxyUpstreams;
-  recall?: (query: string) => Promise<Memory[]>;
+  /**
+   * SYNCHRONOUS BY CONTRACT — a cache read, never a network call. The
+   * request path must not wait on the engine; see recall.ts's docblock
+   * for the production measurement that made this non-negotiable.
+   */
+  recall?: LookupFn;
   capture?: (opts: EmitCaptureOptions) => Promise<void>;
   fetchImpl?: typeof fetch;
   /** Default true. `false` disables the injection path only — capture is independent. */
@@ -497,7 +508,10 @@ function describeMode(
 
 export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
   const upstreams: Record<string, string> = { ...DEFAULT_UPSTREAMS, ...(opts.upstreams ?? {}) };
-  const recall = opts.recall ?? (async () => []);
+  // No recaller wired means there is genuinely nothing to recall from,
+  // which is what `no-config` says. (`startProxy` always wires one when
+  // the machine holds a cloud config.)
+  const lookup: LookupFn = opts.recall ?? ((): RecallLookup => ({ memories: [], reason: "no-config" }));
   const capture = opts.capture ?? emitCapture;
   const doFetch = opts.fetchImpl ?? fetch;
   const injectEnabled = opts.inject !== false;
@@ -513,7 +527,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       // than leave the connection hanging, so it uses the same 502
       // shape as a genuinely unreachable upstream.
       if (!res.headersSent) {
-        sendJson(res, 502, { "x-klio-proxy-error": messageOf(err), "x-klio-injected": "0" }, {
+        sendJson(res, 502, {
+          "x-klio-proxy-error": messageOf(err),
+          "x-klio-injected": "0",
+          [INJECT_REASON_HEADER]: "error" satisfies InjectReason,
+        }, {
           type: "error",
           error: { type: "api_error", message: messageOf(err) },
         });
@@ -543,7 +561,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
 
     const upstream = resolveUpstream(rawUrl, upstreams);
     if (!upstream.ok) {
-      sendJson(res, 404, { "x-klio-injected": "0" }, {
+      sendJson(res, 404, {
+        "x-klio-injected": "0",
+        [INJECT_REASON_HEADER]: "not-applicable" satisfies InjectReason,
+      }, {
         type: "error",
         error: { type: "not_found_error", message: "unknown upstream" },
       });
@@ -559,13 +580,26 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
     // user-facing toggles, and someone disabling injection (most likely
     // because they suspect it of affecting model output) must not also
     // silently lose capture with no signal that it happened.
-    const isMessagesShape =
-      !body.capped && req.method === "POST" && upstream.path.endsWith("/messages") && opts.config !== null;
+    const isMessagesPath = !body.capped && req.method === "POST" && upstream.path.endsWith("/messages");
+    const isMessagesShape = isMessagesPath && opts.config !== null;
     const willInject = isMessagesShape && injectEnabled;
 
     let outBody: Buffer | Readable;
     let injected = 0;
     let originalBuffered: Buffer | null = null;
+
+    // Why `x-klio-injected` is about to be what it is. `0` on its own
+    // was ambiguous across five distinct causes, and that ambiguity is
+    // what let "injection is inert in production" survive a whole
+    // branch of green tests. Assigned on EVERY path below, including
+    // the ones that never reach the injector.
+    let reason: InjectReason = !isMessagesPath
+      ? "not-applicable"
+      : opts.config === null
+        ? "no-config"
+        : injectEnabled
+          ? "cold"
+          : "disabled";
 
     // Tracked separately from `outBody` so it stays reachable regardless
     // of which branch below reassigns `outBody`. `undici` does NOT
@@ -612,17 +646,28 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       outBody = body.body;
 
       if (willInject) {
-        let memories: Memory[] = [];
+        // CACHE READ ONLY — deliberately not awaited, because there is
+        // nothing to await: `lookup` never touches the network. The
+        // `try` guards a malformed body and a caller-supplied lookup
+        // that throws; either way injection is skipped, never the
+        // request.
+        let found: RecallLookup = { memories: [], reason: "no-query" };
         try {
           const parsed: unknown = JSON.parse(body.body.toString("utf8"));
           const query = lastUserMessageText(parsed);
-          memories = await recall(query);
+          found = query.trim() === "" ? { memories: [], reason: "no-query" } : lookup(query);
         } catch {
-          memories = [];
+          found = { memories: [], reason: "not-applicable" };
         }
-        const result = injectMemories(body.body, memories);
+        const result = injectMemories(body.body, found.memories);
         outBody = result.body;
         injected = result.injected;
+        // Memories in hand but nothing injected means the body could not
+        // be mutated safely (inject.ts's byte-stability guard, an
+        // unrecognised `system` shape, or the idempotency guard). That
+        // is a different failure from "no memories", and saying so is
+        // the whole point of this header.
+        reason = injected > 0 ? found.reason : found.memories.length > 0 ? "not-injectable" : found.reason;
       }
     }
 
@@ -680,7 +725,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
         sendJson(
           res,
           502,
-          { "x-klio-proxy-error": messageOf(err), "x-klio-injected": String(injected) },
+          {
+            "x-klio-proxy-error": messageOf(err),
+            "x-klio-injected": String(injected),
+            [INJECT_REASON_HEADER]: reason,
+          },
           { type: "error", error: { type: "api_error", message: messageOf(err) } },
         );
         return;
@@ -688,6 +737,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
 
       const responseHeaders = filterResponseHeaders(upstreamResponse.headers);
       responseHeaders["x-klio-injected"] = String(injected);
+      responseHeaders[INJECT_REASON_HEADER] = reason;
       res.writeHead(upstreamResponse.status, responseHeaders);
 
       if (!upstreamResponse.body) {
@@ -815,12 +865,18 @@ export async function startProxy(
   const inject = toggles.inject.enabled ? (opts.inject ?? true) : false;
   const captureEnabled = toggles.capture.enabled ? (opts.captureEnabled ?? true) : false;
 
-  const recall = config ? createRecaller({ config, fetchImpl: opts.fetchImpl }) : undefined;
+  // The warmer owns every background fetch and every timer this process
+  // creates for recall. It is started here and STOPPED when the server
+  // closes — a refresh interval that outlives its server would keep the
+  // process alive after shutdown, which is exactly the class of bug
+  // Task 3 already shipped once.
+  const recaller = config ? createWarmingRecaller({ config, fetchImpl: opts.fetchImpl }) : undefined;
+  recaller?.start();
 
   const server = createProxyServer({
     config,
     upstreams: opts.upstreams,
-    recall,
+    recall: recaller?.lookup,
     capture: opts.capture,
     fetchImpl: opts.fetchImpl,
     inject,
@@ -829,6 +885,12 @@ export async function startProxy(
 
   const port = opts.port ?? PROXY_PORT;
   const host = opts.host ?? PROXY_HOST;
+
+  // Every caller that shuts a proxy down does it through `server.close()`
+  // — the CLI, the supervisor's restart, and every test — so hanging the
+  // warmer's teardown off that one event is what makes "stop the warmer"
+  // impossible to forget at a call site.
+  server.on("close", () => recaller?.stop());
 
   // `server.listen()` throws asynchronously via an "error" event (e.g.
   // EADDRINUSE), not via the listen callback or a rejected promise. With
@@ -840,14 +902,22 @@ export async function startProxy(
   // server-level error (e.g. EMFILE) can't crash the process either —
   // by that point the caller has already gotten its `{ server, port }`
   // and has no promise left to reject.
-  await new Promise<void>((resolve, reject) => {
-    const onStartupError = (err: unknown): void => reject(err instanceof Error ? err : new Error(String(err)));
-    server.once("error", onStartupError);
-    server.listen(port, host, () => {
-      server.removeListener("error", onStartupError);
-      resolve();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onStartupError = (err: unknown): void => reject(err instanceof Error ? err : new Error(String(err)));
+      server.once("error", onStartupError);
+      server.listen(port, host, () => {
+        server.removeListener("error", onStartupError);
+        resolve();
+      });
     });
-  });
+  } catch (err) {
+    // Never listened, so `"close"` will never fire and the warmer's
+    // interval would outlive the failed start — an EADDRINUSE exit that
+    // then refuses to exit.
+    recaller?.stop();
+    throw err;
+  }
   server.on("error", () => {
     // Post-startup server-level errors have no caller left to report to.
   });

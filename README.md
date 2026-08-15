@@ -417,9 +417,34 @@ capture endpoint, a body over 10 MB, an unexpected shape — every one of
 them degrades to "forward the original bytes". The only response the
 proxy ever authors is a `502` (in Anthropic's error envelope, with an
 `x-klio-proxy-error` header) when the upstream is genuinely
-unreachable. Recall runs on a hard ~300 ms budget: a late answer means
-no injection, never a slower request. Every response carries
-`x-klio-injected: <n>` so you can see what it did without reading logs.
+unreachable.
+
+**Your request never waits on Klio.** Recall happens in the background,
+not in the request path: the proxy keeps a warm cache and reads it, so
+forwarding is never delayed by however long the engine takes. A broad
+team-context set is fetched at startup and refreshed every few minutes,
+which is what lets even the first turn of a session inject something;
+a question the cache has not seen is answered immediately from that set
+(or from nothing) while a recall for it fills the cache behind you, so
+the next turn on the same topic is warm. Repeat questions collapse to
+one recall, never one per turn.
+
+Every response carries two headers, so you can see what it did without
+reading logs:
+
+```
+x-klio-injected: 11
+x-klio-injected-reason: hit
+```
+
+`x-klio-injected` is how many memories were added. The reason says why
+that number is what it is — `hit` (this question's own cache),
+`ambient` (the broad team-context set), `cold` (first sight of this
+question; a recall is now running), `empty` (nothing relevant),
+`error` (recall failed or timed out — also one line on stderr),
+`disabled`, `no-config`, `no-query`, `not-applicable`, or
+`not-injectable`. A `0` with no reason to explain it is exactly how
+"injection quietly does nothing" used to hide.
 
 **Turning it off.** Two independent kill switches, no uninstall needed:
 
@@ -449,6 +474,9 @@ serve`); use `klio proxy capture off` for a decision.
 ```bash
 klio proxy status         # is it answering, what is it doing, and what is it set to
 klio proxy serve          # run it in the foreground (this is how you see errors)
+                          #   --port / --host / --upstream, or KLIO_PROXY_PORT /
+                          #   KLIO_PROXY_HOST / KLIO_PROXY_UPSTREAM, to run a
+                          #   second instance somewhere else while testing
 klio proxy stop           # stop it
 klio proxy ensure         # what the supervisor runs every 60s: probe, revive if dead
 klio proxy capture on|off # save and apply the capture kill switch

@@ -39,6 +39,30 @@ down`, `klio uninit` and `klio uninstall` all handle the Docker-free
 cloud machine; `uninstall` un-wires the agents, removes the supervisor
 and stops the proxy before it goes anywhere near Docker.
 
+Recall is **warmed in the background**, never fetched on the request
+path. Production recall measured 5.9–6.5 s against the 300 ms in-request
+budget the proxy originally used, so every request timed out and
+injected nothing, forever — and fail-open made that indistinguishable
+from "no relevant memories". The proxy now reads a warm cache and fills
+it out of band: a broad team-context set at startup and every 5 minutes,
+plus a single-flighted per-question recall started on each miss. A stale
+entry is served while it refreshes rather than dropped. Measured live
+against the production engine: turns complete in 1.5–2.4 s (the same as
+no proxy at all) while injecting 8–13 memories from recalls that took
+6.5–9.9 s.
+
+Every response now also carries `x-klio-injected-reason`, so
+`x-klio-injected: 0` can no longer mean five different things —
+`hit`, `ambient`, `cold`, `empty`, `error`, `no-query`, `disabled`,
+`no-config`, `not-applicable` or `not-injectable`. A failed background
+recall additionally logs one throttled line, carrying no query text, no
+memory content and no credentials.
+
+`klio proxy serve` gained `--port`, `--host` and `--upstream` (and
+`KLIO_PROXY_PORT` / `KLIO_PROXY_HOST` / `KLIO_PROXY_UPSTREAM`), so the
+proxy can be verified in place instead of by patching literals in a copy
+of the compiled build.
+
 Known limitation: a >10 MB request cancelled mid-upload keeps relaying
 to the upstream until the body ends (see README).
 

@@ -13,6 +13,16 @@ import { createProxyServer, startProxy } from "../src/proxy/server.js";
 
 const CONFIG = { apiKey: "k", agentId: "a", baseUrl: "https://api.example" };
 
+/**
+ * The `recall` seam is a SYNCHRONOUS cache read (see recall.ts): the
+ * request path may never wait on the engine. These helpers build one
+ * with a fixed answer.
+ */
+function found(memories: { id: string; content: string }[]) {
+  return () => ({ memories, reason: (memories.length > 0 ? "hit" : "empty") as const });
+}
+const foundNothing = found([]);
+
 async function withServer(
   opts: Parameters<typeof createProxyServer>[0],
   run: (base: string) => Promise<void>,
@@ -107,7 +117,7 @@ test("a messages POST is injected and reports the count", async () => {
   await withServer(
     {
       config: CONFIG,
-      recall: async () => [{ id: "m1", content: "remembered thing" }],
+      recall: found([{ id: "m1", content: "remembered thing" }]),
       fetchImpl: (async (_u: any, init: any) => {
         forwarded = JSON.parse(init.body.toString());
         return new Response(JSON.stringify({ content: [{ type: "text", text: "hi" }] }), { status: 200 });
@@ -129,7 +139,7 @@ test("a recall failure still forwards the request, injected 0", async () => {
   await withServer(
     {
       config: CONFIG,
-      recall: async () => { throw new Error("recall exploded"); },
+      recall: () => { throw new Error("recall exploded"); },
       fetchImpl: (async () => new Response("{}", { status: 200 })) as any,
     },
     async (base) => {
@@ -180,7 +190,7 @@ test("capture fires after the response, with the assistant text", async () => {
   await withServer(
     {
       config: CONFIG,
-      recall: async () => [],
+      recall: foundNothing,
       captureEnabled: true,
       capture: (async (o: any) => { captured = o; }) as any,
       fetchImpl: (async () =>
@@ -205,7 +215,7 @@ test("content-length on a forwarded request always matches the actual bytes sent
   await withServer(
     {
       config: CONFIG,
-      recall: async () => [{ id: "m1", content: "a memory that grows the body" }],
+      recall: found([{ id: "m1", content: "a memory that grows the body" }]),
       fetchImpl: (async (_u: any, init: any) => {
         seenContentLength = init.headers["content-length"];
         seenBodyLength = Buffer.byteLength(init.body);
@@ -316,7 +326,7 @@ test("streaming through the capture tee is still not buffered: the client gets t
   await withServer(
     {
       config: CONFIG,
-      recall: async () => [],
+      recall: foundNothing,
       captureEnabled: true,
       capture: (async (o: any) => { captured = o; }) as any,
       fetchImpl: (async () =>
@@ -364,7 +374,7 @@ test("capture extracts assistant text from a realistic SSE stream", async () => 
   await withServer(
     {
       config: CONFIG,
-      recall: async () => [],
+      recall: foundNothing,
       captureEnabled: true,
       capture: (async (o: any) => { captured = o; }) as any,
       fetchImpl: (async () =>
@@ -652,7 +662,7 @@ test("a synchronous throw from the capture callback does not crash the proxy", a
     },
     {
       config: CONFIG,
-      recall: async () => [],
+      recall: foundNothing,
       captureEnabled: true,
       capture: (() => {
         throw new Error("capture blew up synchronously");

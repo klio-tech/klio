@@ -104,9 +104,18 @@ original bytes on any doubt.** Six rules make that safe:
 4. **Fail open, always.** Parse failure, recall failure, timeout, oversize body,
    unexpected shape: forward the original bytes. There is no error path in which
    the agent's request does not reach the model.
-5. **Bounded latency.** The recall runs with a hard **300 ms** timeout. Late
-   answer, no injection — the request has already gone. The proxy must never make
-   a model call slower in a way a user would notice.
+5. **Bounded latency.** ~~The recall runs with a hard **300 ms** timeout.~~
+   **AMENDED 2026-08-15 — the request path makes no recall call at all.** The
+   300 ms budget was written here as a guess; production recall measured
+   **5.90 / 6.18 / 6.47 s**, so every request timed out, nothing was ever
+   injected, and — because the timeout path cached nothing — nothing ever
+   warmed. The intent of this rule was "the proxy must never make a model call
+   slower in a way a user would notice", and a request-path fetch cannot honour
+   that against a ~6 s endpoint at any budget. So recall moved off the request
+   path entirely: the request performs a **cache read only**, and background
+   warming (an ambient org-scoped set on an interval, plus a single-flighted
+   per-query fetch on each miss) fills that cache on a generous but bounded
+   budget. The rule is unchanged; only its mechanism is.
 6. **Off by default per-request via kill switch.** `KLIO_PROXY_INJECT=off`
    restores exact pass-through without uninstalling anything.
 
@@ -115,7 +124,11 @@ original bytes on any doubt.** Six rules make that safe:
 Recalling on every request would be both slow and expensive. The injector keeps
 a small in-process cache keyed by a hash of the conversation's last user
 message, TTL 60 s. A tight agent loop on one task therefore recalls once, not
-forty times. Cache misses that exceed the 300 ms budget simply do not inject.
+forty times. ~~Cache misses that exceed the 300 ms budget simply do not
+inject.~~ **AMENDED 2026-08-15:** a miss injects whatever the ambient set
+offers (or nothing) and returns immediately, while a background fetch fills the
+cache; concurrent misses for one query are single-flighted, and a stale entry is
+served while it refreshes rather than dropped.
 
 ### Observability
 
@@ -123,6 +136,14 @@ Every response carries `x-klio-injected: <n>` — the number of memories added,
 `0` when injection was skipped. One header answers "is this thing doing
 anything?" without reading logs, and makes the no-op case visible rather than
 ambiguous.
+
+**AMENDED 2026-08-15 — it was not enough.** `0` meant five different things
+(disabled, no config, cold cache, no memories, error/timeout), so a proxy that
+injected nothing on every single request in production looked exactly like a
+proxy with nothing relevant to say. Responses now also carry
+`x-klio-injected-reason`, and an error or timeout additionally logs one
+throttled line — with no query text, no memory content and no credentials in
+either place.
 
 ## Architecture
 

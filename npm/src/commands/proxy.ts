@@ -19,9 +19,10 @@ import { resolve } from "node:path";
 import { cloudConfigPath, readCloudConfig } from "../cloudConfig.js";
 import { runtimeDir } from "../compose.js";
 import { composeUpService, resolveComposeBin } from "../docker.js";
-import { PROXY_PORT, PROXY_SERVICE } from "../proxy/constants.js";
+import { PROXY_SERVICE } from "../proxy/constants.js";
 import { spawnProxy } from "../proxy/processSupervisor.js";
 import { startProxy } from "../proxy/server.js";
+import { resolveServeOptions } from "../proxy/serveOptions.js";
 import { stopProxy } from "../proxy/stop.js";
 import { probeProxy } from "../proxy/supervisor.js";
 import {
@@ -399,8 +400,17 @@ function messageOf(err: unknown): string {
  */
 async function serve(log: (line: string) => void, opts: ProxyCommandOptions): Promise<number> {
   const start = opts.startProxyImpl ?? startProxy;
+
+  // `--port`/`--host`/`--upstream`, or KLIO_PROXY_PORT/_HOST/_UPSTREAM.
+  // See serveOptions.ts for why these exist at all.
+  const resolved = resolveServeOptions(opts.args.slice(1), opts.env ?? process.env);
+  if (!resolved.ok) {
+    log(`klio proxy: ${resolved.error}`);
+    return 1;
+  }
+
   try {
-    await start({});
+    await start(resolved.options);
     // Deliberately never returns to the shell in production: the
     // listening server holds an open handle, which keeps the process
     // (and the event loop `process.exitCode` would otherwise let drain)
@@ -409,7 +419,7 @@ async function serve(log: (line: string) => void, opts: ProxyCommandOptions): Pr
   } catch (err) {
     const code = (err as NodeJS.ErrnoException | undefined)?.code;
     if (code === "EADDRINUSE") {
-      log(`klio proxy: already listening on port ${PROXY_PORT}`);
+      log(`klio proxy: already listening on port ${resolved.options.port}`);
       return 1;
     }
     log(`klio proxy: failed to start: ${err instanceof Error ? err.message : String(err)}`);

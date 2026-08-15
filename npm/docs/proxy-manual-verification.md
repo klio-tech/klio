@@ -32,34 +32,34 @@ it. Everything that is an *Anthropic platform* construct — `tool_reference`
 blocks above all — is **not**, and is called out in
 [Not verified](#not-verified-do-not-read-these-as-passes) below.
 
-### How the proxy was run, and why not verbatim from the brief
-
-The task brief's steps assume the proxy can be pointed at a different port and
-a different upstream from the outside. **It cannot** — that is itself a finding:
-
-* `PROXY_PORT` is a hard-coded `8787` in `src/proxy/constants.ts`. `KLIO_PROXY_PORT`
-  exists only in the **Docker/Python** proxy (`src/compose.ts`); the Node CLI has
-  no port flag and no port env var. `klio proxy serve` calls `startProxy({})`.
-* The upstream map (`DEFAULT_UPSTREAMS` in `src/proxy/server.ts`) is a
-  programmatic option on `createProxyServer`, with no env or CLI override.
+### How the proxy was run
 
 This machine's port 8787 carries the user's real, supervised proxy (pid 87493),
-which must not be disturbed. So the verification ran against a **copy of the
-built artifact** at `<scratch>/task8/cli/`, produced by `npm run build` and then
-patched in exactly two literals:
+which must not be disturbed, and the run needs a different upstream. Both are
+now **real CLI seams** (added by the warming commit — see
+[§8](#8-background-warming--pass-2026-08-15)):
 
-```
-dist/proxy/constants.js:  PROXY_PORT = 8787              →  18787
-dist/proxy/server.js:     anthropic: api.anthropic.com   →  https://litellm.oppla.dev
+```bash
+klio proxy serve --port 18787 --upstream https://litellm.oppla.dev
+#     equivalently: KLIO_PROXY_PORT / KLIO_PROXY_HOST / KLIO_PROXY_UPSTREAM
 ```
 
-Nothing else was changed. All commands below are the real CLI (`klio proxy
-serve|ensure|status|capture`) running that copy, with `HOME` pointed at a
-throwaway directory holding its own `~/.klio/config.json` (a copy of the real
-credentials). The real `~/.klio/`, `~/.claude/`, `~/.codex/`,
-`~/Library/LaunchAgents/` and port 8787 were never written to; `launchctl` was
-never invoked. Hashes of all five real files were compared before and after —
-see [Machine state](#machine-state-after-the-run).
+> **The original run of §1–§7 could not do this.** `PROXY_PORT` was a hard-coded
+> `8787`, `KLIO_PROXY_PORT` reached only the Docker/Python proxy, and the
+> upstream map was a programmatic option with no CLI or env path to it — so that
+> run used a copy of the built artifact with two literals patched by hand
+> (`dist/proxy/constants.js`'s port → `18787`, `dist/proxy/server.js`'s
+> `api.anthropic.com` → `https://litellm.oppla.dev`). A verification that
+> requires patching compiled output is one nobody repeats, which is why the
+> seams exist now. §1–§7 below still describe the patched-copy run as it
+> happened; §8 was run on the seams, unpatched.
+
+In both runs `HOME` pointed at a throwaway `mkdtemp` directory holding its own
+`~/.klio/config.json` (a copy of the real credentials). The real `~/.klio/`,
+`~/.claude/`, `~/.codex/`, `~/Library/LaunchAgents/` and port 8787 were never
+written to; `launchctl` was never invoked. Hashes of all real files were
+compared before and after — see
+[Machine state](#machine-state-after-the-run).
 
 A second copy at `<scratch>/task8/cli-budget/` (port 18788) additionally raised
 `DEFAULT_BUDGET_MS` in `dist/proxy/recall.js` from `300` to `15000`. That copy
@@ -85,6 +85,7 @@ repository.
 | 7a | `KLIO_PROXY_INJECT=off`, live | **PASS** |
 | 7b | `KLIO_PROXY_CAPTURE=off`, live | **PASS** |
 | 7c | Persisted `klio proxy capture off` | **PASS** |
+| 8 | Background warming: injection fires without the request path waiting | **PASS** — F-1 fixed, see §8 |
 
 ---
 
@@ -179,7 +180,7 @@ total_ms` and one chunk; this is the opposite of that.
 `content-type: text/event-stream; charset=utf-8` was preserved, and
 `x-klio-injected` was present on the streaming response.
 
-## 4. Injection reaches a real model — **FAIL** (F-1)
+## 4. Injection reaches a real model — **FAIL at `e0afb49`**, fixed in §8 (F-1)
 
 With injection **on** against production Klio, the outgoing `system` carried
 nothing:
@@ -244,7 +245,7 @@ request path. Raising the budget is not a fix on its own — it would move the
 failure from "silently no injection" to "every model call waits 6 s". This is a
 finding for triage, not something to patch here.
 
-Not fixed in this task, per instruction.
+Not fixed in this task, per instruction. **Fixed in §8.**
 
 ## 5. Capture lands — PASS (F-2)
 
@@ -378,6 +379,122 @@ klio proxy: alive (inject)
 
 ---
 
+## 8. Background warming — PASS (2026-08-15)
+
+**What changed.** The 300 ms budget is gone from the request path entirely.
+`recall.ts` is now a warm cache that the request path READS (synchronously, no
+socket, no wait) and a background warmer that FILLS. Two layers: an ambient
+org-scoped set fetched at startup and every 5 min, and a per-query
+fire-and-forget fetch started on each miss, single-flighted. Every response also
+carries `x-klio-injected-reason`, so `0` is never ambiguous again.
+
+### How this run differs from §1–§7
+
+* **No patched literals.** The real `dist` build, driven as
+  `klio proxy serve --port 18787 --upstream https://litellm.oppla.dev`.
+* **The engine calls were counted.** The temp HOME's `baseUrl` pointed at a
+  local forwarder that relays verbatim to the real `https://mcp.klio.tech` and
+  records every call. So "exactly one upstream recall" below is an observation,
+  not an inference.
+
+### Per-turn results — real engine, real model
+
+Recall latency observed through the forwarder during this run: **6.5 s, 6.6 s,
+9.5 s, 9.9 s** (`/capture/recall`, production).
+
+| Turn | Wall clock | `x-klio-injected` | reason | Model answer |
+|---|---|---|---|---|
+| T1 first ever turn | 1505 ms | 0 | `cold` | "I do not have any provided Klio team context…" |
+| T2 immediate repeat | 1488 ms | 0 | `cold` | same |
+| *(9 s pause — the background recall lands out of the request path)* ||||
+| T3 after warm-up | 1699 ms | **11** | `hit` | "The Klio app is served under app.klio.tech and the team website is klio.tech." |
+| T4 3-message, same last user | 1581 ms | **11** | `hit` | same |
+| T5 new question, never asked | 1952 ms | **13** | `ambient` | answers from org memory |
+| T6 same question, warmed | 2360 ms | **8** | `hit` | answers from org memory |
+| control: straight to the model | 1467 ms | — | — | "I do not have any provided Klio team context…" |
+
+Read the two columns together. Every turn completed in **1.5–2.4 s** — the same
+range as the unproxied control (1467 ms) — while the recall those turns were
+served from took **6.5–9.9 s**. That is the whole fix: the latency did not get
+smaller, it stopped being on the request path. Compare §4's naive
+budget-raising measurement: **10.96 s**, ~6 s of it recall, for the same
+injection.
+
+`ambient` on T5 is layer 1 doing its job: a question nobody had asked yet, on a
+proxy that had been up for one exchange, still received 13 org memories and
+answered from them.
+
+### The request path never waits — the same scenario, before and after
+
+Against a deliberately slow (6 s) local recall endpoint, driven through a real
+proxy (`tests/proxyWarming.test.ts` harness). At `ca2d5e8`:
+
+```
+A. multi-turn, same query, 6s engine
+   turn 1: 333ms  x-klio-injected=0  reason=(absent)
+   turn 2: 311ms  x-klio-injected=0  reason=(absent)
+   turn 3: 315ms  x-klio-injected=0  reason=(absent)
+   turn 4: 311ms  x-klio-injected=0  reason=(absent)
+   upstream recall calls for that one query: 4
+B. single-flight: 20 concurrent misses for one query
+   slowest turn 335ms; injected=0
+   upstream recall calls: 20
+C. reason header present? NO — x-klio-injected-reason is absent
+```
+
+Four turns, four recalls, nothing ever injected, and 300 ms of the user's time
+spent per turn achieving that. After the fix, the same shape injects on turn 2
+onward and issues **one** recall for twenty concurrent misses.
+
+### Single flight, against the real engine
+
+Ten concurrent proxied turns carrying one never-before-seen query:
+
+```
+10 concurrent turns: max 2302ms, reasons=ambient
+upstream recalls for that query: 1  (latencies: 6526ms)
+```
+
+One recall for ten turns, and none of the ten waited on it.
+
+### The reason header, live
+
+| Condition | `x-klio-injected` | `x-klio-injected-reason` |
+|---|---|---|
+| warm cache | 11 | `hit` |
+| ambient set only | 13 | `ambient` |
+| first sight of a query | 0 | `cold` |
+| `KLIO_PROXY_INJECT=off` (health `mode: capture`) | 0 | `disabled` |
+| no cloud config (health `mode: passthrough`) | 0 | `no-config` |
+| `GET /v1/models` | 0 | `not-applicable` |
+
+`empty` (recall answered with nothing), `error` (engine 5xx, network failure, or
+the background budget expiring) and `not-injectable` (memories in hand, body not
+safely mutable) are covered in `tests/proxyWarming.test.ts` and
+`tests/proxyRecall.test.ts`; `error` additionally emits one throttled stderr
+line carrying no query text, no memory content and no credentials. Nothing was
+logged during this run — there were no failures.
+
+### Capture is unaffected
+
+The three-message turn (T4) produced a `POST /capture/transcript` → `200`
+through the same forwarder, as before. Note the query predicate for finding it
+(F-2): `LIKE '%klio-proxy:%'`, never the anchored `'klio-proxy:%'`.
+
+### What warming does NOT cover
+
+* **Tool-result turns.** In an agent loop the last `user` message is often a
+  `tool_result` block with no text, so the recall query is empty and the reason
+  is `no-query`. Those turns fall back to the ambient set, which is exactly what
+  layer 1 is for — but they never get a query-specific recall.
+* **Relevance is not monotonic.** T6's query-specific recall (8 memories) gave a
+  worse answer than T5's ambient set (13). Warming makes injection *happen*; it
+  does not make the engine's ranking better.
+* **First turn of a fresh process, before ambient lands.** The ambient fetch is
+  started at boot and takes ~6–10 s; requests inside that window report `cold`.
+
+---
+
 ## Not verified — do not read these as passes
 
 ### `tool_reference` survival against the real Anthropic API — UNVERIFIED
@@ -441,9 +558,8 @@ for why there is deliberately no idle timer, probe, or abort.
   alone, so "launchd restarts a dead proxy on this machine" remains covered
   only by the unit suite and the plist's own contents.
 * **Two literals were patched** in the built artifact under test (port,
-  upstream host). The un-patched build was not run against a real API, because
-  doing so would have required taking over port 8787 from the user's live
-  proxy.
+  upstream host) for §1–§7 only. §8 ran the unpatched build on the new
+  `--port` / `--upstream` seams; §1–§7 were not re-run on them.
 
 ---
 
@@ -476,14 +592,16 @@ never run, and `launchctl` was never invoked).
 ```bash
 cd npm && npm run build
 
-# 1. Copy the build somewhere disposable and patch the two literals
-#    (port, upstream host) — see "How the proxy was run" above.
-# 2. Point HOME at a throwaway dir holding its own .klio/config.json.
-# 3. Run the real CLI out of that copy:
-HOME=$TMPHOME node $CLI/bin/klio.mjs proxy serve &
+# Point HOME at a throwaway dir holding its own .klio/config.json, then
+# run the real CLI on an unused port against whichever upstream you want.
+# No patched literals, no copy of the build.
+HOME=$TMPHOME node bin/klio.mjs proxy serve \
+  --port 18787 --upstream https://litellm.oppla.dev &
 curl -s http://127.0.0.1:18787/__klio/health
 ```
 
-Against Anthropic proper, drop the upstream patch and supply
-`ANTHROPIC_API_KEY`; the port patch is still needed on any machine whose 8787
-is already in use.
+Against Anthropic proper, drop `--upstream` and supply an Anthropic key.
+
+To watch warming rather than a single request, send the same question twice with
+a ~10 s gap and read `x-klio-injected` / `x-klio-injected-reason` on each:
+`cold` then `hit`, with neither request paying the recall latency.
