@@ -4,6 +4,32 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.4] — 2026-08-14
+
+### Added — the local proxy: injection + capture for any agent (cloud, opt-in)
+
+Cloud `klio init` now offers a local proxy on `127.0.0.1:8787`,
+**defaulting to no**. On Anthropic's Messages API it appends your team's
+Klio memories to the request's `system` field and captures the
+conversation as grading evidence — so an agent with no hook surface
+still both receives context and contributes evidence. `messages`,
+`tools`, `tool_choice` and `tool_reference` blocks are forwarded byte
+for byte, and every failure path forwards the original bytes unchanged.
+Codex is wired but pass-through for now (it uses `/v1/responses`).
+
+Two kill switches, both **on** by default when a cloud key is present:
+`KLIO_PROXY_INJECT=off` and `KLIO_PROXY_CAPTURE=off`.
+
+New: `klio proxy serve|stop|status|ensure`. `/__klio/health` now reports
+`mode`, `runtime`, `pid` and a non-reversible fingerprint of the active
+config, which is what lets `klio proxy stop` prove a process is ours
+before signalling it and lets `klio init` detect a proxy left over from
+an earlier run holding rotated credentials. `klio doctor`, `klio down`
+and `klio uninit` all handle the Docker-free cloud machine.
+
+Known limitation: a >10 MB request cancelled mid-upload keeps relaying
+to the upstream until the body ends (see README).
+
 ## [0.9.2] — 2026-05-29
 
 ### Added — PostToolUse capture (fuller session capture)

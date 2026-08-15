@@ -381,6 +381,80 @@ window. Off-by-default in earlier versions, **on by default from 0.5.0
 onward** — the `klio init` flow now includes a one-keypress prompt to
 confirm. Tune later via `klio update curator`.
 
+### The local proxy (Klio Cloud, opt-in)
+
+Hooks only reach agents whose harness has a hook surface — in practice
+Claude Code. Every other agent writes memory through MCP tool calls and
+contributes no evidence at all. The **local proxy** closes that gap from
+the other side: it sits on `127.0.0.1:8787` between your agent and the
+model API, and any agent that lets you override its base URL gets team
+memory with no agent-side code whatsoever.
+
+`klio init` (cloud mode) offers it **after** wiring your agents, and
+**defaults to no** — pointing `ANTHROPIC_BASE_URL` at localhost is the
+most invasive thing this tool does to a machine. Accepting it points
+Claude Code and Codex at the proxy, installs a launchd/systemd
+supervisor that re-checks every 60s, and starts the proxy.
+
+**What it does to a request.** On a `POST` whose path ends `/messages`
+(Anthropic's Messages API) it appends one block of your team's Klio
+memories to the request's `system` field, and after the response has
+been fully forwarded it sends the conversation to Klio as grading
+evidence. That is all. `messages`, `tools`, `tool_choice` and every
+`tool_reference` block are forwarded byte for byte — breaking
+`tool_reference` would silently cost ~85% on tool schemas, which is why
+`klio init` also sets `ENABLE_TOOL_SEARCH=true`. Every other request,
+every other path, and every other method is forwarded unmodified.
+Codex is wired to the proxy but talks the `/v1/responses` API, so its
+traffic is pass-through today.
+
+**Fail open, always.** A failed recall, an unparseable body, a broken
+capture endpoint, a body over 10 MB, an unexpected shape — every one of
+them degrades to "forward the original bytes". The only response the
+proxy ever authors is a `502` (in Anthropic's error envelope, with an
+`x-klio-proxy-error` header) when the upstream is genuinely
+unreachable. Recall runs on a hard ~300 ms budget: a late answer means
+no injection, never a slower request. Every response carries
+`x-klio-injected: <n>` so you can see what it did without reading logs.
+
+**Turning it off.** Two independent kill switches, no uninstall needed:
+
+| Variable              | Effect                                              |
+|-----------------------|-----------------------------------------------------|
+| `KLIO_PROXY_INJECT=off`  | Stop appending memories to `system`.             |
+| `KLIO_PROXY_CAPTURE=off` | Stop sending conversations to Klio.              |
+
+Both are **on** by default whenever `~/.klio/config.json` holds a cloud
+key, and setting either to `off`/`false`/`0`/`no` turns that half off at
+the next proxy start.
+
+**Commands.**
+
+```bash
+klio proxy status   # is it answering, and what is it doing
+klio proxy serve    # run it in the foreground (this is how you see errors)
+klio proxy stop     # stop it
+klio proxy ensure   # what the supervisor runs every 60s: probe, revive if dead
+klio doctor         # check the whole wiring end to end, and repair what it can
+klio uninit         # remove the wiring and stop the proxy — the escape hatch
+```
+
+`klio uninit` is the escape hatch and is designed to work when nothing
+else does: it does not need Docker, does not need the proxy to be
+reachable, and puts your agents straight back on `api.anthropic.com`.
+
+**Known limitation.** A request body over 10 MB is forwarded raw and
+unbuffered (never injected, never captured). If the CLIENT disappears
+mid-upload of such a request, the proxy does not detect it and keeps
+relaying the remaining body upstream — measured at up to ~30s and
+~12.5 MB of wasted upstream traffic against a slow consumer. It costs
+wasted bytes on a cancelled >10 MB upload, never a wrong response or a
+hung client, and it matches the behaviour of the proxy that shipped
+before this path existed. Three fixes were built and measured; two of
+them broke healthy traffic (slow first-byte responses, long SSE gaps,
+and backpressured uploads), so the leak ships documented rather than
+traded for an outage.
+
 ### Architecture at a glance
 
 ```
