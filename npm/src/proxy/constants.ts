@@ -24,6 +24,12 @@ export const PROXY_PORT = 8787;
  * local dev tool into an open relay for anyone who can route to the
  * machine. `127.0.0.1` rather than `localhost`: binding must not depend
  * on how the host's resolver happens to order `localhost`'s addresses.
+ *
+ * This is the BIND address; `PROXY_PROBE_URL` below is the same literal
+ * used as the DIAL address — one config's socket, the other's a URL a
+ * client requests. They have to agree for the same reason described
+ * there: a resolver that prefers `::1` would otherwise make a
+ * `127.0.0.1`-bound server look dead to a `localhost`-dialing client.
  */
 export const PROXY_HOST = "127.0.0.1";
 

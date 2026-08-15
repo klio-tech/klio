@@ -25,6 +25,7 @@
 
 import * as http from "node:http";
 import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import { readCloudConfig, type CloudConfig } from "../cloudConfig.js";
 import { PROXY_HEALTH_PATH, PROXY_HOST, PROXY_PORT } from "./constants.js";
@@ -140,60 +141,71 @@ function extractAssistantText(buf: Buffer, contentType: string | undefined): str
   }
 }
 
-/** Read the request body, capped at {@link MAX_REQUEST_BODY_BYTES}. */
-async function readRequestBody(
+/**
+ * Read the request body, capped at {@link MAX_REQUEST_BODY_BYTES}.
+ *
+ * Deliberately event-based, NOT `for await...of req`. Exiting an async
+ * iterator early (`return`/`break` out of `for await`) calls the
+ * iterator's `.return()`, which for a Node stream DESTROYS it. A
+ * destroyed `req` can never emit `"end"`, so anything downstream still
+ * waiting to read the rest of the body — a hand-off stream, a proxied
+ * fetch — hangs forever. Confirmed: an >10MB POST would never complete
+ * with the iterator version.
+ *
+ * Instead: read via plain `"data"`/`"end"` listeners, and on crossing
+ * the cap, `req.unshift()` everything read so far back onto the live,
+ * still-open `req`, then hand `req` itself onward. The stream is never
+ * exited early, never destroyed, and the caller sees one continuous
+ * byte stream — buffered prefix followed by the live socket — with
+ * nothing lost or duplicated.
+ */
+function readRequestBody(
   req: http.IncomingMessage,
 ): Promise<{ capped: false; body: Buffer } | { capped: true; stream: Readable }> {
-  const chunks: Buffer[] = [];
-  let total = 0;
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
 
-  for await (const raw of req) {
-    const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
-    total += chunk.length;
-    chunks.push(chunk);
-
-    if (total > MAX_REQUEST_BODY_BYTES) {
-      // Over the cap: stop buffering. Replay what we already consumed,
-      // then splice in whatever is left of the live request stream, so
-      // no bytes are lost and nothing is held in memory beyond this
-      // point. The caller forwards this raw, with no injection.
-      const alreadyRead = Readable.from(chunks);
-      const combined = new PassthroughFromReadables(alreadyRead, req);
-      return { capped: true, stream: combined };
+    function cleanup(): void {
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("error", onError);
     }
-  }
 
-  return { capped: false, body: Buffer.concat(chunks, total) };
-}
+    function onData(raw: Buffer): void {
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
+      total += chunk.length;
+      chunks.push(chunk);
+      if (settled) return;
 
-/** A Readable that plays `first` to completion, then relays `second`. */
-class PassthroughFromReadables extends Readable {
-  private active: Readable;
+      if (total > MAX_REQUEST_BODY_BYTES) {
+        settled = true;
+        cleanup();
+        req.pause();
+        req.unshift(Buffer.concat(chunks, total));
+        resolve({ capped: true, stream: req });
+      }
+    }
 
-  constructor(
-    private readonly first: Readable,
-    private readonly second: Readable,
-  ) {
-    super();
-    this.active = first;
-    this.first.on("data", (chunk: Buffer) => {
-      if (!this.push(chunk)) this.first.pause();
-    });
-    this.first.on("end", () => {
-      this.active = this.second;
-      this.second.on("data", (chunk: Buffer) => {
-        if (!this.push(chunk)) this.second.pause();
-      });
-      this.second.on("end", () => this.push(null));
-      this.second.on("error", (err) => this.destroy(err));
-      this.second.resume();
-    });
-    this.first.on("error", (err) => this.destroy(err));
-  }
+    function onEnd(): void {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ capped: false, body: Buffer.concat(chunks, total) });
+    }
 
-  override _read(): void {
-    this.active.resume();
-  }
+    function onError(err: Error): void {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    }
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+  });
 }
 
 /** Accumulates up to {@link MAX_CAPTURE_BYTES} of a piped stream while forwarding every chunk untouched. */
@@ -226,6 +238,19 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+const FALSY_ENV_VALUES = new Set(["false", "0", "no", "off"]);
+const TRUTHY_ENV_VALUES = new Set(["true", "1", "yes", "on"]);
+
+/** Accepts the common spellings of "off" for a boolean env var — not just the literal string `"false"`. */
+function envIsFalsy(value: string | undefined): boolean {
+  return value !== undefined && FALSY_ENV_VALUES.has(value.trim().toLowerCase());
+}
+
+/** Accepts the common spellings of "on" for a boolean env var. */
+function envIsTruthy(value: string | undefined): boolean {
+  return value !== undefined && TRUTHY_ENV_VALUES.has(value.trim().toLowerCase());
+}
+
 export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
   const upstreams: Record<string, string> = { ...DEFAULT_UPSTREAMS, ...(opts.upstreams ?? {}) };
   const recall = opts.recall ?? (async () => []);
@@ -236,10 +261,13 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
 
   return http.createServer((req, res) => {
     void handleRequest(req, res).catch((err: unknown) => {
-      // Last-resort guard: an exception anywhere in the handler must
-      // still produce a response, never a hung connection. This is the
-      // same 502 contract as an unreachable upstream, since by the time
-      // we are here we can no longer promise a clean forward.
+      // Last-resort guard, not the primary error path: every step below
+      // (recall, injectMemories, the upstream fetch) is independently
+      // try/catch-guarded and degrades on its own. This only fires for
+      // a bug in the handler itself — a place we did not anticipate
+      // needing a guard. Even then, a response must still go out rather
+      // than leave the connection hanging, so it uses the same 502
+      // shape as a genuinely unreachable upstream.
       if (!res.headersSent) {
         sendJson(res, 502, { "x-klio-proxy-error": messageOf(err), "x-klio-injected": "0" }, {
           type: "error",
@@ -271,12 +299,15 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
     const body = await readRequestBody(req);
     const upstreamUrl = `${upstream.base}${upstream.path}${upstream.search}`;
 
-    const isMessagesCall =
-      !body.capped &&
-      injectEnabled &&
-      req.method === "POST" &&
-      upstream.path.endsWith("/messages") &&
-      opts.config !== null;
+    // Shape predicate ONLY — "is this a request injection and capture
+    // could apply to at all". Deliberately independent of `injectEnabled`:
+    // `KLIO_PROXY_INJECT` and `KLIO_PROXY_CAPTURE` are two separate
+    // user-facing toggles, and someone disabling injection (most likely
+    // because they suspect it of affecting model output) must not also
+    // silently lose capture with no signal that it happened.
+    const isMessagesShape =
+      !body.capped && req.method === "POST" && upstream.path.endsWith("/messages") && opts.config !== null;
+    const willInject = isMessagesShape && injectEnabled;
 
     let outBody: Buffer | Readable;
     let injected = 0;
@@ -288,7 +319,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       originalBuffered = body.body;
       outBody = body.body;
 
-      if (isMessagesCall) {
+      if (willInject) {
         let memories: Memory[] = [];
         try {
           const parsed: unknown = JSON.parse(body.body.toString("utf8"));
@@ -337,13 +368,39 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       return;
     }
 
-    const willCapture = captureEnabled && isMessagesCall && originalBuffered !== null && opts.config !== null;
+    const willCapture = captureEnabled && isMessagesShape && originalBuffered !== null && opts.config !== null;
     const upstreamNodeStream = Readable.fromWeb(
       upstreamResponse.body as unknown as import("node:stream/web").ReadableStream<Uint8Array>,
     );
 
+    // `pipeline()`, never bare `.pipe()`. Two failure modes this covers
+    // together, both reproduced against the plain-`.pipe()` version:
+    //
+    //   * The upstream connection resets mid-stream (an ordinary TLS
+    //     reset on a long SSE response — exactly what api.anthropic.com
+    //     does under normal operation). `.pipe()` does not forward
+    //     source errors to the destination; an unhandled "error" on an
+    //     EventEmitter with no listener crashes the process.
+    //   * The client disconnects mid-stream (Claude Code aborts on ESC
+    //     or tool-loop cancellation, constantly). `.pipe()` does not
+    //     destroy the source on a destination close, so the upstream
+    //     fetch — and the tokens it's billing — keeps running with
+    //     nobody reading it. `pipeline()` detects the premature close
+    //     and destroys every stream in the chain, which for
+    //     `Readable.fromWeb` propagates into `reader.cancel()` on the
+    //     underlying web stream.
+    //
+    // Either way, by the time `pipeline` rejects, headers are already
+    // sent and the response may be partially flushed — there is no
+    // clean response left to send, so the rejection is swallowed here
+    // rather than bubbling to the last-resort handler above.
     if (!willCapture) {
-      upstreamNodeStream.pipe(res);
+      try {
+        await pipeline(upstreamNodeStream, res);
+      } catch {
+        // Client aborted or upstream reset mid-stream; already handled
+        // by pipeline() destroying both ends. Nothing left to forward.
+      }
       return;
     }
 
@@ -351,21 +408,32 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
     const config = opts.config as CloudConfig;
     const requestBody = originalBuffered as Buffer;
     res.on("finish", () => {
-      const assistantText = extractAssistantText(tee.captured(), responseHeaders["content-type"]);
-      // Fire-and-forget, strictly after the response has been sent.
-      void capture({
-        config,
-        agent: config.agentId,
-        requestBody,
-        assistantText,
-        fetchImpl: doFetch,
-      }).catch(() => {
-        // Best-effort by contract; a capture failure must never surface
-        // after the response has already been delivered.
-      });
+      // Guards a SYNCHRONOUS throw from `capture` (a public injection
+      // point a caller could hand us a broken implementation of), not
+      // just a rejected promise — a throw here happens after the
+      // response has already been delivered and must never surface.
+      try {
+        const assistantText = extractAssistantText(tee.captured(), responseHeaders["content-type"]);
+        void capture({
+          config,
+          agent: config.agentId,
+          requestBody,
+          assistantText,
+          fetchImpl: doFetch,
+        }).catch(() => {
+          // Best-effort by contract; a capture failure must never
+          // surface after the response has already been delivered.
+        });
+      } catch {
+        // See above: a synchronous throw gets the same treatment.
+      }
     });
 
-    upstreamNodeStream.pipe(tee).pipe(res);
+    try {
+      await pipeline(upstreamNodeStream, tee, res);
+    } catch {
+      // Same as the non-capture branch above.
+    }
   }
 }
 
@@ -378,11 +446,11 @@ export async function startProxy(
   opts: StartProxyOptions = {},
 ): Promise<{ server: http.Server; port: number }> {
   const config = readCloudConfig();
-  const inject = process.env["KLIO_PROXY_INJECT"] === "false" ? false : (opts.inject ?? true);
-  const captureEnabled =
-    process.env["KLIO_PROXY_CAPTURE"] === "false"
-      ? false
-      : (opts.captureEnabled ?? process.env["KLIO_PROXY_CAPTURE"] === "true");
+  const injectEnv = process.env["KLIO_PROXY_INJECT"];
+  const inject = envIsFalsy(injectEnv) ? false : (opts.inject ?? true);
+
+  const captureEnv = process.env["KLIO_PROXY_CAPTURE"];
+  const captureEnabled = envIsFalsy(captureEnv) ? false : (opts.captureEnabled ?? envIsTruthy(captureEnv));
 
   const recall = config ? createRecaller({ config, fetchImpl: opts.fetchImpl }) : undefined;
 
@@ -399,6 +467,27 @@ export async function startProxy(
   const port = opts.port ?? PROXY_PORT;
   const host = opts.host ?? PROXY_HOST;
 
-  await new Promise<void>((resolve) => server.listen(port, host, resolve));
+  // `server.listen()` throws asynchronously via an "error" event (e.g.
+  // EADDRINUSE), not via the listen callback or a rejected promise. With
+  // no listener, that is an uncaught exception — confirmed: an occupied
+  // port crashed the process before any caller could report "port 8787
+  // is already in use". The one-shot listener below turns that into a
+  // normal rejection for callers of `startProxy`; a permanent no-op
+  // listener replaces it once listening succeeds, so a later transient
+  // server-level error (e.g. EMFILE) can't crash the process either —
+  // by that point the caller has already gotten its `{ server, port }`
+  // and has no promise left to reject.
+  await new Promise<void>((resolve, reject) => {
+    const onStartupError = (err: unknown): void => reject(err instanceof Error ? err : new Error(String(err)));
+    server.once("error", onStartupError);
+    server.listen(port, host, () => {
+      server.removeListener("error", onStartupError);
+      resolve();
+    });
+  });
+  server.on("error", () => {
+    // Post-startup server-level errors have no caller left to report to.
+  });
+
   return { server, port };
 }

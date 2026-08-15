@@ -239,3 +239,169 @@ test("streaming is not buffered: the client receives the first chunk before upst
     },
   );
 });
+
+// M9: the test above deliberately runs with `inject: false`, so it never
+// exercises `pipeline(upstream, tee, res)` — the branch that runs
+// whenever `captureEnabled` is on, which is the configuration real users
+// with capture wired up will actually run. This is the same
+// non-buffering proof, but through the tee.
+test("streaming through the capture tee is still not buffered: the client gets the first chunk before upstream closes", async () => {
+  let resolveUpstreamClose: () => void = () => {};
+  const upstreamClosed = new Promise<void>((r) => { resolveUpstreamClose = r; });
+  let captured: any = null;
+
+  const sse = (obj: unknown) => new TextEncoder().encode(`data: ${JSON.stringify(obj)}\n\n`);
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(sse({ type: "content_block_delta", delta: { type: "text_delta", text: "Hello" } }));
+      // Hold the stream open until the test explicitly lets it close.
+      upstreamClosed.then(() => {
+        controller.enqueue(sse({ type: "content_block_delta", delta: { type: "text_delta", text: " world" } }));
+        controller.enqueue(sse({ type: "message_stop" }));
+        controller.close();
+      });
+    },
+  });
+
+  await withServer(
+    {
+      config: CONFIG,
+      recall: async () => [],
+      captureEnabled: true,
+      capture: (async (o: any) => { captured = o; }) as any,
+      fetchImpl: (async () =>
+        new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } })) as any,
+    },
+    async (base) => {
+      const res = await fetch(`${base}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: "q" }] }),
+      });
+      const reader = res.body!.getReader();
+      const { value, done } = await reader.read();
+      assert.equal(done, false);
+      assert.match(new TextDecoder().decode(value), /Hello/);
+
+      // At this point the upstream has NOT closed yet — a buffering
+      // implementation (or one that dropped the tee for a plain pipe)
+      // could not have delivered anything to the client yet.
+      resolveUpstreamClose();
+      let chunk = await reader.read();
+      while (!chunk.done) chunk = await reader.read();
+
+      await new Promise((r) => setTimeout(r, 50));
+      assert.ok(captured, "capture should have fired through the tee");
+      assert.equal(captured.assistantText, "Hello world");
+    },
+  );
+});
+
+// M8: SSE assistant-text extraction, exercised directly — this is the
+// only shape real Claude Code traffic (`stream: true`) actually takes.
+test("capture extracts assistant text from a realistic SSE stream", async () => {
+  let captured: any = null;
+  const events = [
+    { type: "message_start", message: { id: "msg_1", role: "assistant", content: [] } },
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello " } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "world" } },
+    { type: "content_block_stop", index: 0 },
+    { type: "message_stop" },
+  ];
+  const sseBody = events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
+
+  await withServer(
+    {
+      config: CONFIG,
+      recall: async () => [],
+      captureEnabled: true,
+      capture: (async (o: any) => { captured = o; }) as any,
+      fetchImpl: (async () =>
+        new Response(sseBody, { status: 200, headers: { "content-type": "text/event-stream" } })) as any,
+    },
+    async (base) => {
+      await fetch(`${base}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: "q" }] }),
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(captured.assistantText, "Hello world");
+    },
+  );
+});
+
+// I5: KLIO_PROXY_INJECT and KLIO_PROXY_CAPTURE are independent toggles.
+// Disabling injection must not silently disable capture too.
+test("capture fires independently of inject: false", async () => {
+  let captured: any = null;
+  await withServer(
+    {
+      config: CONFIG,
+      inject: false,
+      captureEnabled: true,
+      capture: (async (o: any) => { captured = o; }) as any,
+      fetchImpl: (async () =>
+        new Response(JSON.stringify({ content: [{ type: "text", text: "the answer" }] }), { status: 200 })) as any,
+    },
+    async (base) => {
+      const res = await fetch(`${base}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: "q" }] }),
+      });
+      // Injection never ran (inject: false), so nothing was recalled or injected.
+      assert.equal(res.headers.get("x-klio-injected"), "0");
+
+      await new Promise((r) => setTimeout(r, 50));
+      assert.ok(captured, "capture should fire even when injection is disabled");
+      assert.equal(captured.assistantText, "the answer");
+    },
+  );
+});
+
+// C2 regression: exiting the body-reading loop early must not destroy
+// the live request stream. Before the fix (an async `for await...of req`
+// with an early `return`), an over-cap request would hang forever — the
+// destroyed `req` could never emit "end", so nothing downstream ever
+// completed. This proves the request completes and the FULL raw body
+// (all of it, unmodified) reaches the upstream.
+test("a request over the body cap is forwarded raw and completes — it must not hang", { timeout: 15000 }, async () => {
+  let seenBody: Buffer | null = null;
+  let seenLength = 0;
+  await withServer(
+    {
+      config: CONFIG,
+      inject: false,
+      fetchImpl: (async (_u: any, init: any) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of init.body as AsyncIterable<Buffer>) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        seenBody = Buffer.concat(chunks);
+        seenLength = seenBody.length;
+        return new Response("ok", { status: 200 });
+      }) as any,
+    },
+    async (base) => {
+      const oneMb = Buffer.alloc(1024 * 1024, "a");
+      const totalMb = 11; // over the 10 MB cap
+      const requestBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let i = 0; i < totalMb; i++) controller.enqueue(oneMb);
+          controller.close();
+        },
+      });
+      const res = await fetch(`${base}/v1/models`, {
+        method: "POST",
+        body: requestBody,
+        // @ts-expect-error Node fetch requires duplex for a streamed body.
+        duplex: "half",
+      });
+      assert.equal(res.status, 200);
+      assert.equal(seenLength, oneMb.length * totalMb);
+      assert.ok(seenBody);
+    },
+  );
+});
