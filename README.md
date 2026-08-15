@@ -321,9 +321,13 @@ To uninstall fully:
 npx @klio-tech/klio uninstall
 ```
 
-This walks the same six adapters in reverse, restoring the timestamped
-backup each one wrote at install time — your agent configs return to
-their pre-Klio state byte-for-byte.
+This un-wires the local proxy, removes its supervisor, stops the proxy,
+and then walks the same six adapters in reverse, restoring the
+timestamped backup each one wrote at install time — your agent configs
+return to their pre-Klio state byte-for-byte. Only the last step
+(removing containers and volumes) needs Docker, and it is skipped
+entirely on a Klio Cloud machine, so uninstall works on a host that has
+never had Docker installed.
 
 To stop the stack without uninstalling: `docker compose down`.
 
@@ -419,25 +423,46 @@ no injection, never a slower request. Every response carries
 
 **Turning it off.** Two independent kill switches, no uninstall needed:
 
-| Variable              | Effect                                              |
-|-----------------------|-----------------------------------------------------|
-| `KLIO_PROXY_INJECT=off`  | Stop appending memories to `system`.             |
-| `KLIO_PROXY_CAPTURE=off` | Stop sending conversations to Klio.              |
+```bash
+klio proxy capture off   # stop sending conversations to Klio
+klio proxy inject off    # stop appending memories to `system`
+klio proxy capture       # what is it set to, and where did that come from
+```
 
 Both are **on** by default whenever `~/.klio/config.json` holds a cloud
-key, and setting either to `off`/`false`/`0`/`no` turns that half off at
-the next proxy start.
+key. The choice is **saved in that same file** and survives a proxy
+restart, a reboot, and a re-run of `klio init`; the command also
+restarts a running proxy, so it takes effect immediately rather than
+"at the next start".
+
+`KLIO_PROXY_INJECT` and `KLIO_PROXY_CAPTURE` still work
+(`off`/`false`/`0`/`no`) and override the saved setting — but **only for
+a process your own shell starts**. That is the whole reason they are not
+the durable switch: after `klio init` the proxy is started by launchd or
+systemd, whose child inherits the *supervisor's* environment and never
+sees your shell, so an exported variable was silently forgotten at every
+restart. Use them for a one-off (`KLIO_PROXY_CAPTURE=off klio proxy
+serve`); use `klio proxy capture off` for a decision.
 
 **Commands.**
 
 ```bash
-klio proxy status   # is it answering, and what is it doing
-klio proxy serve    # run it in the foreground (this is how you see errors)
-klio proxy stop     # stop it
-klio proxy ensure   # what the supervisor runs every 60s: probe, revive if dead
-klio doctor         # check the whole wiring end to end, and repair what it can
-klio uninit         # remove the wiring and stop the proxy — the escape hatch
+klio proxy status         # is it answering, what is it doing, and what is it set to
+klio proxy serve          # run it in the foreground (this is how you see errors)
+klio proxy stop           # stop it
+klio proxy ensure         # what the supervisor runs every 60s: probe, revive if dead
+klio proxy capture on|off # save and apply the capture kill switch
+klio proxy inject on|off  # save and apply the injection kill switch
+klio doctor               # check the whole wiring end to end, and repair what it can
+klio uninit               # remove the wiring and stop the proxy — the escape hatch
 ```
+
+If something *other than* Klio is listening on 8787, `klio proxy stop`
+and `klio down` say so and leave it alone — they will never signal a
+process they cannot prove is ours. `lsof -nP -iTCP:8787 -sTCP:LISTEN`
+names the listener; deciding what to do with it is yours, because
+selecting processes by port alone catches connected clients (your coding
+agent among them), not just the listener.
 
 `klio uninit` is the escape hatch and is designed to work when nothing
 else does: it does not need Docker, does not need the proxy to be

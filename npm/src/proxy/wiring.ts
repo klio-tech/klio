@@ -174,6 +174,14 @@ export function describeWiring(result: WireProxyResult, log: (line: string) => v
  * it appends to `system` and captures the conversation. Anything added
  * here must describe what the code does today, not what an earlier
  * stage did.
+ *
+ * It also has to describe controls that WORK. "Turn either half off at
+ * any time" pointed only at `KLIO_PROXY_CAPTURE=off`, which the
+ * supervised deployment — the only one `klio init` produces — silently
+ * reverted on every restart, because the proxy is launchd's or
+ * systemd's grandchild and never sees the user's shell. The durable
+ * switch is `klio proxy capture off` (proxy/toggles.ts); the env var is
+ * named here only as the per-process override it actually is.
  */
 export function describeTradeoffs(log: (line: string) => void): void {
   log("");
@@ -187,7 +195,12 @@ export function describeTradeoffs(log: (line: string) => void): void {
   log("        and `tool_reference` blocks are forwarded byte for byte,");
   log("        and any doubt forwards your original bytes unmodified.");
   log("        Turn either half off at any time, without uninstalling:");
-  log("        KLIO_PROXY_INJECT=off and KLIO_PROXY_CAPTURE=off.");
+  log("        `klio proxy capture off` and `klio proxy inject off`.");
+  log("        The choice is saved in ~/.klio/config.json and survives");
+  log("        restarts, reboots and re-running `klio init`. (The env vars");
+  log("        KLIO_PROXY_CAPTURE / KLIO_PROXY_INJECT still override it for");
+  log("        one process — but only a process YOUR shell starts, which is");
+  log("        why they are not the durable switch.)");
   log("        There is no compression yet, so no token savings yet.");
   log("");
   log("      • Codex is wired through the proxy too, but as PASS-THROUGH");

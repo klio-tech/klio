@@ -2,10 +2,20 @@
 // support still feed the evidence loop.
 //
 // Capture lives in bridge/internal/hooks today, which reaches only
-// harnesses that support hooks — in practice Claude Code. Codex and any
-// self-built agent write memories through MCP and are never retained,
-// graded, or attributed. The proxy sees the whole conversation, so it is
-// the one place their sessions can be captured.
+// harnesses that support hooks — in practice Claude Code. Anything
+// else writes memories through MCP and is never retained, graded, or
+// attributed. The proxy sees the whole conversation, so it is the one
+// place those sessions can be captured.
+//
+// SCOPE, precisely: this reaches agents speaking Anthropic's Messages
+// API, because `server.ts` gates injection and capture on a POST whose
+// path ends `/messages`. Claude Code is the one that matters today; any
+// other harness on that API gets the same treatment. CODEX DOES NOT.
+// It is wired to the proxy, but `wire_api = "responses"`
+// (proxy/codexProxy.ts) puts its traffic on `/v1/responses`, which this
+// release forwards byte for byte. The user-facing copy was corrected
+// for exactly this; claiming "Codex and any self-built agent" here
+// promised three things Codex users do not get.
 //
 // Strictly after the response is forwarded, strictly fire-and-forget.
 

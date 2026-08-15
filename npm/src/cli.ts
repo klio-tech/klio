@@ -215,7 +215,9 @@ commands:
   configure   Tweak runtime settings (auto-update mode, claim email, etc.)
   doctor      Check the compression proxy end to end, and repair what it can
   uninit      Remove the compression-proxy wiring (memory + MCP are untouched)
-  proxy       Proxy control: \`klio proxy status|serve|stop|ensure\`
+  proxy       Proxy control: \`klio proxy status|serve|stop|ensure\`.
+              Kill switches, saved and applied at once:
+              \`klio proxy inject off\`, \`klio proxy capture off\`
   down        Stop the stack (data is preserved)
   uninstall   Stop and delete all data; restore agent configs from backup
   version     Print the package version

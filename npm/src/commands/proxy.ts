@@ -1,4 +1,5 @@
-// `klio proxy <ensure|status|serve|stop>` — the command the supervisor runs.
+// `klio proxy <ensure|status|serve|stop|inject|capture>` — the command
+// the supervisor runs, plus the two kill switches.
 //
 // Kept separate from `klio doctor` because the two have different
 // audiences and different failure behaviour. `doctor` talks to a human
@@ -15,7 +16,7 @@
 
 import { resolve } from "node:path";
 
-import { readCloudConfig } from "../cloudConfig.js";
+import { cloudConfigPath, readCloudConfig } from "../cloudConfig.js";
 import { runtimeDir } from "../compose.js";
 import { composeUpService, resolveComposeBin } from "../docker.js";
 import { PROXY_PORT, PROXY_SERVICE } from "../proxy/constants.js";
@@ -23,6 +24,15 @@ import { spawnProxy } from "../proxy/processSupervisor.js";
 import { startProxy } from "../proxy/server.js";
 import { stopProxy } from "../proxy/stop.js";
 import { probeProxy } from "../proxy/supervisor.js";
+import {
+  PROXY_TOGGLE_DESCRIPTION,
+  PROXY_TOGGLE_ENV,
+  PROXY_TOGGLE_NAMES,
+  resolveProxyToggles,
+  setPersistedToggle,
+  type ProxyToggleName,
+  type ResolvedToggle,
+} from "../proxy/toggles.js";
 
 export type ProxyCommandOptions = {
   args: string[];
@@ -42,6 +52,12 @@ export type ProxyCommandOptions = {
   stopProxyImpl?: typeof stopProxy;
   /** Absolute path to the CLI entrypoint, used when spawning `proxy serve`. */
   cliPath?: string;
+  /** Environment the toggle subcommands read. Defaults to this process's. */
+  env?: NodeJS.ProcessEnv;
+  /** Config file the toggle subcommands read and write. Defaults to ~/.klio/config.json. */
+  configPathImpl?: () => string;
+  /** Injectable delay, so the restart loop costs tests nothing. */
+  sleepImpl?: (ms: number) => Promise<void>;
 };
 
 export async function runProxyCommand(opts: ProxyCommandOptions): Promise<number> {
@@ -57,9 +73,14 @@ export async function runProxyCommand(opts: ProxyCommandOptions): Promise<number
       return serve(log, opts);
     case "stop":
       return stop(log, opts);
+    case "inject":
+    case "capture":
+      return toggle(sub, log, opts);
     default:
       process.stderr.write(
-        `klio proxy: unknown subcommand: ${sub}\nusage: klio proxy <ensure|status|serve|stop>\n`,
+        `klio proxy: unknown subcommand: ${sub}\n` +
+          `usage: klio proxy <ensure|status|serve|stop>\n` +
+          `       klio proxy <inject|capture> [on|off]\n`,
       );
       return 2;
   }
@@ -85,8 +106,12 @@ export async function runProxyCommand(opts: ProxyCommandOptions): Promise<number
  * forever and never trying again. Deduplication instead falls out of
  * `startProxy`'s own EADDRINUSE rejection: if a proxy is already up,
  * the spawned `proxy serve` exits 1 within about a second and the
- * still-running original keeps answering the next probe. The pid file
- * is written purely for bookkeeping (see processSupervisor.ts).
+ * still-running original keeps answering the next probe. NOTHING
+ * RECORDS A PID at all — `processSupervisor.ts` explains why the pid
+ * file was removed rather than kept "for bookkeeping": every reader of
+ * it was unsound, and the one attempt to use it broke revival on a live
+ * machine. `pidFilePath` survives only so `klio uninit` can delete what
+ * an older install left behind.
  */
 async function ensure(log: (line: string) => void, opts: ProxyCommandOptions): Promise<number> {
   const probe = opts.probeProxyImpl ?? probeProxy;
@@ -163,12 +188,194 @@ async function stop(log: (line: string) => void, opts: ProxyCommandOptions): Pro
   return !result.wasRunning || result.stopped ? 0 : 1;
 }
 
-/** One-line liveness report for humans and scripts. */
+/**
+ * One-line liveness report for humans and scripts, plus the SETTINGS.
+ *
+ * The two are different questions and the second one is the one nobody
+ * could answer before: `mode` in the health body describes the process
+ * that happens to be running now, which after a supervisor restart is
+ * not necessarily what the user asked for. Printing the resolved
+ * settings — and where each came from — is what makes "did my opt-out
+ * stick?" answerable without reading a JSON file.
+ */
 async function status(log: (line: string) => void, opts: ProxyCommandOptions): Promise<number> {
   const probe = opts.probeProxyImpl ?? probeProxy;
   const result = await probe();
   log(result.alive ? `klio proxy: ${result.detail}` : `klio proxy: down (${result.detail})`);
+  for (const line of describeToggles(opts)) log(`  ${line}`);
   return result.alive ? 0 : 1;
+}
+
+/** `  inject: on (default)` / `  capture: off (saved setting …)`, one per half. */
+function describeToggles(opts: ProxyCommandOptions): string[] {
+  const toggles = resolveProxyToggles({
+    env: opts.env ?? process.env,
+    configPath: (opts.configPathImpl ?? cloudConfigPath)(),
+  });
+  return PROXY_TOGGLE_NAMES.map(
+    (name) => `${name}: ${describeToggle(name, toggles[name], opts)}`,
+  );
+}
+
+function describeToggle(
+  name: ProxyToggleName,
+  toggle: ResolvedToggle,
+  opts: ProxyCommandOptions,
+): string {
+  const state = toggle.enabled ? "on" : "off";
+  switch (toggle.source) {
+    case "env":
+      return `${state} (${PROXY_TOGGLE_ENV[name]} in this shell)`;
+    case "config":
+      return `${state} (saved setting in ${(opts.configPathImpl ?? cloudConfigPath)()})`;
+    default:
+      return `${state} (default)`;
+  }
+}
+
+/**
+ * `klio proxy <inject|capture> [on|off]` — the durable kill switch.
+ *
+ * With no value it reports; with one it records the choice in
+ * ~/.klio/config.json, which is what the proxy reads at boot however it
+ * was started. The env var remains a per-process override and is
+ * deliberately NOT written anywhere: a supervisor-spawned proxy never
+ * sees the user's shell, which is the whole reason this command exists.
+ *
+ * Recording the choice is not the same as APPLYING it: `startProxy`
+ * reads the setting once at boot, so a proxy that is already running
+ * keeps doing what it was doing. This command therefore restarts a
+ * running Klio proxy in place — and when it cannot (a container, an
+ * older proxy, a process it may not signal), it says so and exits
+ * nonzero rather than let "capture is now off" stand while the running
+ * proxy keeps sending conversations.
+ */
+async function toggle(
+  name: ProxyToggleName,
+  log: (line: string) => void,
+  opts: ProxyCommandOptions,
+): Promise<number> {
+  const configPath = (opts.configPathImpl ?? cloudConfigPath)();
+  const env = opts.env ?? process.env;
+  const raw = opts.args[1];
+
+  if (raw === undefined) {
+    const toggles = resolveProxyToggles({ env, configPath });
+    log(`klio proxy ${name}: ${describeToggle(name, toggles[name], opts)}`);
+    log(`  ${name} = ${PROXY_TOGGLE_DESCRIPTION[name]}`);
+    log(`  change it with: klio proxy ${name} <on|off>`);
+    return 0;
+  }
+
+  const desired = parseOnOff(raw);
+  if (desired === null) {
+    log(`klio proxy ${name}: "${raw}" is not on|off`);
+    log(`  usage: klio proxy ${name} <on|off>`);
+    return 2;
+  }
+
+  try {
+    setPersistedToggle(name, desired, configPath);
+  } catch (err) {
+    log(`klio proxy ${name}: could not save the setting: ${messageOf(err)}`);
+    return 1;
+  }
+  log(`klio proxy: ${name} is now ${desired ? "on" : "off"} (saved in ${configPath})`);
+  log(`  ${name} = ${PROXY_TOGGLE_DESCRIPTION[name]}`);
+
+  // A shell export beats the file for every process started from that
+  // shell — including the proxy this command is about to restart, which
+  // inherits this process's environment. Saying nothing here would let
+  // the user believe a setting that their own shell is overriding.
+  const override = env[PROXY_TOGGLE_ENV[name]];
+  if (override !== undefined && override.trim() !== "") {
+    log(
+      `  ! ${PROXY_TOGGLE_ENV[name]}=${override} is set in this shell and overrides the saved ` +
+        `setting for anything started from it. Unset it to let the saved setting apply.`,
+    );
+  }
+
+  return applyToRunningProxy(log, opts);
+}
+
+/**
+ * Make a change take effect on the proxy that is already listening.
+ *
+ * Restarting is stop-then-spawn, the same two steps `klio init` uses,
+ * and it inherits `stopProxy`'s refusal to signal anything that has not
+ * proven it is ours (proxy/stop.ts). The failure modes are reported
+ * distinctly because they mean different things to the user:
+ *
+ *   * nothing running → the setting simply applies at the next start;
+ *   * something running that is not ours → we will not touch it, and
+ *     the user has to restart it the way it was started;
+ *   * ours, but it would not stop → the OLD behaviour is still live.
+ *
+ * Only the last is an error exit: it is the one where the user asked
+ * for their conversations to stop leaving the machine and they have
+ * not.
+ */
+async function applyToRunningProxy(
+  log: (line: string) => void,
+  opts: ProxyCommandOptions,
+): Promise<number> {
+  const probe = opts.probeProxyImpl ?? probeProxy;
+  const stopImpl = opts.stopProxyImpl ?? stopProxy;
+  const spawn = opts.spawnProxyImpl ?? spawnProxy;
+  const nap = opts.sleepImpl ?? sleep;
+
+  const before = await probe();
+  if (!before.alive) {
+    log("  The proxy is not running; the setting applies the next time it starts.");
+    return 0;
+  }
+  if (before.health?.runtime !== "node") {
+    log(
+      "  Something other than this CLI's proxy is on the port, so it was left alone. " +
+        "Restart it for the change to take effect.",
+    );
+    return 0;
+  }
+
+  const stopped = await stopImpl();
+  if (!stopped.stopped) {
+    log(`  ! Could not restart the running proxy: ${stopped.detail}`);
+    log("    It is still running with the OLD setting. The saved setting applies");
+    log("    at its next start; `klio uninit` stops the proxy outright.");
+    return 1;
+  }
+
+  try {
+    spawn({ cliPath: opts.cliPath ?? resolve(process.argv[1] ?? "") });
+  } catch (err) {
+    log(`  ! The proxy was stopped but could not be restarted: ${messageOf(err)}`);
+    log("    The supervisor brings it back within a minute; `klio proxy ensure` is faster.");
+    return 1;
+  }
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await nap(500);
+    const again = await probe();
+    if (again.alive) {
+      log(`  Restarted — ${again.detail}`);
+      return 0;
+    }
+  }
+
+  log("  ! The proxy was restarted but is not answering yet — run `klio proxy ensure`.");
+  return 1;
+}
+
+/** Strict on/off parsing. An unrecognised word is refused, never guessed at. */
+function parseOnOff(value: string): boolean | null {
+  const v = value.trim().toLowerCase();
+  if (["on", "true", "1", "yes", "enable", "enabled"].includes(v)) return true;
+  if (["off", "false", "0", "no", "disable", "disabled"].includes(v)) return false;
+  return null;
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

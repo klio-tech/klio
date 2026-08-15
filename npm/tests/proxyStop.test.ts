@@ -22,8 +22,10 @@ import { strict as assert } from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
 import { test } from "node:test";
 
+import { down } from "../src/commands/down.js";
 import { runProxyCommand } from "../src/commands/proxy.js";
 import { probeProxy as realProbeProxy } from "../src/proxy/supervisor.js";
+import { stopProxy } from "../src/proxy/stop.js";
 
 /**
  * Start a child process serving `body` at `/__klio/health` on an
@@ -175,5 +177,150 @@ test("an older Klio proxy is named as such, with a remedy that exists", { timeou
     assert.match(out, /8787/, "the remedy has to tell the user how to find it");
   } finally {
     child.kill("SIGKILL");
+  }
+});
+
+// ---------------------------------------------------------------------
+// A FOREIGN listener on the proxy port must be named, not silently
+// reported as "nothing is running".
+//
+// `probeProxy` set `alive = body.status === "ok"`, so `stopProxy`
+// returned at `!first.alive` before it could ever reach the arm that
+// says "something is answering on the proxy port, but it is not a Klio
+// proxy". That arm required `alive && status !== "ok"`, which the
+// definition of `alive` makes impossible: the docblock claimed to tell
+// three responders apart, and it told two apart. Live, a dev server on
+// 8787 produced `klio proxy: not running (unhealthy)` and exit 0, while
+// `klio down` printed `— not running` with the port firmly occupied —
+// the user is then told nothing is wrong, and the next `klio init`
+// loses the EADDRINUSE race to a listener nobody mentioned.
+//
+// Three shapes a non-Klio responder takes, all of them real: JSON that
+// is not a health body, a plain-text/HTML dev server, and an HTTP error
+// status.
+// ---------------------------------------------------------------------
+
+/** Serve `body` verbatim with the given status and content type. */
+async function startForeignListener(
+  status: number,
+  contentType: string,
+  body: string,
+): Promise<{ child: ChildProcess; port: number }> {
+  const source = `
+    const http = require("node:http");
+    const server = http.createServer((req, res) => {
+      res.writeHead(${status}, { "content-type": ${JSON.stringify(contentType)} });
+      res.end(${JSON.stringify(body)});
+    });
+    server.listen(0, "127.0.0.1", () => {
+      process.stdout.write(String(server.address().port) + "\\n");
+    });
+  `;
+  const child = spawn(process.execPath, ["-e", source], { stdio: ["ignore", "pipe", "ignore"] });
+  const port = await new Promise<number>((resolve, reject) => {
+    let out = "";
+    child.stdout!.on("data", (c: Buffer) => {
+      out += c.toString();
+      if (out.includes("\n")) resolve(Number.parseInt(out.trim(), 10));
+    });
+    child.on("exit", () => reject(new Error("foreign listener exited before listening")));
+    setTimeout(() => reject(new Error("foreign listener never reported a port")), 5000);
+  });
+  return { child, port };
+}
+
+const FOREIGN_RESPONDERS: { name: string; status: number; type: string; body: string }[] = [
+  { name: "a JSON API that is not ours", status: 200, type: "application/json", body: '{"ok":true}' },
+  { name: "a dev server serving HTML", status: 200, type: "text/html", body: "<!doctype html><h1>vite</h1>" },
+  { name: "a service answering 404", status: 404, type: "text/plain", body: "not found" },
+];
+
+for (const responder of FOREIGN_RESPONDERS) {
+  test(
+    `proxy stop tells the user ${responder.name} is holding the port`,
+    { timeout: 20000 },
+    async () => {
+      const { child, port } = await startForeignListener(
+        responder.status,
+        responder.type,
+        responder.body,
+      );
+      const lines: string[] = [];
+      try {
+        const code = await runProxyCommand({
+          args: ["stop"],
+          log: (l) => lines.push(l),
+          probeProxyImpl: (() =>
+            realProbeProxy(2000, `http://127.0.0.1:${port}/__klio/health`)) as never,
+        });
+        const out = lines.join("\n");
+        assert.equal(isAlive(child.pid as number), true, "a foreign listener must be left alone");
+        assert.notEqual(code, 0, `an occupied port is not a clean "nothing to stop": ${out}`);
+        assert.match(out, /not a Klio proxy/i, out);
+        assert.doesNotMatch(out, /not running/i, out);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    },
+  );
+}
+
+test("klio down reports the occupied port too, rather than '— not running'", { timeout: 20000 }, async () => {
+  const { child, port } = await startForeignListener(200, "text/html", "<h1>vite</h1>");
+  const lines: string[] = [];
+  try {
+    await down({
+      log: (l) => lines.push(l),
+      readCloudConfigFn: () => ({ apiKey: "k", agentId: "a", baseUrl: "https://b" }),
+      stopProxyFn: () =>
+        stopProxy({
+          probeImpl: () => realProbeProxy(2000, `http://127.0.0.1:${port}/__klio/health`),
+        }),
+    });
+    const out = lines.join("\n");
+    assert.match(out, /not a Klio proxy/i, out);
+    assert.doesNotMatch(out, /—\s*not running/i, out);
+  } finally {
+    child.kill("SIGKILL");
+  }
+});
+
+// ---------------------------------------------------------------------
+// The remedy handed to the user must not have a blast radius we
+// ourselves refused to accept.
+//
+// `kill $(lsof -ti tcp:8787)` selects every process with the port open,
+// which is the LISTENER *and* every connected CLIENT. Measured with the
+// proxy up and one client attached, `lsof -ti tcp:8787` returned two
+// pids — pasting that kill also kills the user's coding agent. Refusing
+// to automate port→pid→kill (because a bare pid cannot prove ownership)
+// and then printing that exact command for the user to paste is having
+// it both ways.
+// ---------------------------------------------------------------------
+
+test("no advice this command prints kills anything selected by port alone", { timeout: 20000 }, async () => {
+  const bodies = [LEGACY_BODY, CONTAINER_BODY, `{ status: "ok", runtime: "node", mode: "inject" }`];
+  for (const body of bodies) {
+    const { child, port } = await startFakeProxy(body);
+    const lines: string[] = [];
+    try {
+      await runProxyCommand({
+        args: ["stop"],
+        log: (l) => lines.push(l),
+        probeProxyImpl: (() => realProbeProxy(2000, `http://127.0.0.1:${port}/__klio/health`)) as never,
+      });
+      const out = lines.join("\n");
+      assert.doesNotMatch(out, /kill\s/, `still hands the user a kill command:\n${out}`);
+      assert.doesNotMatch(out, /lsof\s+-t/, `-t prints bare pids, which is the foot-gun:\n${out}`);
+      if (/lsof/.test(out)) {
+        assert.match(
+          out,
+          /-sTCP:LISTEN/,
+          `an lsof suggestion must be scoped to the LISTENER, not every client:\n${out}`,
+        );
+      }
+    } finally {
+      child.kill("SIGKILL");
+    }
   }
 });

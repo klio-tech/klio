@@ -339,12 +339,31 @@ export async function uninstallSupervisor(
  */
 export type ProbeResult = {
   alive: boolean;
+  /**
+   * Did ANYTHING answer on the port — an HTTP response of any status,
+   * with a body of any shape?
+   *
+   * Separate from `alive` because "the proxy is healthy" and "the port
+   * is occupied" are different questions, and conflating them lost the
+   * second one entirely. With only `alive`, a dev server squatting on
+   * 8787 was indistinguishable from a free port: `klio proxy stop` said
+   * "not running" and exited 0, `klio down` printed "— not running",
+   * and the next `klio init` lost the EADDRINUSE race to a listener
+   * nobody had been told about. Callers that need "is the proxy
+   * working" keep reading `alive`; callers that need "is this port
+   * free" read `responded`.
+   */
+  responded: boolean;
   detail: string;
   /**
+   * The parsed health body, whenever one parsed — INCLUDING when it is
+   * not ours. Telling a container apart from a host process, or an
+   * older Klio proxy apart from a stranger, is only possible with the
+   * body in hand, and every such caller has to check the discriminating
+   * fields itself.
+   *
    * Extra keys are typed in on purpose: the responder may be the PYTHON
-   * proxy, whose body carries `upstream`/`upstreams` and no `runtime`,
-   * and callers legitimately read those to tell a container apart from
-   * a host process.
+   * proxy, whose body carries `upstream`/`upstreams` and no `runtime`.
    */
   health?: Partial<ProxyHealth> & Record<string, unknown>;
 };
@@ -364,27 +383,48 @@ export async function probeProxy(
 ): Promise<ProbeResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // Flipped the instant headers arrive, so a body that fails to read or
+  // parse still counts as "the port is occupied" — which is the whole
+  // point of tracking it separately from `alive`.
+  let responded = false;
   try {
     const response = await fetch(url, { signal: controller.signal });
+    responded = true;
     if (!response.ok) {
-      return { alive: false, detail: `health endpoint returned ${response.status}` };
+      return {
+        alive: false,
+        responded: true,
+        detail: `health endpoint returned ${response.status}`,
+      };
     }
-    const body = (await response.json()) as (Partial<ProxyHealth> & Record<string, unknown>) | null;
+
+    let body: (Partial<ProxyHealth> & Record<string, unknown>) | null;
+    try {
+      body = (await response.json()) as (Partial<ProxyHealth> & Record<string, unknown>) | null;
+    } catch {
+      // A 200 that is not JSON: a dev server's index.html is the common
+      // case. Occupied, definitively not ours.
+      return { alive: false, responded: true, detail: "answered, but not with a JSON body" };
+    }
+
     const alive = body?.status === "ok";
     return {
       alive,
-      detail: alive ? `alive (${body?.mode ?? "unknown mode"})` : "unhealthy",
-      // Handed back verbatim (and only when the responder is healthy) so
-      // callers that need to know WHICH proxy answered — `klio proxy
-      // stop` before it signals anything, `klio init` checking for a
-      // survivor holding stale credentials — do not have to re-probe and
-      // race with whatever changed in between.
-      health: alive ? (body as Partial<ProxyHealth> & Record<string, unknown>) : undefined,
+      responded: true,
+      detail: alive ? `alive (${body?.mode ?? "unknown mode"})` : "answered, but not as a Klio proxy",
+      // Handed back verbatim so callers that need to know WHICH
+      // responder answered — `klio proxy stop` before it signals
+      // anything, `klio init` checking for a survivor holding stale
+      // credentials — do not have to re-probe and race with whatever
+      // changed in between. Present for UNHEALTHY bodies too: that is
+      // exactly the case where "who is this?" matters most.
+      health: body ?? undefined,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
       alive: false,
+      responded,
       detail: message.includes("abort") ? `no response within ${timeoutMs}ms` : message,
     };
   } finally {

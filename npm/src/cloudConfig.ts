@@ -75,6 +75,67 @@ export function readCloudConfig(
   return { apiKey, agentId, baseUrl };
 }
 
+/**
+ * Parse the config file into a plain object, or `null` for any problem
+ * (missing, unreadable, malformed, or not a JSON object).
+ *
+ * The whole-file view, as opposed to {@link readCloudConfig}'s
+ * credential view. Callers that own OTHER keys in the same file —
+ * `proxy/toggles.ts` owns `proxy` — read through this so there is
+ * exactly one place that knows the file is JSON.
+ */
+export function readConfigObject(path: string = cloudConfigPath()): Record<string, unknown> | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * Write the whole config object back, 0600 inside a 0700 directory.
+ * Same perm discipline as {@link writeCloudConfig}, for the same
+ * reason: the file holds a secret.
+ */
+export function writeConfigObject(
+  body: Record<string, unknown>,
+  path: string = cloudConfigPath(),
+): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, JSON.stringify(body, null, 2) + "\n", { mode: 0o600 });
+  chmodSync(path, 0o600);
+}
+
+/** The credential fields {@link writeCloudConfig} owns. Everything else is somebody else's. */
+const CREDENTIAL_KEYS = ["apiKey", "agentId", "baseUrl"] as const;
+
+/**
+ * Everything in the config file that is NOT a credential field.
+ *
+ * `writeCloudConfig` carries these forward. A re-run of `klio init`
+ * that dropped them would silently turn a user's conversations back on
+ * — the exact consent failure the persisted `proxy` toggles exist to
+ * close, reached from a different direction.
+ */
+function preservedConfigKeys(path: string): Record<string, unknown> {
+  const existing = readConfigObject(path);
+  if (existing === null) return {};
+  const rest: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(existing)) {
+    if (!(CREDENTIAL_KEYS as readonly string[]).includes(key)) rest[key] = value;
+  }
+  return rest;
+}
+
 /** Domain separation, so this digest can never collide with any other use of the same inputs. */
 const FINGERPRINT_DOMAIN = "klio-proxy-config-fingerprint:v1\n";
 
@@ -106,6 +167,14 @@ export function configFingerprint(config: CloudConfig | null): string {
  * Persist the cloud config, creating `~/.klio` (0700) if needed and
  * writing the file 0600. The trailing slash on `baseUrl` is stripped so
  * the hook client can join capture paths without doubling the slash.
+ *
+ * This function owns the three CREDENTIAL fields and nothing else.
+ * Anything else already in the file is carried forward verbatim —
+ * specifically the `proxy` block (proxy/toggles.ts), which is where a
+ * user's "stop sending my conversations to Klio" lives. Overwriting the
+ * whole file here would mean a second `klio init` silently re-enabled
+ * capture, which is the same consent bug the persisted toggle exists to
+ * close, just reached from a different direction.
  */
 export function writeCloudConfig(
   config: CloudConfig,
@@ -118,6 +187,7 @@ export function writeCloudConfig(
         apiKey: config.apiKey,
         agentId: config.agentId,
         baseUrl: config.baseUrl.replace(/\/+$/, ""),
+        ...preservedConfigKeys(path),
       },
       null,
       2,

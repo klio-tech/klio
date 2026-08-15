@@ -17,18 +17,44 @@ still both receives context and contributes evidence. `messages`,
 for byte, and every failure path forwards the original bytes unchanged.
 Codex is wired but pass-through for now (it uses `/v1/responses`).
 
-Two kill switches, both **on** by default when a cloud key is present:
-`KLIO_PROXY_INJECT=off` and `KLIO_PROXY_CAPTURE=off`.
+Two kill switches, both **on** by default when a cloud key is present.
+`klio proxy inject off` and `klio proxy capture off` save the choice in
+`~/.klio/config.json`, so it survives a restart, a reboot and a re-run
+of `klio init`, and both commands restart a running proxy so the change
+applies immediately. `KLIO_PROXY_INJECT=off` / `KLIO_PROXY_CAPTURE=off`
+still override the saved setting, but only for a process your own shell
+starts — the supervised proxy is launchd's or systemd's child and never
+sees your shell, so the env var alone was not a durable opt-out.
+`klio proxy status` now prints both settings and where each came from.
 
-New: `klio proxy serve|stop|status|ensure`. `/__klio/health` now reports
-`mode`, `runtime`, `pid` and a non-reversible fingerprint of the active
-config, which is what lets `klio proxy stop` prove a process is ours
-before signalling it and lets `klio init` detect a proxy left over from
-an earlier run holding rotated credentials. `klio doctor`, `klio down`
-and `klio uninit` all handle the Docker-free cloud machine.
+New: `klio proxy serve|stop|status|ensure|inject|capture`.
+`/__klio/health` now reports `mode`, `runtime`, `pid` and a
+non-reversible fingerprint of the active config, which is what lets
+`klio proxy stop` prove a process is ours before signalling it and lets
+`klio init` detect a proxy left over from an earlier run holding rotated
+credentials. A responder on the port that is *not* a Klio proxy is now
+named as such — with a read-only `lsof` diagnostic, never a kill command
+— instead of being reported as "not running". `klio doctor`, `klio
+down`, `klio uninit` and `klio uninstall` all handle the Docker-free
+cloud machine; `uninstall` un-wires the agents, removes the supervisor
+and stops the proxy before it goes anywhere near Docker.
 
 Known limitation: a >10 MB request cancelled mid-upload keeps relaying
 to the upstream until the body ends (see README).
+
+## [0.9.3] — 2026-08-14
+
+### Fixed — `session_id` on SessionStart recall
+
+Ships the fix merged in #2, which never reached npm: the publish
+workflow is version-gated, so a change under `npm/src` without a
+`package.json` bump ran, compared 0.9.2 to 0.9.2, and reported success
+having published nothing. The fix looked shipped while every `npx` kept
+pulling the old build.
+
+Also closes that trap: when `npm/src` changes in a push and the local
+version is already on npm, the workflow now fails with an explicit
+error instead of a silent green skip.
 
 ## [0.9.2] — 2026-05-29
 

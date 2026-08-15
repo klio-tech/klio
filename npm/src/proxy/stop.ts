@@ -29,8 +29,26 @@
 // the Python proxy never emits it) plus a plausible `pid`. Anything
 // else is reported and left strictly alone.
 
+import { PROXY_PORT } from "./constants.js";
 import type { ProbeResult } from "./supervisor.js";
 import { probeProxy } from "./supervisor.js";
+
+/**
+ * What we tell a user to run when we will not act for them.
+ *
+ * DIAGNOSTIC, NOT DESTRUCTIVE, and that distinction is the whole point.
+ * The obvious one-liner, `kill $(lsof -ti tcp:8787)`, selects every
+ * process with the port open — the listener AND every connected client.
+ * Measured with the proxy up and one client attached, `lsof -ti
+ * tcp:8787` returned two pids, so pasting that kill also kills the
+ * user's coding agent. This module refuses to automate port→pid→kill
+ * precisely because a bare pid cannot prove ownership; handing the user
+ * the same unsound step to run by hand would just move the blast radius
+ * onto them. `-sTCP:LISTEN` narrows it to the listener, `-nP` keeps the
+ * output readable, and the decision stays with the person who can see
+ * the process name.
+ */
+const LISTENER_DIAGNOSTIC = `lsof -nP -iTCP:${PROXY_PORT} -sTCP:LISTEN`;
 
 /** How long to wait for a SIGTERM to take effect before escalating. */
 const TERM_GRACE_MS = 3000;
@@ -71,7 +89,13 @@ export async function stopProxy(opts: StopProxyOptions = {}): Promise<StopProxyR
   const sleep = opts.sleepImpl ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
   const first = await probe();
-  if (!first.alive) {
+  // "Nothing to stop" is a claim about the PORT, not about health. It
+  // used to be `!first.alive`, which returned here for every responder
+  // that was not a healthy Klio proxy — so a dev server on the port was
+  // reported as "not running (unhealthy)" with exit 0, and the arm
+  // below that exists to name a foreign listener was unreachable by
+  // construction. `responded` is the question actually being asked.
+  if (!first.responded) {
     return { stopped: false, wasRunning: false, detail: `not running (${first.detail})` };
   }
 
@@ -93,11 +117,13 @@ export async function stopProxy(opts: StopProxyOptions = {}): Promise<StopProxyR
         ? "the proxy on this port is the local Docker stack's container, not a host " +
           "process — `klio down` is the command that stops it. Left it alone."
         : health.status === "ok"
-          ? "an older Klio proxy is holding this port. Versions before 0.9.4 do not " +
-            "report their pid, so it cannot be stopped safely from here — end it with " +
-            "`kill $(lsof -ti tcp:8787)` (it also goes away on reboot), then re-run this."
+          ? `an older Klio proxy is holding this port. Versions before 0.9.4 do not ` +
+            `report their pid, so it cannot be stopped safely from here — find it with ` +
+            `\`${LISTENER_DIAGNOSTIC}\` and end that process (it also goes away on ` +
+            `reboot), then re-run this.`
           : `something is answering on the proxy port, but it is not a Klio proxy ` +
-            `(mode ${health.mode ?? "unknown"}) — left it alone.`,
+            `(${first.detail}) — left it alone. \`${LISTENER_DIAGNOSTIC}\` says what it is; ` +
+            `until it is gone, the Klio proxy cannot bind the port.`,
     };
   }
 
@@ -110,7 +136,7 @@ export async function stopProxy(opts: StopProxyOptions = {}): Promise<StopProxyR
       wasRunning: true,
       detail:
         "the proxy is answering but did not report its pid, so it cannot be stopped " +
-        "safely from here — end it with `kill $(lsof -ti tcp:8787)`.",
+        `safely from here — \`${LISTENER_DIAGNOSTIC}\` says which process holds the port.`,
     };
   }
   if (pid === process.pid) {
@@ -173,6 +199,11 @@ export async function stopProxy(opts: StopProxyOptions = {}): Promise<StopProxyR
  * unrelated listener taking it over, leaves the user exactly as
  * unable to reach a model as before. Polling the probe answers the
  * question the caller actually asked.
+ *
+ * And "free" means NOTHING ANSWERS — `responded`, not `alive`. Reading
+ * `alive` here would call the port free the moment an unrelated
+ * listener took it over, which is the same conflation that made a dev
+ * server on 8787 report as "not running".
  */
 async function waitUntilGone(
   probe: () => Promise<ProbeResult>,
@@ -183,7 +214,7 @@ async function waitUntilGone(
   for (;;) {
     await sleep(POLL_INTERVAL_MS);
     const again = await probe();
-    if (!again.alive) return true;
+    if (!again.responded) return true;
     if (Date.now() >= deadline) return false;
   }
 }

@@ -39,6 +39,7 @@ import { emitCapture, type EmitCaptureOptions } from "./capture.js";
 import { filterRequestHeaders, filterResponseHeaders } from "./headers.js";
 import { injectMemories, type Memory } from "./inject.js";
 import { createRecaller } from "./recall.js";
+import { resolveProxyToggles } from "./toggles.js";
 
 /** Above this, a request body is forwarded raw, unbuffered, uninjected. */
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
@@ -473,22 +474,6 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-const FALSY_ENV_VALUES = new Set(["false", "0", "no", "off"]);
-
-/**
- * Accepts the common spellings of "off" for a boolean env var — not
- * just the literal string `"false"`.
- *
- * There is deliberately no `envIsTruthy` counterpart. Both toggles
- * (`KLIO_PROXY_INJECT`, `KLIO_PROXY_CAPTURE`) are kill switches: on
- * unless explicitly turned off. An "is it truthy" test only ever
- * appears when something is off by default, which for these two is the
- * bug, not the design.
- */
-function envIsFalsy(value: string | undefined): boolean {
-  return value !== undefined && FALSY_ENV_VALUES.has(value.trim().toLowerCase());
-}
-
 /**
  * What this proxy is actually doing to traffic right now, for
  * `/__klio/health` and thus for `klio proxy status`.
@@ -799,21 +784,28 @@ export async function startProxy(
   opts: StartProxyOptions = {},
 ): Promise<{ server: http.Server; port: number }> {
   const config = readCloudConfig();
-  const injectEnv = process.env["KLIO_PROXY_INJECT"];
-  const inject = envIsFalsy(injectEnv) ? false : (opts.inject ?? true);
 
-  // Capture defaults ON, exactly like injection above, and for the same
-  // reason: the deployment contract is "capture activates when the
-  // machine holds a cloud config, and `KLIO_PROXY_CAPTURE=off` is a kill
-  // switch". Requiring the variable to be TRUTHY instead made capture
-  // dead code in production — nothing in this repo ever sets it (not
-  // `klio init`, not the launchd plist, not the systemd unit), so
-  // `serve()` (commands/proxy.ts) called `startProxy({})` and got
-  // `captureEnabled: false` on every real machine. `createProxyServer`
-  // still gates the actual emission on `opts.config !== null`, so a
-  // machine with no cloud config captures nothing regardless.
-  const captureEnv = process.env["KLIO_PROXY_CAPTURE"];
-  const captureEnabled = envIsFalsy(captureEnv) ? false : (opts.captureEnabled ?? true);
+  // Both halves default ON, and both are kill switches: the deployment
+  // contract is "injection and capture activate when the machine holds
+  // a cloud config, and turning either off is a one-liner". Requiring
+  // the env var to be TRUTHY instead made capture dead code in
+  // production — nothing in this repo ever sets it, so `serve()`
+  // (commands/proxy.ts) called `startProxy({})` and got
+  // `captureEnabled: false` on every real machine.
+  //
+  // The switch is resolved through proxy/toggles.ts, NOT straight from
+  // `process.env`, because this process is normally launchd's or
+  // systemd's grandchild and inherits the SUPERVISOR's environment, not
+  // the user's shell. An env-only switch therefore reverted on every
+  // restart and every reboot. See that module for the precedence rule
+  // (env for this process > ~/.klio/config.json > on).
+  //
+  // `createProxyServer` still gates the actual emission on
+  // `opts.config !== null`, so a machine with no cloud config captures
+  // nothing regardless.
+  const toggles = resolveProxyToggles();
+  const inject = toggles.inject.enabled ? (opts.inject ?? true) : false;
+  const captureEnabled = toggles.capture.enabled ? (opts.captureEnabled ?? true) : false;
 
   const recall = config ? createRecaller({ config, fetchImpl: opts.fetchImpl }) : undefined;
 

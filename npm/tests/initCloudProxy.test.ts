@@ -16,6 +16,7 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
@@ -31,7 +32,33 @@ import type { WireProxyResult } from "../src/proxy/wiring.js";
 import type { InstallResult } from "../src/proxy/supervisor.js";
 import { prompt as realPrompt } from "../src/prompt.js";
 import { spawnProxy as realSpawnProxy } from "../src/proxy/processSupervisor.js";
-import { probeProxy as realProbeProxy } from "../src/proxy/supervisor.js";
+import { probeProxy as realProbeProxy, supervisorPaths } from "../src/proxy/supervisor.js";
+
+// ---------------------------------------------------------------------
+// Guard: this file must never touch the DEVELOPER'S OWN supervisor.
+//
+// `installSupervisor` writes ~/Library/LaunchAgents/tech.klio.proxy.plist
+// (or the systemd user units) and then runs `launchctl bootout` +
+// `bootstrap` on a GLOBAL label — `gui/<uid>/tech.klio.proxy`, which a
+// temporary $HOME does NOT redirect. A wireProxyStack test that omits
+// the `installSupervisorFn` seam therefore rewrites the real agent to
+// point at THIS TEST FILE and reloads it, leaving a supervisor that logs
+// ERR_MODULE_NOT_FOUND every 60s on the developer's machine. That was
+// live here, and a green suite said nothing about it.
+//
+// Snapshot every unit path at module load and re-check it in the last
+// test of the file. node:test runs a file's top-level tests in
+// declaration order, so "last test" really is after all the others.
+const SUPERVISOR_UNIT_PATHS = Object.values(supervisorPaths());
+const SUPERVISOR_UNITS_BEFORE = snapshotUnits();
+
+function snapshotUnits(): Record<string, string | null> {
+  const snapshot: Record<string, string | null> = {};
+  for (const path of SUPERVISOR_UNIT_PATHS) {
+    snapshot[path] = existsSync(path) ? readFileSync(path, "utf8") : null;
+  }
+  return snapshot;
+}
 
 // ---------------------------------------------------------------------
 // maybeOfferProxy — the brief's floor tests, verbatim.
@@ -384,6 +411,15 @@ test(
               unwireCalled = true;
               return { skipped: [], errors: [] };
             },
+            // Stubbed, and NOT optional. The real `installSupervisor`
+            // writes ~/Library/LaunchAgents/tech.klio.proxy.plist
+            // pointing at `process.argv[1]` — this test file — and then
+            // `launchctl bootout`s and `bootstrap`s the global label
+            // `gui/<uid>/tech.klio.proxy`, which no temporary $HOME
+            // redirects. Omitting this seam hijacked the developer's own
+            // supervisor. The step under test here is step 3 (spawn +
+            // probe); step 2 has its own dedicated tests above.
+            installSupervisorFn: async () => okSupervisor(),
             // The REAL spawnProxy (processSupervisor.ts), unmocked. Its
             // own `spawnImpl` seam is used to launch a harmless,
             // near-instant child instead of the actual `proxy serve`
@@ -625,4 +661,20 @@ test("a matching fingerprint is accepted without stopping anything", async () =>
   );
   assert.equal(stopCalls, 0);
   assert.equal(spawnCalls, 1);
+});
+
+// ---------------------------------------------------------------------
+// Last test in the file, deliberately: everything above has now run.
+// ---------------------------------------------------------------------
+
+test("no test in this file wrote the developer's real supervisor unit", () => {
+  const after = snapshotUnits();
+  for (const path of SUPERVISOR_UNIT_PATHS) {
+    assert.equal(
+      after[path],
+      SUPERVISOR_UNITS_BEFORE[path],
+      `${path} was written by the test suite — wireProxyStack was called ` +
+        `without an installSupervisorFn stub, so the REAL installSupervisor ran`,
+    );
+  }
 });
