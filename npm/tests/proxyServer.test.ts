@@ -1,7 +1,10 @@
 import { strict as assert } from "node:assert";
 import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
@@ -1032,3 +1035,130 @@ test(
     );
   },
 );
+
+// --- capture activates on a config alone -------------------------------
+//
+// The deployment contract (docs/plans/2026-08-14-cloud-proxy-design.md)
+// is that capture is ON once the machine holds a cloud config, and that
+// `KLIO_PROXY_CAPTURE=off` is a KILL SWITCH — the same shape injection
+// already has. Nothing in this codebase ever SETS `KLIO_PROXY_CAPTURE`:
+// not `klio init`, not the launchd plist, not the systemd unit. So a
+// capture default that requires the variable to be truthy is a capture
+// that never runs anywhere, which is exactly how the whole capture path
+// shipped dead. The absence of a test for the "valid config, NO env"
+// case is why nobody noticed, so that case is what these two tests
+// drive — through the REAL `startProxy` (not `createProxyServer`), a
+// REAL `~/.klio/config.json`, a REAL upstream and the REAL global
+// fetch, because `startProxy` is the only place the env is read.
+
+/** Run `body` with `$HOME` redirected at a temp dir holding a cloud config, and the proxy env vars unset. */
+async function withCloudHome(
+  config: { apiKey: string; agentId: string; baseUrl: string },
+  env: Record<string, string | undefined>,
+  body: () => Promise<void>,
+): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), "klio-proxy-home-"));
+  const saved: Record<string, string | undefined> = {
+    HOME: process.env["HOME"],
+    KLIO_PROXY_CAPTURE: process.env["KLIO_PROXY_CAPTURE"],
+    KLIO_PROXY_INJECT: process.env["KLIO_PROXY_INJECT"],
+  };
+  try {
+    mkdirSync(join(home, ".klio"), { recursive: true });
+    writeFileSync(join(home, ".klio", "config.json"), JSON.stringify(config), "utf8");
+    process.env["HOME"] = home;
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await body();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A real upstream that answers a Messages request, plus a real "brain"
+ * that answers the recall the injection path makes, so neither leg
+ * reaches the network. Returns the captures `startProxy` emitted.
+ */
+async function captureCallsThroughStartProxy(
+  env: Record<string, string | undefined>,
+): Promise<number> {
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ type: "message", role: "assistant", content: [{ type: "text", text: "hi back" }] }));
+  });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const upstreamPort = (upstream.address() as AddressInfo).port;
+
+  const brain = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ memories: [] }));
+  });
+  await new Promise<void>((r) => brain.listen(0, "127.0.0.1", r));
+  const brainPort = (brain.address() as AddressInfo).port;
+
+  let captureCalls = 0;
+  let started: { server: http.Server; port: number } | null = null;
+  try {
+    await withCloudHome(
+      { apiKey: "ag_live_test", agentId: "agent-x", baseUrl: `http://127.0.0.1:${brainPort}` },
+      env,
+      async () => {
+        started = await startProxy({
+          port: 0,
+          host: "127.0.0.1",
+          upstreams: { anthropic: `http://127.0.0.1:${upstreamPort}` },
+          capture: async () => {
+            captureCalls++;
+          },
+        });
+        const res = await fetch(`http://127.0.0.1:${started.port}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-3-5-haiku-latest",
+            messages: [
+              { role: "user", content: "hello" },
+              { role: "assistant", content: "hi" },
+              { role: "user", content: "again" },
+            ],
+          }),
+        });
+        assert.equal(res.status, 200);
+        await res.text();
+        // Capture is emitted from `res.on("finish")`, i.e. after the
+        // client's read resolves — give that turn of the loop a chance.
+        await new Promise<void>((r) => setTimeout(r, 100));
+      },
+    );
+  } finally {
+    if (started) await new Promise<void>((r) => (started as { server: http.Server }).server.close(() => r()));
+    upstream.closeAllConnections();
+    brain.closeAllConnections();
+    await new Promise<void>((r) => upstream.close(() => r()));
+    await new Promise<void>((r) => brain.close(() => r()));
+  }
+  return captureCalls;
+}
+
+test("startProxy captures with a valid cloud config and NO capture env set", async () => {
+  const calls = await captureCallsThroughStartProxy({
+    KLIO_PROXY_CAPTURE: undefined,
+    KLIO_PROXY_INJECT: undefined,
+  });
+  assert.equal(calls, 1, "a machine with a cloud config and no env must capture");
+});
+
+test("KLIO_PROXY_CAPTURE=off is a kill switch even with a valid cloud config", async () => {
+  const calls = await captureCallsThroughStartProxy({
+    KLIO_PROXY_CAPTURE: "off",
+    KLIO_PROXY_INJECT: undefined,
+  });
+  assert.equal(calls, 0, "the documented kill switch must still turn capture off");
+});

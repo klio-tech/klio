@@ -54,9 +54,16 @@ export type CreateProxyServerOptions = {
   recall?: (query: string) => Promise<Memory[]>;
   capture?: (opts: EmitCaptureOptions) => Promise<void>;
   fetchImpl?: typeof fetch;
-  /** Default true. `false` disables the injection (and capture) path entirely. */
+  /** Default true. `false` disables the injection path only — capture is independent. */
   inject?: boolean;
-  /** Default false. Requires `config` to actually fire. */
+  /**
+   * Default false HERE, because this constructor is the test seam and
+   * an explicit opt-in keeps every unrelated test from emitting
+   * captures. The PRODUCTION default is set by {@link startProxy},
+   * which defaults it to TRUE unless `KLIO_PROXY_CAPTURE` says
+   * otherwise — that is the shipped contract. Requires `config` to
+   * actually fire either way.
+   */
   captureEnabled?: boolean;
 };
 
@@ -462,16 +469,19 @@ function messageOf(err: unknown): string {
 }
 
 const FALSY_ENV_VALUES = new Set(["false", "0", "no", "off"]);
-const TRUTHY_ENV_VALUES = new Set(["true", "1", "yes", "on"]);
 
-/** Accepts the common spellings of "off" for a boolean env var — not just the literal string `"false"`. */
+/**
+ * Accepts the common spellings of "off" for a boolean env var — not
+ * just the literal string `"false"`.
+ *
+ * There is deliberately no `envIsTruthy` counterpart. Both toggles
+ * (`KLIO_PROXY_INJECT`, `KLIO_PROXY_CAPTURE`) are kill switches: on
+ * unless explicitly turned off. An "is it truthy" test only ever
+ * appears when something is off by default, which for these two is the
+ * bug, not the design.
+ */
 function envIsFalsy(value: string | undefined): boolean {
   return value !== undefined && FALSY_ENV_VALUES.has(value.trim().toLowerCase());
-}
-
-/** Accepts the common spellings of "on" for a boolean env var. */
-function envIsTruthy(value: string | undefined): boolean {
-  return value !== undefined && TRUTHY_ENV_VALUES.has(value.trim().toLowerCase());
 }
 
 export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
@@ -756,8 +766,18 @@ export async function startProxy(
   const injectEnv = process.env["KLIO_PROXY_INJECT"];
   const inject = envIsFalsy(injectEnv) ? false : (opts.inject ?? true);
 
+  // Capture defaults ON, exactly like injection above, and for the same
+  // reason: the deployment contract is "capture activates when the
+  // machine holds a cloud config, and `KLIO_PROXY_CAPTURE=off` is a kill
+  // switch". Requiring the variable to be TRUTHY instead made capture
+  // dead code in production — nothing in this repo ever sets it (not
+  // `klio init`, not the launchd plist, not the systemd unit), so
+  // `serve()` (commands/proxy.ts) called `startProxy({})` and got
+  // `captureEnabled: false` on every real machine. `createProxyServer`
+  // still gates the actual emission on `opts.config !== null`, so a
+  // machine with no cloud config captures nothing regardless.
   const captureEnv = process.env["KLIO_PROXY_CAPTURE"];
-  const captureEnabled = envIsFalsy(captureEnv) ? false : (opts.captureEnabled ?? envIsTruthy(captureEnv));
+  const captureEnabled = envIsFalsy(captureEnv) ? false : (opts.captureEnabled ?? true);
 
   const recall = config ? createRecaller({ config, fetchImpl: opts.fetchImpl }) : undefined;
 
