@@ -50,6 +50,12 @@ async function withRealUpstream(
   try {
     await run(`http://127.0.0.1:${port}`, proxy);
   } finally {
+    // `close()` alone waits for every still-open connection to end. The
+    // slow-upstream tests below deliberately leave connections stalled
+    // (that is the condition under test), so a plain `close()` would
+    // hang the whole run and hide the result — including a failure.
+    proxy.closeAllConnections();
+    upstream.closeAllConnections();
     await new Promise<void>((r) => proxy.close(() => r()));
     await new Promise<void>((r) => upstream.close(() => r()));
   }
@@ -667,40 +673,32 @@ test("a gzip-compressed upstream response is forwarded without a stale content-e
   );
 });
 
-// Finding 1: a client abort/RST GENUINELY mid-upload on the OVER-CAP
-// path must eventually tear the upstream connection down — bounded,
-// not left to Node's multi-minute default `server.requestTimeout`.
+// A client abort/RST GENUINELY mid-upload on the OVER-CAP path must
+// leave the upstream connection released, not open forever.
 //
-// Two things make this a real differentiator rather than a test that
-// passes either way:
+// Read this together with the KNOWN LIMITATION block in server.ts. The
+// guarantee here is deliberately narrower than a previous round of this
+// test asserted, because the wider one was only ever met by inferring a
+// dead client from socket silence — which destroyed healthy slow-TTFB,
+// long-SSE-gap and backpressured-upload traffic (all four now covered
+// below). What holds, and what this checks:
 //
-//   * A raw `http.request()` with PACED writes (one 1 MB chunk every
-//     100ms), not `fetch()` with a synchronously-fully-enqueued
-//     `ReadableStream`. A fully-enqueued stream gets handed to the OS
-//     almost instantly over loopback, so by the time an abort fires
-//     there is nothing left "mid-upload" to interrupt — confirmed:
-//     that version passed even against the OLD, lazy-attachment code,
-//     because loopback delivers the whole body before the abort ever
-//     lands. Pacing keeps the client genuinely still sending.
-//   * A DELIBERATELY SLOW upstream reader (resumes once every 100ms),
-//     so draining a multi-MB prefix through it takes seconds if
-//     nothing short-circuits it — this is what actually exercises the
-//     "still draining the prefix when the abort happens" window Finding
-//     1 describes. Without this throttle, the (untouched) prefix drains
-//     fast enough on its own that the old lazy-attachment code passes
-//     too — confirmed.
+//   * The client's already-in-flight bytes are queued AHEAD of its
+//     FIN/RST, so the reset only surfaces once they have been consumed
+//     (measured on loopback: 5.2 MB of backlog). While the upstream is
+//     keeping up — the normal case, and the case here — that happens
+//     quickly and `live` raises a real "aborted"/"error".
+//   * That evidence, and only that evidence, aborts the upstream fetch,
+//     which releases the connection. Without the AbortController, an
+//     upstream with a full receive window never lets the fetch settle at
+//     all (measured: still pending at 30s).
 //
-// The bound this actually achieves end-to-end, under this adversarial
-// combination, is single-digit SECONDS (the idle-timeout detector
-// alone fires in single-digit milliseconds; the rest of the time is
-// `undici`'s connection pooling actually releasing the socket — see
-// `server.ts`'s `LIVE_IDLE_TIMEOUT_MS` doc) — not milliseconds, but a
-// dramatic, bounded improvement over "reaped only by a multi-minute
-// default timeout." The poll window below is sized generously above
-// that measured latency, not tuned to the smallest window that happens
-// to pass.
+// A DELIBERATELY throttled upstream is NOT used here: throttling is the
+// backpressure case, where the reset stays buried behind the backlog and
+// nothing is detected promptly. That is the documented leak, not a bug
+// this test can assert away.
 test(
-  "a client RST genuinely mid-upload on the over-cap path tears the upstream connection down within a bounded window",
+  "a client RST genuinely mid-upload on the over-cap path releases the upstream connection",
   { timeout: 20000 },
   async () => {
     let upstreamClosedAtMs = -1;
@@ -709,18 +707,11 @@ test(
 
     await withRealUpstream(
       (req, res) => {
-        req.pause();
-        const timer = setInterval(() => req.resume(), 100);
-        req.on("data", (chunk: Buffer) => {
-          upstreamReceivedBytes += chunk.length;
-          req.pause(); // throttle: one burst per 100ms tick, not a free flow
-        });
+        req.on("data", (chunk: Buffer) => { upstreamReceivedBytes += chunk.length; });
         req.on("close", () => {
           if (upstreamClosedAtMs < 0) upstreamClosedAtMs = Date.now() - testStart;
-          clearInterval(timer);
         });
         req.on("end", () => {
-          clearInterval(timer);
           res.writeHead(200);
           res.end("{}");
         });
@@ -728,9 +719,6 @@ test(
       { config: CONFIG, inject: false },
       async (base) => {
         const url = new URL(base);
-        const chunkSize = 1024 * 1024;
-        const totalChunks = 20; // well over the 10 MB cap
-
         const clientReq = http.request({
           host: url.hostname,
           port: url.port,
@@ -738,34 +726,30 @@ test(
           method: "POST",
         });
         clientReq.on("error", () => {
-          // A destroyed socket mid-write is expected to error here;
-          // that outcome is not what this test is checking.
+          // Destroying our own socket mid-write errors here by design.
         });
 
+        // PACED writes (1 MB every 100ms), not a synchronously enqueued
+        // ReadableStream: a fully-enqueued body is handed to the OS
+        // almost instantly over loopback, leaving nothing "mid-upload"
+        // to interrupt by the time the abort fires.
         let chunkIndex = 0;
         function writeNext(): void {
-          if (chunkIndex >= totalChunks) {
+          if (chunkIndex >= 30) {
             clientReq.end();
             return;
           }
-          clientReq.write(Buffer.alloc(chunkSize, chunkIndex % 256));
+          clientReq.write(Buffer.alloc(1024 * 1024, chunkIndex % 256));
           chunkIndex += 1;
           setTimeout(writeNext, 100);
         }
         writeNext();
 
-        // By 1.2s, ~12 chunks (12 MB — over the 10 MB cap) have gone
-        // out and ~8 more are still to come: genuinely mid-upload.
+        // By 1.2s ~12 MB has gone out (over the 10 MB cap) with ~18 MB
+        // still to come: genuinely mid-upload.
         await new Promise((r) => setTimeout(r, 1200));
         clientReq.socket?.destroy();
 
-        // Poll for the upstream connection closing. Bounded at 12s:
-        // comfortably above the ~6-8s this measures in practice (see
-        // the comment above the test), and still an order of magnitude
-        // under what draining the full buffered prefix through the
-        // throttled pipe would take on its own if nothing short-
-        // circuited it (many tens of seconds at ~640KB/s), let alone
-        // Node's multi-minute default `server.requestTimeout`.
         const deadline = Date.now() + 12000;
         while (upstreamClosedAtMs < 0 && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 50));
@@ -773,9 +757,8 @@ test(
 
         assert.ok(
           upstreamClosedAtMs >= 0,
-          `upstream connection should have closed within 12s of the client RST ` +
-            `(received ${upstreamReceivedBytes} bytes before giving up) — ` +
-            `if this fails, the abort is only being noticed once the prefix fully drains`,
+          `the upstream connection should have been released after the client RST ` +
+            `(it received ${upstreamReceivedBytes} bytes before the test gave up)`,
         );
       },
     );
@@ -833,21 +816,19 @@ test(
           // @ts-expect-error Node fetch requires duplex for a streamed body.
           duplex: "half",
         });
-        // The over-cap path sets `connection: close` on the outgoing
-        // request (see server.ts) so an abort can actually tear the
-        // upstream socket down rather than sitting pooled — a real,
-        // if uncommon, side effect of that is the upstream sometimes
-        // closing its end quickly enough to race the proxy's own
-        // still-in-flight write of the (intentionally unread, 15 MB)
-        // body, which the proxy correctly reports as a 502 rather than
-        // silently losing. Either outcome is a legitimate proxy
-        // response to "upstream responded without reading the body";
-        // what this test actually checks is what happens next.
-        assert.ok(
-          res.status === 413 || res.status === 502,
-          `expected the relayed 413 or the proxy's own 502 on a raced connection close, got ${res.status}`,
+        // FAIL OPEN, absolutely: the upstream was reachable and
+        // returned a well-formed 413. The proxy must relay it. The
+        // only Klio-authored error this server may ever produce is the
+        // reserved 502-on-unreachable-upstream, and this is not that.
+        // A proxy-side write failure on the request body AFTER the
+        // response has already arrived must never be allowed to
+        // discard that response.
+        assert.equal(res.status, 413, "the upstream's own 413 must be relayed, never replaced by a 502");
+        assert.equal(
+          JSON.parse(await res.text()).error.type,
+          "invalid_request_error",
+          "the relayed body must be the upstream's, not a Klio-authored api_error",
         );
-        await res.text();
 
         // Bounded window for the abandoned request body stream to be
         // torn down. Without _destroy()/abandon() propagating to
@@ -865,6 +846,219 @@ test(
           "the client socket should close once the abandoned request body is torn down, " +
             "not linger until the server's request timeout",
         );
+      },
+    );
+  },
+);
+
+// ---------------------------------------------------------------------
+// SLOW-UPSTREAM COVERAGE FOR THE OVER-CAP PATH.
+//
+// Every other over-cap test in this file runs against a FAST loopback
+// upstream, which is precisely the one condition under which an idle
+// detector on the client socket never fires. Four rounds of this file
+// shipped green while the over-cap path was destroying live, healthy
+// connections, because nothing here was ever slow enough to notice.
+//
+// The over-cap path exists for >10 MB bodies — huge-context requests,
+// exactly the ones where a model API's time-to-first-byte is LONGEST
+// and where TCP backpressure from a consumer slower than the client is
+// the normal state, not an anomaly. The four tests below make each of
+// those conditions explicit: a slow first byte, a long mid-stream gap,
+// a consumer slower than the client, and a consumer that never reads
+// at all.
+// ---------------------------------------------------------------------
+
+/** An 11 MB (over-cap) request body of distinguishable 1 MB chunks. */
+function overCapBody(totalChunks = 11): { stream: ReadableStream<Uint8Array>; bytes: number } {
+  const chunkSize = 1024 * 1024;
+  return {
+    bytes: chunkSize * totalChunks,
+    stream: new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < totalChunks; i++) controller.enqueue(Buffer.alloc(chunkSize, i % 256));
+        controller.close();
+      },
+    }),
+  };
+}
+
+// An idle detector armed on the shared client socket cannot tell "the
+// client is gone" from "the upstream simply hasn't answered yet". A
+// 4s time-to-first-byte is unremarkable for a large-context model
+// call; it must not cost the client its connection.
+test(
+  "an over-cap request survives an upstream whose first byte is slower than the idle threshold",
+  { timeout: 30000 },
+  async () => {
+    let receivedLength = 0;
+    const upstreamTtfbMs = 4000;
+
+    await withRealUpstream(
+      (req, res) => {
+        req.on("data", (chunk: Buffer) => { receivedLength += chunk.length; });
+        req.on("end", () => {
+          setTimeout(() => {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end("{}");
+          }, upstreamTtfbMs);
+        });
+      },
+      { config: CONFIG, inject: false },
+      async (base) => {
+        const body = overCapBody();
+        const started = Date.now();
+        const res = await fetch(`${base}/v1/models`, {
+          method: "POST",
+          body: body.stream,
+          // @ts-expect-error Node fetch requires duplex for a streamed body.
+          duplex: "half",
+        });
+        assert.equal(res.status, 200, "a slow-but-healthy upstream must still reach the client");
+        await res.text();
+        assert.equal(receivedLength, body.bytes, "every byte must still have reached the upstream");
+        assert.ok(
+          Date.now() - started >= upstreamTtfbMs,
+          "sanity: the response really did take longer than the idle threshold",
+        );
+      },
+    );
+  },
+);
+
+// Anthropic's SSE keep-alive pings are ~10s apart; ordinary gaps
+// between content_block_delta events routinely exceed any short idle
+// threshold. A gap in the RESPONSE must never tear down the request.
+test(
+  "an over-cap request survives an SSE gap longer than the idle threshold",
+  { timeout: 30000 },
+  async () => {
+    const gapMs = 3500;
+
+    await withRealUpstream(
+      (req, res) => {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write(`data: ${JSON.stringify({ type: "content_block_delta", delta: { text: "Hello" } })}\n\n`);
+          setTimeout(() => {
+            res.write(`data: ${JSON.stringify({ type: "message_stop" })}\n\n`);
+            res.end();
+          }, gapMs);
+        });
+      },
+      { config: CONFIG, inject: false },
+      async (base) => {
+        const body = overCapBody();
+        const res = await fetch(`${base}/v1/models`, {
+          method: "POST",
+          body: body.stream,
+          // @ts-expect-error Node fetch requires duplex for a streamed body.
+          duplex: "half",
+        });
+        assert.equal(res.status, 200);
+
+        // Read the whole stream. A stream torn down mid-gap either
+        // throws here or ends without ever delivering message_stop.
+        let text = "";
+        const reader = res.body!.getReader();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          text += new TextDecoder().decode(value);
+        }
+        assert.match(text, /message_stop/, "the stream must survive a gap longer than the idle threshold");
+      },
+    );
+  },
+);
+
+// The over-cap path relays a body to a consumer that is, by design,
+// slower than the client. TCP backpressure then stalls inbound data
+// for as long as the consumer takes — quiet that says nothing at all
+// about whether the client is still there. Reading that quiet as a
+// dead client kills a perfectly healthy upload.
+test(
+  "an over-cap upload to an upstream slower than the client is not killed by its own backpressure",
+  { timeout: 60000 },
+  async () => {
+    let receivedLength = 0;
+
+    await withRealUpstream(
+      (req, res) => {
+        // Throttled reader: one burst every 20ms, so a 12 MB body takes
+        // several seconds and the proxy's read from the CLIENT stalls
+        // far longer than any idle threshold at a stretch.
+        req.pause();
+        const timer = setInterval(() => req.resume(), 20);
+        req.on("data", (chunk: Buffer) => {
+          receivedLength += chunk.length;
+          req.pause();
+        });
+        req.on("end", () => {
+          clearInterval(timer);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("{}");
+        });
+        req.on("close", () => clearInterval(timer));
+      },
+      { config: CONFIG, inject: false },
+      async (base) => {
+        const body = overCapBody(12);
+        const res = await fetch(`${base}/v1/models`, {
+          method: "POST",
+          body: body.stream,
+          // @ts-expect-error Node fetch requires duplex for a streamed body.
+          duplex: "half",
+        });
+        assert.equal(res.status, 200, "a backpressured but healthy upload must complete");
+        await res.text();
+        assert.equal(receivedLength, body.bytes, "every byte of the backpressured upload must arrive");
+      },
+    );
+  },
+);
+
+// The hard case, and the one that made every previous round's
+// over-cap coverage worthless: an upstream that accepts the connection
+// and then reads NOTHING at all for longer than any idle threshold.
+// The proxy's write to it stalls, the proxy stops reading the client,
+// and the client socket goes completely silent — while both ends are
+// perfectly healthy. Anything that reads that silence as a dead client
+// destroys a live request.
+test(
+  "an over-cap upload survives an upstream that reads nothing at all for longer than the idle threshold",
+  { timeout: 40000 },
+  async () => {
+    let receivedLength = 0;
+    const deafForMs = 5000;
+
+    await withRealUpstream(
+      (req, res) => {
+        req.pause();
+        setTimeout(() => {
+          req.on("data", (chunk: Buffer) => { receivedLength += chunk.length; });
+          req.on("end", () => {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end("{}");
+          });
+          req.resume();
+        }, deafForMs);
+      },
+      { config: CONFIG, inject: false },
+      async (base) => {
+        const body = overCapBody(12);
+        const started = Date.now();
+        const res = await fetch(`${base}/v1/models`, {
+          method: "POST",
+          body: body.stream,
+          // @ts-expect-error Node fetch requires duplex for a streamed body.
+          duplex: "half",
+        });
+        assert.equal(res.status, 200, "a deaf-then-reading upstream must still complete");
+        await res.text();
+        assert.equal(receivedLength, body.bytes, "every byte must arrive once the upstream starts reading");
+        assert.ok(Date.now() - started >= deafForMs, "sanity: the stall really did outlast the idle threshold");
       },
     );
   },

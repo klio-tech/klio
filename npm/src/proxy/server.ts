@@ -143,52 +143,58 @@ function extractAssistantText(buf: Buffer, contentType: string | undefined): str
 }
 
 /**
- * A dead connection's `"close"`/`"aborted"`/`"error"` do not reliably
- * fire on a PAUSED `IncomingMessage` at all — confirmed against a bare
- * `http.Server` with zero proxy code involved, listeners attached as
- * early as possible: Node only notices the socket is gone while
- * actually attempting to read from it, and this class necessarily
- * pauses `live` while relaying to a downstream that cannot keep up
- * (see {@link BufferedThenLive} below). Resuming periodically to force
- * a read attempt was tried and measured unreliable — under sustained
- * backpressure (a slow downstream, a fast client) it could take
- * several SECONDS to line up, because each resume's very next
- * `"data"` immediately re-triggers the pause before Node's socket
- * layer gets a turn.
+ * KNOWN LIMITATION, deliberately accepted — read this before adding an
+ * idle timeout here again.
  *
- * `live.socket.setTimeout()` sidesteps this entirely: it is a libuv
- * idle timer on the SOCKET, independent of whether the higher-level
- * stream is paused or flowing, and Node resets it automatically on any
- * read/write activity. Confirmed against a bare socket: this timer
- * itself fires within single-digit milliseconds of a real RST,
- * regardless of pause state — but see `connection: close` below for
- * why detection firing is not the whole story once `undici`'s
- * connection pooling is in the picture.
+ * A client that disappears MID-UPLOAD on the over-cap path, while the
+ * relay to the upstream is backpressured, is not detected promptly. The
+ * remaining body drains to the upstream at the upstream's pace and the
+ * exchange ends when that truncated body ends, rather than being torn
+ * down when the client actually went away. On a cancelled >10 MB upload
+ * that is wasted upstream work.
  *
- * The value trades two failure modes against each other: too low false-
- * positives a real, if slow, upload (killing a live connection because
- * it was merely quiet for a moment); too high leaves a dead connection
- * relaying to the upstream for that much longer. 2s is generous enough
- * that any connection actually still sending SOMETHING within that
- * window is left alone (Claude Code's own upload pacing, and any
- * ordinary network jitter, comfortably clears it).
+ * This is a leak on a rare path, and every attempt to close it has cost
+ * more than it saved. Two were measured against real sockets:
  *
- * End-to-end (this timer firing, THROUGH this stream's `.destroy()`,
- * THROUGH `undici` actually tearing the socket to the upstream down —
- * see the `connection: close` header set for the over-cap path in
- * `handleRequest`) measured at roughly 6-8s under an adversarial
- * combination (a large buffered prefix, a slow-reading upstream, and a
- * genuinely still-uploading client) in this codebase's own tests —
- * NOT the single-digit milliseconds the timer alone achieves in
- * isolation. Still a dramatic, bounded improvement over the prior
- * behavior (unbounded in practice; reaped only by Node's multi-minute
- * default `server.requestTimeout`), just not an instant one — `undici`
- * pooling a keep-alive connection for reuse means an abort has to
- * propagate through more than this one timer to actually free the
- * socket. `connection: close` (below) is what makes that propagation
- * happen at all rather than never; it does not make it instant.
+ *   1. INFER DEATH FROM SILENCE (a previous round of this file:
+ *      `live.socket.setTimeout(2000, …)`). It cannot work, for two
+ *      independent reasons. The socket is SHARED with `res`, and
+ *      `http.Server.timeout` defaults to 0 — so arming it creates a 2s
+ *      idle timeout that otherwise would not exist for the rest of that
+ *      socket's life, and Node's own `socketOnTimeout` destroys the
+ *      socket when it fires unless a `req`/`res`/`server` `"timeout"`
+ *      listener returns truthy (once `req.complete` is true, `req`'s is
+ *      not even consulted). And more fundamentally: this path exists to
+ *      relay a body to a consumer SLOWER than the client, so TCP
+ *      backpressure stalls inbound data as a matter of course, and
+ *      silence cannot distinguish "the client is gone" from "the client
+ *      is blocked by the backpressure we ourselves created" — which for
+ *      >10 MB bodies is the COMMON case. Measured through this proxy: a
+ *      4s upstream TTFB became a client `UND_ERR_SOCKET`, a 3.5s SSE gap
+ *      broke the stream (Anthropic's own pings are ~10s apart), and a
+ *      healthy backpressured 14 MB upload EPIPE'd at 2s having sent
+ *      11.5 MB. All three worked before the timer was added. Breaking
+ *      healthy requests to reclaim a rare leak is a bad trade, and a
+ *      fail-open violation besides.
+ *
+ *   2. FORCE A READ ATTEMPT (periodically `resume()` `live`, since Node
+ *      only ever notices a dead peer while attempting a read — which is
+ *      exactly why a paused `IncomingMessage` stays silent on
+ *      disconnect no matter how early listeners are attached). The
+ *      mechanism is sound and false-positive-free, but the client's
+ *      already-in-flight bytes are queued AHEAD of its FIN/RST: measured
+ *      on loopback, 5.2 MB had to be consumed before the reset surfaced
+ *      at all. Draining that to discover the client is gone means
+ *      buffering it in memory, which is precisely the bound the cap
+ *      exists to enforce.
+ *
+ * So there is no idle timer here at all, and `http.Server.timeout` is
+ * left at 0. Teardown is driven only by EVIDENCE — `live`'s own
+ * `"aborted"`/`"error"`/`"close"`, and `res`'s `"close"` — which do fire
+ * whenever the upstream is keeping up (the normal case) and are then
+ * carried through to the upstream by the `AbortController` in
+ * `handleRequest`.
  */
-const LIVE_IDLE_TIMEOUT_MS = 2000;
 
 /**
  * A Readable that replays `prefix` (already-buffered chunks) first,
@@ -208,10 +214,10 @@ const LIVE_IDLE_TIMEOUT_MS = 2000;
  *
  * Two lifecycle details matter as much as the byte-forwarding itself:
  *
- *   * `live`'s `"end"`/`"close"`/`"aborted"`/`"error"` listeners, AND
- *     the idle timeout above, are wired in the CONSTRUCTOR — not
- *     lazily inside `_read()`, which left `live` with ZERO
- *     supervision for however long the buffered prefix took to drain.
+ *   * `live`'s `"end"`/`"close"`/`"aborted"`/`"error"` listeners are
+ *     wired in the CONSTRUCTOR — not lazily inside `_read()`, which
+ *     left `live` with ZERO supervision for however long the buffered
+ *     prefix took to drain.
  *   * `_destroy()` tears `live` down too. Without it, destroying this
  *     wrapper (the upstream fetch rejects, or `undici` cancels the
  *     request body after an early response) leaves `live` neither
@@ -230,11 +236,18 @@ class BufferedThenLive extends Readable {
   private readonly onLiveClose: () => void;
   private readonly onLiveAborted: () => void;
   private readonly onLiveError: (err: Error) => void;
-  private readonly onLiveTimeout: () => void;
+  private clientGoneReported = false;
 
   constructor(
     private readonly prefix: Buffer[],
     private readonly live: http.IncomingMessage,
+    /**
+     * Invoked at most once, when `live` has PROVEN the client is gone —
+     * a real `"aborted"`/`"error"`, never an inference from silence.
+     * Destroying this stream alone does not free the upstream request;
+     * see the `AbortController` in `handleRequest`.
+     */
+    private readonly onClientGone: () => void = () => {},
   ) {
     super();
 
@@ -251,21 +264,29 @@ class BufferedThenLive extends Readable {
     this.onLiveEnd = (): void => this.finishLive();
     this.onLiveClose = (): void => this.finishLive();
     this.onLiveAborted = (): void => {
+      this.reportClientGone();
       this.destroy(new Error("client aborted mid-upload"));
     };
     this.onLiveError = (err: Error): void => {
+      this.reportClientGone();
       this.destroy(err);
-    };
-    this.onLiveTimeout = (): void => {
-      if (this.liveEnded || this.destroyed) return;
-      this.destroy(new Error(`client idle for ${LIVE_IDLE_TIMEOUT_MS}ms mid-upload`));
     };
 
     this.live.on("end", this.onLiveEnd);
     this.live.on("close", this.onLiveClose);
     this.live.on("aborted", this.onLiveAborted);
     this.live.on("error", this.onLiveError);
-    this.live.socket?.setTimeout(LIVE_IDLE_TIMEOUT_MS, this.onLiveTimeout);
+    // Deliberately NO `live.socket.setTimeout(...)` — see the block
+    // above {@link BufferedThenLive}. Arming it here armed Node's own
+    // socket-destroy path on a socket shared with `res`, which killed
+    // healthy slow-TTFB, long-SSE-gap, and backpressured-upload traffic.
+  }
+
+  /** At most once, and only ever from evidence the client really is gone. */
+  private reportClientGone(): void {
+    if (this.clientGoneReported) return;
+    this.clientGoneReported = true;
+    this.onClientGone();
   }
 
   private finishLive(): void {
@@ -330,7 +351,6 @@ class BufferedThenLive extends Readable {
     this.live.removeListener("close", this.onLiveClose);
     this.live.removeListener("aborted", this.onLiveAborted);
     this.live.removeListener("error", this.onLiveError);
-    this.live.socket?.removeListener("timeout", this.onLiveTimeout);
   }
 }
 
@@ -354,6 +374,7 @@ class BufferedThenLive extends Readable {
  */
 function readRequestBody(
   req: http.IncomingMessage,
+  onClientGone: () => void,
 ): Promise<{ capped: false; body: Buffer } | { capped: true; stream: BufferedThenLive }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -384,7 +405,7 @@ function readRequestBody(
         // second time for as long as this closure scope survives —
         // benign for one request, a real transient-memory floor under
         // a burst of concurrent over-cap requests.
-        resolve({ capped: true, stream: new BufferedThenLive(chunks, req) });
+        resolve({ capped: true, stream: new BufferedThenLive(chunks, req, onClientGone) });
       }
     }
 
@@ -496,7 +517,25 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       return;
     }
 
-    const body = await readRequestBody(req);
+    // Destroying the request-body stream is NOT by itself enough to
+    // free the upstream request. With the upstream's receive window
+    // full and the upstream never closing, `undici`'s pending write
+    // never fails and the `fetch()` promise simply never settles —
+    // measured: still pending at 30s against an upstream that accepts
+    // the connection and then never reads. An explicit abort ends it in
+    // single-digit milliseconds. Armed ONLY from evidence the client is
+    // gone (`live`'s own `"aborted"`/`"error"`, or `res`'s `"close"`),
+    // never from an idle inference — see the block above
+    // `BufferedThenLive`.
+    let abortUpstream: AbortController | null = null;
+    let upstreamAborted = false;
+    const abortUpstreamOnce = (): void => {
+      if (upstreamAborted || abortUpstream === null) return;
+      upstreamAborted = true;
+      abortUpstream.abort(new Error("client went away mid-upload"));
+    };
+
+    const body = await readRequestBody(req, abortUpstreamOnce);
     const upstreamUrl = `${upstream.base}${upstream.path}${upstream.search}`;
 
     // Shape predicate ONLY — "is this a request injection and capture
@@ -524,6 +563,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
     // wiring below for WHEN, and `BufferedThenLive.abandon()` for WHY
     // that is `abandon()` and not `.destroy()` on the common path.
     const capStream: BufferedThenLive | null = body.capped ? body.stream : null;
+    if (capStream) abortUpstream = new AbortController();
 
     // `"finish"`: the response was delivered normally — the client may
     // still be mid-upload of the (over-cap) body, so release `capStream`
@@ -549,6 +589,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       if (capStreamSettled) return;
       capStreamSettled = true;
       capStream?.destroy();
+      abortUpstreamOnce();
     });
 
     if (body.capped) {
@@ -577,27 +618,26 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
     if (Buffer.isBuffer(outBody) && outBody.length > 0) {
       headers["content-length"] = String(outBody.length);
     }
-    if (capStream) {
-      // Over the body cap only: `undici` POOLS keep-alive connections
-      // for reuse, and — confirmed by direct instrumentation — that
-      // pooling means aborting the request (destroying the body stream,
-      // or an AbortController) does NOT promptly close the underlying
-      // socket; it just sits in the pool, un-torn-down, and the
-      // UPSTREAM's own view of the connection stays open regardless of
-      // anything this proxy does afterward. `connection: close` on the
-      // outgoing request opts this one exchange out of pooling, which
-      // is what actually lets an abort tear the socket down —
-      // confirmed: with it, the upstream saw the close within
-      // single-digit milliseconds of the abort; without it, never
-      // observed within several seconds. Scoped to the over-cap path
-      // only — paying a fresh TLS handshake on every ordinary request
-      // would be a real latency cost this proxy sits directly in the
-      // path of, and the failure mode this fixes only exists for
-      // large, capped bodies in the first place.
-      headers["connection"] = "close";
-    }
+    // NOTE: the over-cap path deliberately does NOT set
+    // `connection: close` on the outgoing request. A previous round did,
+    // to opt out of `undici`'s connection pooling so an abort could tear
+    // the socket down. It does that — and it also makes the UPSTREAM
+    // hang up the instant it finishes responding. An upstream that
+    // answers WITHOUT reading the body (a 413 on headers alone being the
+    // obvious case) then resets the connection while this proxy is still
+    // writing the remaining megabytes; the write EPIPEs, `fetch()`
+    // rejects instead of yielding the response it already holds, and the
+    // agent is handed a Klio-authored `api_error` for a request the
+    // upstream answered perfectly well. Measured over 30 runs: 17
+    // fabricated 502s to 13 relayed 413s, against 30/30 relayed without
+    // the header. That is a fail-open violation — the only 5xx this
+    // server may author is the reserved 502 for a genuinely unreachable
+    // upstream, and a reachable upstream that responded is not that.
+    // `abortUpstream` reaches socket teardown instead, without making
+    // the upstream close on us mid-write.
 
     const init: RequestInit & { duplex?: "half" } = { method: req.method, headers };
+    if (abortUpstream) init.signal = abortUpstream.signal;
     if (hasBody) {
       init.body = outBody as unknown as RequestInit["body"];
       init.duplex = "half";
@@ -621,6 +661,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       try {
         upstreamResponse = await doFetch(upstreamUrl, init);
       } catch (err) {
+        // If WE aborted this fetch because the client went away, there
+        // is nobody left to answer and `res` is already gone; writing a
+        // 502 into a dead socket only manufactures a second error.
+        if (upstreamAborted || res.writableEnded || res.destroyed) return;
         sendJson(
           res,
           502,
@@ -713,6 +757,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       if (!capStreamSettled) {
         capStreamSettled = true;
         capStream?.destroy();
+        abortUpstreamOnce();
       }
       throw err;
     }
