@@ -31,6 +31,7 @@ function tempConfig(body: unknown = { apiKey: "k", agentId: "a", baseUrl: "https
 
 const NODE_PROXY = {
   alive: true,
+  responded: true,
   detail: "alive (inject+capture)",
   health: {
     status: "ok" as const,
@@ -261,6 +262,43 @@ test("a foreign listener on the port is never signalled by the toggle command", 
     assert.equal(code, 0);
     assert.deepEqual(readPersistedToggles(path), { capture: false });
     assert.match(lines.join("\n"), /restart/i);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a foreign responder that is NOT alive is reported as 'something else on the port', not 'not running'", async () => {
+  // The dev-server-on-8787 case (supervisor.ts's own example): the port
+  // answers, so `responded` is true, but the body is not `{"status":"ok"}`
+  // (or is not even JSON), so `alive` is false. Distinct from a genuinely
+  // empty port — which is `responded: false` — and it must be reported
+  // that way: telling the user "not running; applies next start" when
+  // something IS squatting on the port is the exact wrong phrasing that
+  // was removed from `stopProxy` for the same confusion.
+  const { home, path } = tempConfig();
+  try {
+    const lines: string[] = [];
+    const code = await runProxyCommand({
+      args: ["capture", "off"],
+      log: (l) => lines.push(l),
+      env: {},
+      configPathImpl: () => path,
+      probeProxyImpl: async () => ({
+        alive: false,
+        responded: true,
+        detail: "answered, but not with a JSON body",
+      }),
+      stopProxyImpl: (async () => {
+        throw new Error("must not try to stop a responder that isn't ours");
+      }) as never,
+      cliPath: "/fake/cli.mjs",
+      sleepImpl: async () => {},
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(readPersistedToggles(path), { capture: false }, "the setting is still recorded");
+    const out = lines.join("\n");
+    assert.match(out, /something other than this cli's proxy is on the port/i);
+    assert.doesNotMatch(out, /the proxy is not running/i);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

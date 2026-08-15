@@ -306,14 +306,25 @@ async function toggle(
  * proven it is ours (proxy/stop.ts). The failure modes are reported
  * distinctly because they mean different things to the user:
  *
- *   * nothing running → the setting simply applies at the next start;
- *   * something running that is not ours → we will not touch it, and
- *     the user has to restart it the way it was started;
+ *   * nothing on the port at all → the setting simply applies at the
+ *     next start;
+ *   * something on the port that is not ours (a foreign listener, or
+ *     ours but a different runtime) → we will not touch it, and the
+ *     user has to restart it the way it was started;
  *   * ours, but it would not stop → the OLD behaviour is still live.
  *
  * Only the last is an error exit: it is the one where the user asked
  * for their conversations to stop leaving the machine and they have
  * not.
+ *
+ * The first two are told apart with `responded`, not `alive` — the
+ * same distinction `probeProxy` documents and `stopProxy` already
+ * relies on. `alive` is false in BOTH cases (a foreign responder is
+ * never "alive" as a Klio proxy), so branching on it alone made a
+ * stranger squatting on the port look identical to an empty port: the
+ * "not running; applies next start" message is wrong when something
+ * IS there, and it is the exact phrasing that was removed from
+ * `stopProxy` for the same reason.
  */
 async function applyToRunningProxy(
   log: (line: string) => void,
@@ -325,11 +336,11 @@ async function applyToRunningProxy(
   const nap = opts.sleepImpl ?? sleep;
 
   const before = await probe();
-  if (!before.alive) {
+  if (!before.responded) {
     log("  The proxy is not running; the setting applies the next time it starts.");
     return 0;
   }
-  if (before.health?.runtime !== "node") {
+  if (!before.alive || before.health?.runtime !== "node") {
     log(
       "  Something other than this CLI's proxy is on the port, so it was left alone. " +
         "Restart it for the change to take effect.",

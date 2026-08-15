@@ -31,9 +31,15 @@ import { uninstall } from "../src/commands/down.js";
 import type { Adapter } from "../src/adapters/types.js";
 import type { WireProxyResult } from "../src/proxy/wiring.js";
 
+// `~/.claude.json` is deliberately NOT in this list: Claude Code
+// rewrites it continuously as part of normal operation (session state,
+// not adapter config), so snapshotting it produces a spurious "written
+// by the test suite" failure whenever an unrelated Claude Code session
+// happens to touch it mid-run. `~/.claude/settings.json` and
+// `~/.codex/config.toml` are the files `uninstall`'s real adapters
+// actually write, and they are stable otherwise.
 const REAL_AGENT_CONFIGS = [
   join(homedir(), ".claude", "settings.json"),
-  join(homedir(), ".claude.json"),
   join(homedir(), ".codex", "config.toml"),
 ];
 const REAL_AGENT_CONFIGS_BEFORE = snapshotAgentConfigs();

@@ -180,6 +180,27 @@ test("setPersistedToggle refuses to clobber a config file it cannot parse", () =
   }
 });
 
+test("setPersistedToggle refuses to clobber a ZERO-BYTE config file", () => {
+  // A zero-byte file is exactly what a crash between truncate and
+  // write leaves behind with a non-atomic write. It must NOT be read
+  // as "first run, nothing to preserve" — that reading is what turns
+  // the next `klio proxy capture off` into a config with no API key,
+  // silently. It gets the same refuse-and-preserve handling as
+  // unparseable JSON: the bytes (all zero of them) are left exactly as
+  // they were, and the caller finds out rather than losing the key.
+  const home = tempHome();
+  try {
+    const path = configPath(home);
+    writeFileSync(path, "", { mode: 0o600 });
+    assert.throws(() => setPersistedToggle("capture", false, path), /could not be parsed/i);
+    assert.equal(readFileSync(path, "utf8"), "", "the empty file must be left exactly as it was");
+    // And the file must not have quietly grown a keyless config.
+    assert.equal(readCloudConfig(path), null);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("setPersistedToggle works on a machine with no config file yet", () => {
   const home = tempHome();
   try {

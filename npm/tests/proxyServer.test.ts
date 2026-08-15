@@ -589,26 +589,54 @@ test(
 
 // I4, for real: an occupied port must reject startProxy's promise, not
 // crash the process with an uncaught EADDRINUSE.
+//
+// `configPath` points at a temp home's config file, not `~/.klio/config.json` —
+// a unit test asserting port-rejection behaviour has no business reading
+// (or depending on the presence of) the developer's real API key.
 test("startProxy rejects instead of crashing when the port is already in use", async () => {
+  const home = mkdtempSync(join(tmpdir(), "klio-proxy-portbusy-"));
   const blocker = http.createServer((_req, res) => res.end("x"));
   await new Promise<void>((r) => blocker.listen(0, "127.0.0.1", r));
   const port = (blocker.address() as AddressInfo).port;
   try {
-    await assert.rejects(() => startProxy({ port, host: "127.0.0.1", inject: false, captureEnabled: false }));
+    await assert.rejects(() =>
+      startProxy({
+        port,
+        host: "127.0.0.1",
+        inject: false,
+        captureEnabled: false,
+        configPath: join(home, ".klio", "config.json"),
+      }),
+    );
   } finally {
     await new Promise<void>((r) => blocker.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
 // Minor fix: startProxy must report the port it actually bound, not the
 // requested one — `port: 0` (ephemeral) previously reported back `0`.
+//
+// Same `configPath` seam as above, for the same reason: no assertion
+// here needs (or should depend on) the developer's real credentials.
 test("startProxy reports the actual bound port, not the requested one", async () => {
-  const { server, port } = await startProxy({ port: 0, host: "127.0.0.1", inject: false, captureEnabled: false });
+  const home = mkdtempSync(join(tmpdir(), "klio-proxy-boundport-"));
   try {
-    assert.notEqual(port, 0);
-    assert.equal(port, (server.address() as AddressInfo).port);
+    const { server, port } = await startProxy({
+      port: 0,
+      host: "127.0.0.1",
+      inject: false,
+      captureEnabled: false,
+      configPath: join(home, ".klio", "config.json"),
+    });
+    try {
+      assert.notEqual(port, 0);
+      assert.equal(port, (server.address() as AddressInfo).port);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   } finally {
-    await new Promise<void>((r) => server.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

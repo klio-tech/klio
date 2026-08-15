@@ -178,9 +178,17 @@ export function setPersistedToggle(
 
 /**
  * Same, but for the WRITE path, where "I could not read it" and "there
- * is nothing there" must not be conflated. A missing file is an empty
- * object (first-run, nothing to lose); a present-but-unparseable file
- * throws.
+ * is nothing there" must not be conflated. A MISSING file is an empty
+ * object (first-run, nothing to lose); a PRESENT-but-unparseable file
+ * throws — and a zero-byte file counts as present-but-unparseable, not
+ * missing. Reading `raw.trim() === ""` as first-run was itself the bug:
+ * a zero-byte file is exactly what a non-atomic write leaves behind
+ * when it is interrupted between truncating the file and finishing the
+ * new content, so treating it as "nothing to preserve" turned the next
+ * toggle write into a config with the API key silently gone. It gets
+ * the same refuse-and-preserve handling as any other unparseable
+ * content: `JSON.parse("")` throws on its own, so there is nothing
+ * special to do here beyond NOT short-circuiting past it.
  */
 function readConfigObjectStrict(path: string): Record<string, unknown> {
   let raw: string;
@@ -189,7 +197,6 @@ function readConfigObjectStrict(path: string): Record<string, unknown> {
   } catch {
     return {}; // no file yet — nothing to preserve
   }
-  if (raw.trim() === "") return {};
 
   let parsed: unknown;
   try {

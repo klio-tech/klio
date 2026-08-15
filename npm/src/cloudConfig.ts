@@ -8,11 +8,19 @@
 // subprocesses with no init context.
 //
 // The file holds a SECRET (the API key), so it is written 0600 inside a
-// 0700 directory, and re-chmod'd on every write so an existing file's
-// perms are corrected too (writeFileSync's mode only applies on create).
+// 0700 directory. Every write goes through {@link atomicWriteFileSync}:
+// write a sibling temp file (created 0600, so its permissions are never
+// briefly wider than the file it replaces) and `rename` it over the
+// destination. `rename` is atomic on the same filesystem, so a crash,
+// a killed process, or an ENOSPC mid-write can only ever leave the OLD
+// content in place or the fully-written NEW content — never a
+// truncated file. Writing in place (`open(O_TRUNC)` then `write`, which
+// is what `writeFileSync(path, …)` does) does not have that property:
+// a crash in the window between truncate and the last byte leaves a
+// 0-byte file, which is exactly the failure this file used to have.
 
-import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -102,6 +110,36 @@ export function readConfigObject(path: string = cloudConfigPath()): Record<strin
 }
 
 /**
+ * Write `data` to `path` atomically: write a sibling temp file (created
+ * with `mode`, same directory so the follow-up rename stays on one
+ * filesystem — required for POSIX rename atomicity), then rename it
+ * over `path`. The destination is NEVER opened for writing directly, so
+ * there is no window in which it holds truncated bytes.
+ *
+ * On any failure the destination is left completely untouched — the
+ * temp file's mode is what the destination ends up with, so there is
+ * no separate `chmodSync` step (unlike an in-place write, whose mode
+ * argument only applies when CREATING the file, an atomic rename always
+ * "creates" the destination from the caller's point of view).
+ */
+function atomicWriteFileSync(path: string, data: string, mode: number): void {
+  const tmpPath = `${path}.tmp-${randomBytes(8).toString("hex")}`;
+  try {
+    writeFileSync(tmpPath, data, { mode });
+    renameSync(tmpPath, path);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Best-effort cleanup; the write already failed, and a leftover
+      // temp file is cosmetic, not a correctness problem — nothing
+      // reads `${path}.tmp-*` as configuration.
+    }
+    throw err;
+  }
+}
+
+/**
  * Write the whole config object back, 0600 inside a 0700 directory.
  * Same perm discipline as {@link writeCloudConfig}, for the same
  * reason: the file holds a secret.
@@ -111,8 +149,7 @@ export function writeConfigObject(
   path: string = cloudConfigPath(),
 ): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, JSON.stringify(body, null, 2) + "\n", { mode: 0o600 });
-  chmodSync(path, 0o600);
+  atomicWriteFileSync(path, JSON.stringify(body, null, 2) + "\n", 0o600);
 }
 
 /** The credential fields {@link writeCloudConfig} owns. Everything else is somebody else's. */
@@ -192,8 +229,5 @@ export function writeCloudConfig(
       null,
       2,
     ) + "\n";
-  writeFileSync(path, body, { mode: 0o600 });
-  // writeFileSync's mode only applies when CREATING the file; force 0600
-  // on rewrites too so a re-run never widens the perms of a secret file.
-  chmodSync(path, 0o600);
+  atomicWriteFileSync(path, body, 0o600);
 }

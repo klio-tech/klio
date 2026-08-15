@@ -28,7 +28,7 @@ import type { AddressInfo } from "node:net";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
-import { configFingerprint, readCloudConfig, type CloudConfig } from "../cloudConfig.js";
+import { cloudConfigPath, configFingerprint, readCloudConfig, type CloudConfig } from "../cloudConfig.js";
 import {
   PROXY_HEALTH_PATH,
   PROXY_HOST,
@@ -778,12 +778,20 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
 export type StartProxyOptions = Omit<CreateProxyServerOptions, "config" | "recall"> & {
   port?: number;
   host?: string;
+  /**
+   * ~/.klio/config.json's path, for tests. Threaded through to both the
+   * credential read and the toggle read below, so a test can point a
+   * real `startProxy` at a temp home instead of silently reading the
+   * developer's own credentials and persisted preferences.
+   */
+  configPath?: string;
 };
 
 export async function startProxy(
   opts: StartProxyOptions = {},
 ): Promise<{ server: http.Server; port: number }> {
-  const config = readCloudConfig();
+  const configPath = opts.configPath ?? cloudConfigPath();
+  const config = readCloudConfig(configPath);
 
   // Both halves default ON, and both are kill switches: the deployment
   // contract is "injection and capture activate when the machine holds
@@ -803,7 +811,7 @@ export async function startProxy(
   // `createProxyServer` still gates the actual emission on
   // `opts.config !== null`, so a machine with no cloud config captures
   // nothing regardless.
-  const toggles = resolveProxyToggles();
+  const toggles = resolveProxyToggles({ configPath });
   const inject = toggles.inject.enabled ? (opts.inject ?? true) : false;
   const captureEnabled = toggles.capture.enabled ? (opts.captureEnabled ?? true) : false;
 
