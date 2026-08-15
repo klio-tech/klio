@@ -1,8 +1,11 @@
 import { strict as assert } from "node:assert";
-import { test } from "node:test";
+import { createHash } from "node:crypto";
+import * as http from "node:http";
 import type { AddressInfo } from "node:net";
+import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 
-import { createProxyServer } from "../src/proxy/server.js";
+import { createProxyServer, startProxy } from "../src/proxy/server.js";
 
 const CONFIG = { apiKey: "k", agentId: "a", baseUrl: "https://api.example" };
 
@@ -17,6 +20,38 @@ async function withServer(
     await run(`http://127.0.0.1:${port}`);
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
+  }
+}
+
+/**
+ * Runs the proxy against a REAL `node:http` upstream, using the REAL
+ * global `fetch` (no `fetchImpl` override) for the proxy→upstream hop.
+ * This is deliberately heavier than `withServer`: the bugs this covers
+ * (undici refusing an already-read body stream, undici's transparent
+ * gzip decompression, real socket-level abort/reset semantics) live in
+ * layers a mocked `fetchImpl` bypasses entirely.
+ */
+async function withRealUpstream(
+  upstreamHandler: http.RequestListener,
+  serverOpts: Omit<Parameters<typeof createProxyServer>[0], "upstreams" | "fetchImpl">,
+  run: (proxyBase: string) => Promise<void>,
+) {
+  const upstream = http.createServer(upstreamHandler);
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const upstreamPort = (upstream.address() as AddressInfo).port;
+
+  const proxy = createProxyServer({
+    ...serverOpts,
+    upstreams: { anthropic: `http://127.0.0.1:${upstreamPort}` },
+  });
+  await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", r));
+  const { port } = proxy.address() as AddressInfo;
+
+  try {
+    await run(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise<void>((r) => proxy.close(() => r()));
+    await new Promise<void>((r) => upstream.close(() => r()));
   }
 }
 
@@ -367,41 +402,267 @@ test("capture fires independently of inject: false", async () => {
 // destroyed `req` could never emit "end", so nothing downstream ever
 // completed. This proves the request completes and the FULL raw body
 // (all of it, unmodified) reaches the upstream.
-test("a request over the body cap is forwarded raw and completes — it must not hang", { timeout: 15000 }, async () => {
-  let seenBody: Buffer | null = null;
-  let seenLength = 0;
-  await withServer(
+// C2, rewritten against a REAL upstream and the REAL global fetch.
+//
+// The first version of this test used a mocked `fetchImpl` that
+// iterated `init.body` directly — which bypasses undici's body
+// EXTRACTION step entirely, the exact layer where the real bug lived
+// ("Response body object should not be disturbed or locked", thrown
+// because the request stream handed to fetch had already been read
+// from). That made the test pass against both the broken version and
+// the fixed version, proving nothing. This version runs the proxy
+// against a real `node:http` upstream through the real `fetch`, and
+// verifies the upstream RECEIVED every byte — via a sha256 of the
+// exact bytes it saw — rather than merely that the proxy returned 200.
+test(
+  "a request over the body cap reaches a REAL upstream with every byte intact (sha256 match)",
+  { timeout: 20000 },
+  async () => {
+    let receivedHash = "";
+    let receivedLength = 0;
+
+    await withRealUpstream(
+      (req, res) => {
+        const hash = createHash("sha256");
+        let length = 0;
+        req.on("data", (chunk: Buffer) => {
+          hash.update(chunk);
+          length += chunk.length;
+        });
+        req.on("end", () => {
+          receivedHash = hash.digest("hex");
+          receivedLength = length;
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("{}");
+        });
+      },
+      { config: CONFIG, inject: false },
+      async (base) => {
+        const chunkSize = 1024 * 1024;
+        const totalChunks = 11; // over the 10 MB cap
+        const expectedHash = createHash("sha256");
+        const chunks: Buffer[] = [];
+        for (let i = 0; i < totalChunks; i++) {
+          // Vary content per chunk so truncation, reordering, or
+          // duplication can't hide behind a repeated byte pattern.
+          const chunk = Buffer.alloc(chunkSize, i % 256);
+          chunks.push(chunk);
+          expectedHash.update(chunk);
+        }
+        const expectedDigest = expectedHash.digest("hex");
+        const expectedLength = chunkSize * totalChunks;
+
+        const requestBody = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(chunk);
+            controller.close();
+          },
+        });
+        const res = await fetch(`${base}/v1/models`, {
+          method: "POST",
+          body: requestBody,
+          // @ts-expect-error Node fetch requires duplex for a streamed body.
+          duplex: "half",
+        });
+        assert.equal(res.status, 200);
+        assert.equal(receivedLength, expectedLength, "upstream must receive every byte");
+        assert.equal(
+          receivedHash,
+          expectedDigest,
+          "upstream's bytes must match exactly — no truncation, no corruption, no drop",
+        );
+      },
+    );
+  },
+);
+
+// C1, against a real upstream: a mid-stream connection reset must not
+// take the proxy process down with it. Ordinary traffic for a long SSE
+// response from api.anthropic.com.
+test(
+  "a mid-stream upstream connection reset does not crash the proxy — it stays alive for the next request",
+  { timeout: 10000 },
+  async () => {
+    let requestNum = 0;
+    await withRealUpstream(
+      (req, res) => {
+        requestNum += 1;
+        if (requestNum === 1) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write("event: first\ndata: {}\n\n");
+          // Simulate an upstream TLS/connection reset mid-stream: tear
+          // down the socket without ending the response cleanly.
+          setTimeout(() => req.socket.destroy(), 20);
+        } else {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ content: [{ type: "text", text: "still alive" }] }));
+        }
+      },
+      { config: CONFIG, inject: false },
+      async (base) => {
+        // First request: upstream resets mid-stream. The only
+        // requirement here is that the proxy PROCESS survives — the
+        // client may see a partial response, a network error, or a
+        // clean-enough close; all are acceptable outcomes of an
+        // upstream reset.
+        await fetch(`${base}/v1/messages`, { method: "POST", body: "{}" }).catch(() => {});
+
+        // Second request, same proxy server instance. If the reset
+        // above had escaped as an unhandled "error" event, the process
+        // would already be dead and this would never resolve.
+        const res2 = await fetch(`${base}/v1/messages`, { method: "POST", body: "{}" });
+        assert.equal(res2.status, 200);
+        assert.equal(await res2.text(), JSON.stringify({ content: [{ type: "text", text: "still alive" }] }));
+      },
+    );
+  },
+);
+
+// I3, against a real upstream: aborting the client request must tear
+// down the proxy→upstream connection, not leak it. Claude Code aborts
+// streams constantly (ESC, tool-loop cancellation).
+test(
+  "a client abort tears down the upstream connection instead of leaking it",
+  { timeout: 10000 },
+  async () => {
+    let writtenCount = 0;
+    let stoppedWritingAt = -1;
+
+    await withRealUpstream(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const interval = setInterval(() => {
+          writtenCount += 1;
+          try {
+            res.write(`event: tick\ndata: ${writtenCount}\n\n`);
+          } catch {
+            // Connection already gone; the "close" handler below covers it.
+          }
+        }, 10);
+        res.on("close", () => {
+          clearInterval(interval);
+          stoppedWritingAt = writtenCount;
+        });
+      },
+      { config: CONFIG, inject: false },
+      async (base) => {
+        const controller = new AbortController();
+        const res = await fetch(`${base}/v1/messages`, {
+          method: "POST",
+          body: "{}",
+          signal: controller.signal,
+        });
+        const reader = res.body!.getReader();
+        await reader.read(); // first chunk
+        controller.abort();
+
+        // Give the abort time to propagate: client → proxy → upstream
+        // connection close → upstream's "close" handler.
+        await new Promise((r) => setTimeout(r, 300));
+        assert.ok(stoppedWritingAt >= 0, "upstream should have observed the connection close");
+
+        // The actual leak this guards against: the upstream kept
+        // producing (and Klio kept paying for) tokens nobody reads.
+        // Confirm it actually stopped, rather than just eventually.
+        const countAfterGrace = writtenCount;
+        await new Promise((r) => setTimeout(r, 200));
+        assert.equal(writtenCount, countAfterGrace, "upstream must stop producing once the client is gone");
+      },
+    );
+  },
+);
+
+// I4, for real: an occupied port must reject startProxy's promise, not
+// crash the process with an uncaught EADDRINUSE.
+test("startProxy rejects instead of crashing when the port is already in use", async () => {
+  const blocker = http.createServer((_req, res) => res.end("x"));
+  await new Promise<void>((r) => blocker.listen(0, "127.0.0.1", r));
+  const port = (blocker.address() as AddressInfo).port;
+  try {
+    await assert.rejects(() => startProxy({ port, host: "127.0.0.1", inject: false, captureEnabled: false }));
+  } finally {
+    await new Promise<void>((r) => blocker.close(() => r()));
+  }
+});
+
+// Minor fix: startProxy must report the port it actually bound, not the
+// requested one — `port: 0` (ephemeral) previously reported back `0`.
+test("startProxy reports the actual bound port, not the requested one", async () => {
+  const { server, port } = await startProxy({ port: 0, host: "127.0.0.1", inject: false, captureEnabled: false });
+  try {
+    assert.notEqual(port, 0);
+    assert.equal(port, (server.address() as AddressInfo).port);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+// M6, against a real upstream: a SYNCHRONOUS throw from the `capture`
+// callback (not merely a rejected promise) must not crash the proxy —
+// it fires from inside the response's "finish" listener, strictly
+// after the client's response has already gone out.
+test("a synchronous throw from the capture callback does not crash the proxy", async () => {
+  await withRealUpstream(
+    (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ content: [{ type: "text", text: "ok" }] }));
+    },
     {
       config: CONFIG,
-      inject: false,
-      fetchImpl: (async (_u: any, init: any) => {
-        const chunks: Buffer[] = [];
-        for await (const chunk of init.body as AsyncIterable<Buffer>) {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        }
-        seenBody = Buffer.concat(chunks);
-        seenLength = seenBody.length;
-        return new Response("ok", { status: 200 });
+      recall: async () => [],
+      captureEnabled: true,
+      capture: (() => {
+        throw new Error("capture blew up synchronously");
       }) as any,
     },
     async (base) => {
-      const oneMb = Buffer.alloc(1024 * 1024, "a");
-      const totalMb = 11; // over the 10 MB cap
-      const requestBody = new ReadableStream<Uint8Array>({
-        start(controller) {
-          for (let i = 0; i < totalMb; i++) controller.enqueue(oneMb);
-          controller.close();
-        },
-      });
-      const res = await fetch(`${base}/v1/models`, {
+      const res1 = await fetch(`${base}/v1/messages`, {
         method: "POST",
-        body: requestBody,
-        // @ts-expect-error Node fetch requires duplex for a streamed body.
-        duplex: "half",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: "q" }] }),
       });
+      assert.equal(res1.status, 200);
+      assert.equal(await res1.text(), JSON.stringify({ content: [{ type: "text", text: "ok" }] }));
+
+      // If the throw had escaped the guard, this is an uncaught
+      // exception and the server is already dead by now.
+      const res2 = await fetch(`${base}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: "q" }] }),
+      });
+      assert.equal(res2.status, 200);
+    },
+  );
+});
+
+// headers.ts: undici transparently decompresses a gzip upstream body
+// but leaves `content-encoding: gzip` on the Response — forwarding it
+// verbatim tells the client the (now-plaintext) body is still gzipped.
+// Any client that honours the header fails to decode it.
+test("a gzip-compressed upstream response is forwarded without a stale content-encoding header", async () => {
+  await withRealUpstream(
+    (_req, res) => {
+      const plaintext = Buffer.from(JSON.stringify({ content: [{ type: "text", text: "gzipped reply" }] }));
+      const compressed = gzipSync(plaintext);
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "content-encoding": "gzip",
+        "content-length": String(compressed.length),
+      });
+      res.end(compressed);
+    },
+    { config: CONFIG, inject: false },
+    async (base) => {
+      const res = await fetch(`${base}/v1/messages`, { method: "POST", body: "{}" });
       assert.equal(res.status, 200);
-      assert.equal(seenLength, oneMb.length * totalMb);
-      assert.ok(seenBody);
+      assert.equal(
+        res.headers.get("content-encoding"),
+        null,
+        "a body undici already decompressed must not be re-labelled gzip",
+      );
+      const text = await res.text();
+      assert.equal(text, JSON.stringify({ content: [{ type: "text", text: "gzipped reply" }] }));
     },
   );
 });

@@ -39,13 +39,29 @@ export function filterRequestHeaders(
   return out;
 }
 
+/**
+ * Response headers dropped for the same reason as `content-length`:
+ * they describe bytes that no longer match what the client will
+ * actually receive.
+ *
+ * `content-encoding` is the sharp one — `fetch` (undici) transparently
+ * DECOMPRESSES a gzip/br/deflate upstream body before we ever see it,
+ * but leaves the header on the `Response` object untouched. Forwarding
+ * it verbatim tells the client "this body is still gzipped" when it is
+ * plaintext; any client that honours the header (Node's own `http`,
+ * another `fetch`, `curl --compressed`, `requests`) fails to decode a
+ * body that was never actually compressed on the wire it received.
+ * `content-range` is dropped for the same class of reason: it describes
+ * a byte range of the ORIGINAL body, which is meaningless once the body
+ * has been decompressed and re-streamed.
+ */
+const RESPONSE_ONLY_DROPS: ReadonlySet<string> = new Set(["content-length", "content-encoding", "content-range"]);
+
 export function filterResponseHeaders(headers: Headers): Record<string, string> {
   const out: Record<string, string> = {};
   headers.forEach((value, name) => {
     const lowered = name.toLowerCase();
-    // content-length is dropped: the body is streamed, and a stale
-    // length on a re-chunked response is worse than none.
-    if (HOP_BY_HOP.has(lowered) || lowered === "content-length") return;
+    if (HOP_BY_HOP.has(lowered) || RESPONSE_ONLY_DROPS.has(lowered)) return;
     out[lowered] = value;
   });
   return out;

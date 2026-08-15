@@ -24,6 +24,7 @@
 //     immediately.
 
 import * as http from "node:http";
+import type { AddressInfo } from "node:net";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -142,6 +143,49 @@ function extractAssistantText(buf: Buffer, contentType: string | undefined): str
 }
 
 /**
+ * A Readable that replays `prefix` (already-buffered chunks) first,
+ * then relays the still-live `live` stream once the prefix is drained.
+ *
+ * This has to be a BRAND NEW Readable, not `live` itself handed onward.
+ * `live` (the request's `IncomingMessage`) has necessarily already had
+ * data read from it by the time the cap is detected — that IS how the
+ * cap is detected — and `undici`'s `fetch` refuses any Node Readable
+ * whose `readableDidRead` is already `true`, throwing "Response body
+ * object should not be disturbed or locked". `req.unshift()` puts the
+ * bytes back on the read queue, but it cannot clear that flag.
+ * Confirmed: handing `req` itself onward made every over-cap request
+ * fail instantly with that error and forward zero bytes, never
+ * reaching the upstream. Wrapping in a fresh `Readable` — which has
+ * never been read from — sidesteps the check entirely.
+ */
+class BufferedThenLive extends Readable {
+  private liveAttached = false;
+
+  constructor(
+    private readonly prefix: Buffer[],
+    private readonly live: http.IncomingMessage,
+  ) {
+    super();
+  }
+
+  override _read(): void {
+    while (this.prefix.length > 0) {
+      const chunk = this.prefix.shift() as Buffer;
+      if (!this.push(chunk)) return;
+    }
+    if (!this.liveAttached) {
+      this.liveAttached = true;
+      this.live.on("data", (chunk: Buffer) => {
+        if (!this.push(chunk)) this.live.pause();
+      });
+      this.live.on("end", () => this.push(null));
+      this.live.on("error", (err) => this.destroy(err));
+    }
+    this.live.resume();
+  }
+}
+
+/**
  * Read the request body, capped at {@link MAX_REQUEST_BODY_BYTES}.
  *
  * Deliberately event-based, NOT `for await...of req`. Exiting an async
@@ -153,11 +197,11 @@ function extractAssistantText(buf: Buffer, contentType: string | undefined): str
  * with the iterator version.
  *
  * Instead: read via plain `"data"`/`"end"` listeners, and on crossing
- * the cap, `req.unshift()` everything read so far back onto the live,
- * still-open `req`, then hand `req` itself onward. The stream is never
+ * the cap, hand a {@link BufferedThenLive} onward — the bytes already
+ * read, followed by the rest of the live socket. The stream is never
  * exited early, never destroyed, and the caller sees one continuous
- * byte stream — buffered prefix followed by the live socket — with
- * nothing lost or duplicated.
+ * byte stream with nothing lost or duplicated, wrapped in a Readable
+ * `fetch` has never seen before.
  */
 function readRequestBody(
   req: http.IncomingMessage,
@@ -183,8 +227,7 @@ function readRequestBody(
         settled = true;
         cleanup();
         req.pause();
-        req.unshift(Buffer.concat(chunks, total));
-        resolve({ capped: true, stream: req });
+        resolve({ capped: true, stream: new BufferedThenLive(chunks.slice(), req) });
       }
     }
 
@@ -489,5 +532,10 @@ export async function startProxy(
     // Post-startup server-level errors have no caller left to report to.
   });
 
-  return { server, port };
+  // Report the ADDRESS ACTUALLY BOUND, not the requested port. With
+  // `port: 0` (ephemeral — used by tests and anything that wants the OS
+  // to pick a free port) the requested value is always 0; the caller
+  // needs the real bound port to do anything useful with it.
+  const bound = server.address() as AddressInfo | null;
+  return { server, port: bound?.port ?? port };
 }
