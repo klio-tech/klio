@@ -117,14 +117,40 @@ function blockText(content: unknown): string {
     .join("\n");
 }
 
-/** The query the recaller receives: the last `user` message's text. */
+/**
+ * The query the recaller receives: the most recent user message that
+ * actually carries TEXT.
+ *
+ * Not simply "the last user message". In an agent loop — which is most
+ * of the traffic this proxy sees — every tool iteration resends the
+ * whole conversation with a `tool_result`-only user turn on the end.
+ * Those turns have no text at all, so reading the last user message
+ * literally produced an empty query on all of them, and injection went
+ * inert for the majority of turns in the primary use case. Measured
+ * before this: four of four tool iterations injected nothing.
+ *
+ * Falling back to the last user message that HAS text means the loop
+ * keeps being served the memories for the question that started it —
+ * which by then is a warm cache hit — and the `system` block stays
+ * BYTE-STABLE across the whole loop. That second property matters on
+ * its own: alternating between `[original]` and `[original, klio]`
+ * inside one loop invalidates the model's cached prompt prefix every
+ * turn, paying the cost of injection without delivering it.
+ *
+ * READ-ONLY, like everything else that touches `messages`: this
+ * inspects, it never rewrites or reorders. A conversation with no user
+ * text anywhere still yields `""` — genuinely queryless, reported as
+ * `no-query`.
+ */
 function lastUserMessageText(parsedBody: unknown): string {
   if (!parsedBody || typeof parsedBody !== "object") return "";
   const messages = (parsedBody as Record<string, unknown>)["messages"];
   if (!Array.isArray(messages)) return "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i] as Record<string, unknown> | null;
-    if (message && message["role"] === "user") return blockText(message["content"]);
+    if (!message || message["role"] !== "user") continue;
+    const text = blockText(message["content"]);
+    if (text.trim() !== "") return text;
   }
   return "";
 }
@@ -657,7 +683,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
           const query = lastUserMessageText(parsed);
           found = query.trim() === "" ? { memories: [], reason: "no-query" } : lookup(query);
         } catch {
-          found = { memories: [], reason: "not-applicable" };
+          // The body is not JSON (or the lookup threw). Say THAT, rather
+          // than `not-applicable` — this header exists to disambiguate,
+          // and "injection could never apply here" is a different fact
+          // from "we could not read this body".
+          found = { memories: [], reason: "malformed-body" };
         }
         const result = injectMemories(body.body, found.memories);
         outBody = result.body;

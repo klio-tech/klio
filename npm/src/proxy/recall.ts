@@ -138,6 +138,7 @@ export const INJECT_REASON_HEADER = "x-klio-injected-reason";
  *   * `disabled`        — `KLIO_PROXY_INJECT=off` (or the persisted toggle).
  *   * `no-config`       — no cloud config, so there is nothing to recall from.
  *   * `not-applicable`  — not a request injection could ever apply to.
+ *   * `malformed-body`  — a messages request whose body could not be read.
  *   * `not-injectable`  — memories were available, but the body could not be
  *                         mutated safely (see inject.ts's byte-stability guard).
  */
@@ -151,6 +152,7 @@ export type InjectReason =
   | "disabled"
   | "no-config"
   | "not-applicable"
+  | "malformed-body"
   | "not-injectable";
 
 /** What the request path gets back. Always immediate, never a promise. */
@@ -263,21 +265,30 @@ export function createWarmingRecaller(opts: RecallerOptions): WarmingRecaller {
   async function fetchInto(key: string, query: string): Promise<void> {
     const controller = new AbortController();
     controllers.add(controller);
-    let abortTimer: NodeJS.Timeout | undefined;
     let budgetTimer: NodeJS.Timeout | undefined;
 
-    // Deliberately NOT `unref`'d, unlike the ambient interval. These two
-    // are the only thing bounding a fetch that has already started: an
-    // `unref`'d budget timer does not fire in a process with nothing
-    // else pending, so a hung recall would never be abandoned and
-    // `idle()` would never settle. They are short-lived (budgetMs),
-    // cleared in the `finally` below, and `stop()` aborts the fetch that
-    // owns them — so the window in which they can hold the process open
-    // is bounded and always closable.
+    // ONE timer, which both aborts and settles the race — deliberately
+    // not two armed at the same deadline. Two was a bug: Node fires
+    // same-deadline timers in REGISTRATION order and drains microtasks
+    // between them, so whichever one resolved the race let the `await`
+    // continuation (and the `finally` that clears the other) run before
+    // the second callback was ever reached. With the race timer first,
+    // `controller.abort()` was never called and the controller was
+    // already removed from `controllers`, so `stop()` could not reach it
+    // either — one orphaned socket per timed-out miss, held until the
+    // OS gave up, and a process that would not exit.
+    //
+    // Deliberately NOT `unref`'d, unlike the ambient interval: an
+    // `unref`'d timer does not fire in a process with nothing else
+    // pending, so a hung recall would never be abandoned and `idle()`
+    // would never settle. It lives at most `budgetMs`, is cleared in the
+    // `finally` below, and `stop()` aborts the fetch that owns it.
     const deadline = new Promise<null>((resolve) => {
-      budgetTimer = setTimeout(() => resolve(null), budgetMs);
+      budgetTimer = setTimeout(() => {
+        controller.abort();
+        resolve(null);
+      }, budgetMs);
     });
-    abortTimer = setTimeout(() => controller.abort(), budgetMs);
 
     try {
       const res = await Promise.race([
@@ -310,8 +321,13 @@ export function createWarmingRecaller(opts: RecallerOptions): WarmingRecaller {
 
       const payload = (await response.json()) as { memories?: unknown };
       const raw = Array.isArray(payload.memories) ? payload.memories : [];
+      // The `null`/non-object guard comes FIRST. Indexing `null` throws
+      // a TypeError, which the catch below would cache as a FAILURE —
+      // so a single junk entry in an otherwise good answer turned the
+      // whole recall into `error` and threw away every usable memory
+      // that came with it.
       const memories: Memory[] = raw
-        .map((r) => r as Record<string, unknown>)
+        .filter((r): r is Record<string, unknown> => r !== null && typeof r === "object" && !Array.isArray(r))
         .filter((r) => typeof r["content"] === "string" && (r["content"] as string).trim() !== "")
         .map((r) => ({ id: String(r["id"] ?? ""), content: String(r["content"]) }));
 
@@ -323,7 +339,6 @@ export function createWarmingRecaller(opts: RecallerOptions): WarmingRecaller {
       if (!stopped) reportFailure(err instanceof Error ? err.name : "unknown error");
     } finally {
       controllers.delete(controller);
-      if (abortTimer !== undefined) clearTimeout(abortTimer);
       if (budgetTimer !== undefined) clearTimeout(budgetTimer);
     }
   }

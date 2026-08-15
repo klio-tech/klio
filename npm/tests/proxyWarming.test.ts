@@ -164,12 +164,12 @@ async function withWarmingProxy(opts: HarnessOptions, run: (h: Harness) => Promi
 
 type Turn = { elapsedMs: number; injected: number; reason: string | null };
 
-async function turn(base: string, text: string): Promise<Turn> {
+async function turnWith(base: string, messages: unknown[]): Promise<Turn> {
   const started = Date.now();
   const res = await fetch(`${base}/v1/messages`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "m", messages: [{ role: "user", content: text }] }),
+    body: JSON.stringify({ model: "m", messages }),
   });
   await res.text();
   return {
@@ -177,6 +177,26 @@ async function turn(base: string, text: string): Promise<Turn> {
     injected: Number(res.headers.get("x-klio-injected") ?? "-1"),
     reason: res.headers.get(INJECT_REASON_HEADER),
   };
+}
+
+async function turn(base: string, text: string): Promise<Turn> {
+  return turnWith(base, [{ role: "user", content: text }]);
+}
+
+/** What a Claude Code tool iteration actually looks like on the wire. */
+function toolLoop(question: string, iterations: number): unknown[] {
+  const messages: unknown[] = [{ role: "user", content: question }];
+  for (let i = 0; i < iterations; i++) {
+    messages.push({
+      role: "assistant",
+      content: [{ type: "tool_use", id: `tu_${i}`, name: "Read", input: { file: `f${i}.ts` } }],
+    });
+    messages.push({
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: `tu_${i}`, content: `contents of f${i}.ts` }],
+    });
+  }
+  return messages;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -250,8 +270,72 @@ test("the ambient warm set injects on the first request of a never-seen query", 
 });
 
 // ---------------------------------------------------------------------
+// C2. The agent loop — where most real requests live
+// ---------------------------------------------------------------------
+
+test("tool_result turns keep injecting, from the question that started the loop", async () => {
+  // A Claude Code tool iteration sends the WHOLE conversation back with
+  // a `tool_result`-only user turn on the end. Reading "the last user
+  // message" literally makes the query empty on every one of those, so
+  // injection went inert for the majority of turns in the primary use
+  // case — and the `system` block flipped between two shapes inside one
+  // loop, paying prompt-cache invalidation for context it never got.
+  await withWarmingProxy({}, async (h) => {
+    const question = "why did we choose postgres";
+    assert.equal((await turn(h.proxyBase, question)).reason, "cold");
+    await h.recaller.idle();
+
+    const opening = await turn(h.proxyBase, question);
+    assert.equal(opening.reason, "hit");
+    assert.equal(opening.injected, 1);
+
+    for (let i = 1; i <= 4; i++) {
+      const t = await turnWith(h.proxyBase, toolLoop(question, i));
+      assert.equal(t.reason, "hit", `tool iteration ${i} must still inject`);
+      assert.equal(t.injected, 1, `tool iteration ${i} must carry the same memories`);
+      assert.ok(t.elapsedMs < NON_BLOCKING_MS);
+      assert.ok(
+        JSON.stringify(h.lastSystem()).includes(`memory for ${question}`),
+        `tool iteration ${i} must carry the ORIGINATING question's memories`,
+      );
+    }
+
+    // The engine saw the query once, not once per tool iteration.
+    const forQuestion = h.engine.calls.filter((q) => q === question);
+    assert.equal(forQuestion.length, 1);
+  });
+});
+
+test("a conversation with no user text anywhere is still no-query", async () => {
+  await withWarmingProxy({ ambient: false }, async (h) => {
+    const t = await turnWith(h.proxyBase, [
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_0", content: "output" }] },
+    ]);
+    assert.equal(t.injected, 0);
+    assert.equal(t.reason, "no-query", "genuinely queryless is a different thing from a tool turn");
+  });
+});
+
+// ---------------------------------------------------------------------
 // D. The reason header, in each of its cases
 // ---------------------------------------------------------------------
+
+test("reason: malformed-body when the body is not JSON at all", async () => {
+  await withWarmingProxy({}, async (h) => {
+    const res = await fetch(`${h.proxyBase}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json at all",
+    });
+    await res.text();
+    assert.equal(res.headers.get("x-klio-injected"), "0");
+    assert.equal(
+      res.headers.get(INJECT_REASON_HEADER),
+      "malformed-body",
+      "an unparseable body is a different fact from 'injection could never apply here'",
+    );
+  });
+});
 
 test("reason: disabled when injection is switched off", async () => {
   await withWarmingProxy({ inject: false }, async (h) => {
@@ -398,6 +482,53 @@ test("the ambient refresh interval does not outlive stop()", async () => {
     await sleep(300); // six more interval periods
     assert.equal(h.engine.calls.length, atStop, "a stopped warmer must never fire again");
   });
+});
+
+test("a hung engine's socket is released at the budget, not leaked", async () => {
+  // The unit-level proof is in tests/proxyRecall.test.ts (the abort
+  // signal fires). This is the consequence, on a real socket: an engine
+  // that accepts the connection and never answers must not cost one
+  // permanently-open socket per timed-out miss.
+  const sockets: import("node:net").Socket[] = [];
+  const hung = http.createServer(() => {
+    // Accept the request and never respond. Never.
+  });
+  hung.on("connection", (s) => sockets.push(s));
+  await new Promise<void>((r) => hung.listen(0, "127.0.0.1", r));
+  const hungPort = (hung.address() as AddressInfo).port;
+
+  const recaller = createWarmingRecaller({
+    config: { apiKey: API_KEY, agentId: "a", baseUrl: `http://127.0.0.1:${hungPort}` },
+    ambient: false,
+    log: () => {},
+    budgetMs: 300,
+    fetchImpl: undefined, // the REAL global fetch, on a REAL socket
+  });
+
+  try {
+    recaller.lookup("a query the engine will never answer");
+    await recaller.idle();
+
+    // Poll rather than assert instantly: the abort has to propagate
+    // through undici to the socket.
+    //
+    // `some`, not `every`: undici's pool legitimately holds an extra
+    // idle connection open that never carried this request (confirmed
+    // against a bare `http.Server` — one aborted fetch leaves 2 server
+    // sockets, 1 destroyed). What must be released is the one carrying
+    // the abandoned request, and with no abort NOTHING is released.
+    let closed = false;
+    for (let i = 0; i < 40 && !closed; i++) {
+      closed = sockets.some((s) => s.destroyed);
+      if (!closed) await sleep(50);
+    }
+    assert.ok(sockets.length > 0, "the engine must actually have been dialled");
+    assert.ok(closed, `the abandoned request's socket must be released (${sockets.length} sockets, none destroyed)`);
+  } finally {
+    recaller.stop();
+    hung.closeAllConnections();
+    await new Promise<void>((r) => hung.close(() => r()));
+  }
 });
 
 test("stop() aborts a background recall that is still in flight", async () => {

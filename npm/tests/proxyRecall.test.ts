@@ -101,6 +101,33 @@ test("malformed JSON yields nothing, never throws", async () => {
   recaller.stop();
 });
 
+test("a null entry in memories[] is filtered, not treated as a failed recall", async () => {
+  // `null` reaching `r["content"]` throws a TypeError inside the filter,
+  // which the catch below turns into a cached FAILURE — so one junk
+  // entry made a perfectly good recall read as `error` and suppressed
+  // every usable memory that came with it.
+  const recaller = await warmed(
+    {
+      config: CONFIG,
+      fetchImpl: okFetch([null, { id: "1", content: "kept" }, undefined]) as unknown as typeof fetch,
+    },
+    "q",
+  );
+  const out = recaller.lookup("q");
+  assert.deepEqual(out.memories, [{ id: "1", content: "kept" }]);
+  assert.equal(out.reason, "hit");
+  recaller.stop();
+});
+
+test("memories[] of only junk reads as empty, never as an error", async () => {
+  const recaller = await warmed(
+    { config: CONFIG, fetchImpl: okFetch([null, undefined, 7, "str"]) as unknown as typeof fetch },
+    "q",
+  );
+  assert.equal(recaller.lookup("q").reason, "empty");
+  recaller.stop();
+});
+
 test("memories without usable content are dropped", async () => {
   const recaller = await warmed(
     {
@@ -239,6 +266,41 @@ test("a signal-ignoring fetch is still bounded by the budget", async () => {
   const elapsed = Date.now() - started;
   assert.ok(elapsed < 500, `the background fetch must end at the budget (took ${elapsed}ms)`);
   assert.equal(recaller.lookup("hanging").reason, "error");
+  recaller.stop();
+});
+
+test("the budget timeout ABORTS the fetch, it does not just stop waiting for it", async () => {
+  // Regression, and a subtle one. The budget was enforced by TWO timers
+  // armed at the same deadline: one resolving the race, one calling
+  // `controller.abort()`. Node fires same-deadline timers in
+  // REGISTRATION order and drains microtasks between them, so with the
+  // race timer registered first, the `await` continuation — including
+  // the `finally` that clears the abort timer — ran before the abort
+  // timer's callback was ever reached. The fetch was orphaned: never
+  // aborted, and its controller already dropped from the set `stop()`
+  // uses, so nothing could abort it afterwards either. One socket
+  // leaked per timed-out miss, forever.
+  let aborted = false;
+  let sawSignal = false;
+  const recaller = createWarmingRecaller({
+    config: CONFIG,
+    ambient: false,
+    log: () => {},
+    budgetMs: 50,
+    fetchImpl: ((_u: unknown, init: RequestInit) =>
+      new Promise<Response>(() => {
+        sawSignal = init.signal instanceof AbortSignal;
+        init.signal?.addEventListener("abort", () => { aborted = true; });
+      })) as unknown as typeof fetch,
+  });
+  recaller.lookup("an engine that never answers");
+  await recaller.idle();
+  // Generous slack: if the abort were merely late rather than absent,
+  // this would still catch it.
+  await new Promise((r) => setTimeout(r, 200));
+
+  assert.equal(sawSignal, true, "the fetch must be given a signal at all");
+  assert.equal(aborted, true, "the budget must abort the in-flight fetch, not orphan it");
   recaller.stop();
 });
 

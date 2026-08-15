@@ -476,7 +476,10 @@ klio proxy status         # is it answering, what is it doing, and what is it se
 klio proxy serve          # run it in the foreground (this is how you see errors)
                           #   --port / --host / --upstream, or KLIO_PROXY_PORT /
                           #   KLIO_PROXY_HOST / KLIO_PROXY_UPSTREAM, to run a
-                          #   second instance somewhere else while testing
+                          #   second instance somewhere else while testing.
+                          #   Precedence: flag > environment > default. These
+                          #   affect `serve` only — status/ensure/stop/doctor
+                          #   probe 8787, the port your agents are pointed at.
 klio proxy stop           # stop it
 klio proxy ensure         # what the supervisor runs every 60s: probe, revive if dead
 klio proxy capture on|off # save and apply the capture kill switch
