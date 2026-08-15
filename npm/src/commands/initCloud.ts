@@ -16,6 +16,8 @@
 // + the Claude-CLI runner are all injectable so the unit suite drives
 // the flow without a TTY or the network.
 
+import { resolve } from "node:path";
+
 import {
   CLOUD_BASE_URL,
   CLOUD_MCP_URL,
@@ -24,7 +26,22 @@ import {
   verifyCloudKey,
 } from "../cloud.js";
 import { writeCloudConfig, type CloudConfig } from "../cloudConfig.js";
+import { PROXY_PROBE_URL } from "../proxy/constants.js";
+import { spawnProxy, type SpawnProxyOptions } from "../proxy/processSupervisor.js";
+import {
+  installSupervisor,
+  resolveKlioCommand,
+  type InstallResult,
+} from "../proxy/supervisor.js";
+import {
+  describeWiring,
+  unwireProxy,
+  wireProxy,
+  type WireProxyOptions,
+  type WireProxyResult,
+} from "../proxy/wiring.js";
 import { phaseHeader, phaseRecap } from "../ui.js";
+import { packageVersion } from "../version.js";
 import { prompt } from "../prompt.js";
 import {
   wireCloudAgents,
@@ -142,7 +159,178 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   }
   phaseRecap("Phase 2 done — your agents are talking to Klio Cloud.");
 
+  // -----------------------------------------------------------------
+  // Offer the local proxy — opt-in, defaults to no.
+  // -----------------------------------------------------------------
+  // Detection reuses the SAME buckets `wireCloudAgents` already sorted
+  // every detected adapter into (configured / skipped / errored — every
+  // adapter for which `installed()` was true lands in exactly one of
+  // them), so this is not a second detector; it is a read of the one
+  // that already ran.
+  const detectedNames = new Set<string>([
+    ...result.configured,
+    ...result.skipped,
+    ...result.errored.map((e) => e.name),
+  ]);
+  const anyProxyableAgent =
+    detectedNames.has("claude-code") || detectedNames.has("codex");
+
+  const proxyOffer = await maybeOfferProxy({
+    ask: (message) => promptFn({ message }),
+    anyProxyableAgent,
+    wire: () => wireProxyStack({ log }),
+  });
+
+  if (proxyOffer.enabled) {
+    log("");
+    log(`  ✓ Proxy on — routing model calls through ${PROXY_PROBE_URL}.`);
+    log("    It forwards requests unchanged if anything goes wrong (fails");
+    log("    open), so a proxy issue never blocks your agent. Turn it off");
+    log("    any time with `klio uninit`.");
+  } else if (proxyOffer.error) {
+    log("");
+    log(`  ! Could not turn on the proxy: ${proxyOffer.error}`);
+    log("    Your agents are unaffected — re-run `klio init` to try again.");
+  } else if (anyProxyableAgent) {
+    log("");
+    log("  — Proxy left off. Enable it later by re-running `klio init`.");
+  }
+
   printReferenceBlock(log, result.configured, key);
+}
+
+/**
+ * Inputs to `maybeOfferProxy` — deliberately narrow so tests never need
+ * a TTY, a real filesystem, or a subprocess to exercise every branch.
+ */
+export type OfferProxyOptions = {
+  ask: (prompt: string) => Promise<string>;
+  anyProxyableAgent: boolean;
+  wire: () => Promise<void>;
+};
+
+export type OfferProxyResult = { enabled: boolean; error?: string };
+
+/**
+ * Offer the local proxy, defaulting to NO.
+ *
+ * Pointing ANTHROPIC_BASE_URL at localhost is the most invasive thing
+ * this tool does to a machine — every model call an agent makes then
+ * flows through a process we installed. A Cloud user signed up
+ * specifically to avoid running things. So this is opt-in, and a bare
+ * Enter declines: anything other than an explicit `y`/`yes` (any case)
+ * is a decline, never a re-prompt.
+ */
+export async function maybeOfferProxy(
+  opts: OfferProxyOptions,
+): Promise<OfferProxyResult> {
+  if (!opts.anyProxyableAgent) return { enabled: false };
+  const answer = (
+    await opts.ask(
+      "Route model calls through a local Klio proxy? It injects your team's\n" +
+        "context into every request and captures sessions for grading, even in\n" +
+        "agents without hook support. Runs on 127.0.0.1 and fails open. [y/N]: ",
+    )
+  )
+    .trim()
+    .toLowerCase();
+  if (answer !== "y" && answer !== "yes") return { enabled: false };
+  try {
+    await opts.wire();
+    return { enabled: true };
+  } catch (err) {
+    return { enabled: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Inputs to `wireProxyStack`. Every collaborator is injectable for tests. */
+export type WireProxyStackOptions = {
+  log: (line: string) => void;
+  wireProxyFn?: (opts: WireProxyOptions) => WireProxyResult;
+  unwireProxyFn?: (opts: WireProxyOptions) => WireProxyResult;
+  installSupervisorFn?: (
+    klioCommand: string[],
+  ) => Promise<InstallResult>;
+  spawnProxyFn?: (opts: SpawnProxyOptions) => number;
+  resolveKlioCommandFn?: (
+    argv1?: string,
+    execPath?: string,
+    version?: string,
+  ) => string[];
+  cliPath?: string;
+  version?: string;
+};
+
+/**
+ * Wire the local proxy in three steps — `wireProxy`, `installSupervisor`,
+ * `spawnProxy` — in that order, and never leave the middle of that
+ * sequence silently half-applied.
+ *
+ * The three steps have different failure weights:
+ *
+ *   1. `wireProxy` failing means some (or all) agent config could not be
+ *      pointed at the proxy. Whatever DID succeed is undone with
+ *      `unwireProxy` before the failure is reported — a machine where
+ *      Claude Code got wired but Codex didn't is not an acceptable
+ *      resting state.
+ *   2. `installSupervisor` is documented (proxy/supervisor.ts) to never
+ *      throw and to be non-fatal by design: a supervisor that fails to
+ *      load means the proxy will not survive a reboot, but the proxy
+ *      itself (step 3) still comes up and works right now. So a failed
+ *      install is reported and we proceed — rolling back working agent
+ *      wiring over a reboot-resilience gap would be a worse outcome for
+ *      the user than the gap itself.
+ *   3. `spawnProxy` failing is the worst case this function can produce:
+ *      agents would be pointed at 127.0.0.1 with nothing listening.
+ *      Wiring is rolled back with `unwireProxy` before the failure is
+ *      reported, so an agent is never left pointed at a dead port.
+ */
+export async function wireProxyStack(
+  opts: WireProxyStackOptions,
+): Promise<void> {
+  const log = opts.log;
+  const wireProxyFn = opts.wireProxyFn ?? wireProxy;
+  const unwireProxyFn = opts.unwireProxyFn ?? unwireProxy;
+  const installSupervisorFn = opts.installSupervisorFn ?? installSupervisor;
+  const spawnProxyFn = opts.spawnProxyFn ?? spawnProxy;
+  const resolveKlioCommandFn = opts.resolveKlioCommandFn ?? resolveKlioCommand;
+  const cliPath = opts.cliPath ?? resolve(process.argv[1] ?? "");
+
+  // Step 1 — point every detected agent at the local proxy.
+  const wiring = wireProxyFn({ log });
+  describeWiring(wiring, log);
+  if (wiring.errors.length > 0) {
+    unwireProxyFn({ log });
+    const detail = wiring.errors
+      .map((e) => `${e.agent}: ${e.message}`)
+      .join("; ");
+    throw new Error(
+      `proxy wiring failed (${detail}) — rolled back, nothing was left pointed at the proxy`,
+    );
+  }
+
+  // Step 2 — install the supervisor. Non-fatal by design; see the
+  // doc comment above for why this does not roll back step 1.
+  const supervisor = await installSupervisorFn(
+    resolveKlioCommandFn(process.argv[1], process.execPath, opts.version ?? packageVersion()),
+  );
+  log(
+    supervisor.installed
+      ? `    · ${supervisor.detail}`
+      : `    ! ${supervisor.detail}`,
+  );
+
+  // Step 3 — start the proxy process itself.
+  try {
+    const pid = spawnProxyFn({ cliPath });
+    log(`    · proxy process started (pid ${pid})`);
+  } catch (err) {
+    unwireProxyFn({ log });
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `proxy failed to start (${message}) — rolled back, nothing points at 127.0.0.1`,
+    );
+  }
 }
 
 /**
