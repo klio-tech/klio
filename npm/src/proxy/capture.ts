@@ -20,6 +20,44 @@ const MAX_BLOCK_BYTES = 8000;
 const MAX_TRANSCRIPT_BYTES = 256 * 1024;
 
 /**
+ * Below this much leftover room, a partially admitted turn carries no
+ * useful evidence and is not worth the marker it costs.
+ */
+const MIN_FRAGMENT_BYTES = 512;
+
+/** One rendered turn of the transcript as it is sent. */
+type Turn = { role: string; content: string };
+
+/** What the elision marker has to say beyond the count of dropped turns. */
+type MarkerNote = "none" | "head" | "newest";
+
+/**
+ * The role of a raw message. A message with no role is a user message —
+ * the same default the render path applies, so the two never disagree
+ * about whether a conversation has an opening user turn.
+ */
+function roleOf(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const role = (message as Record<string, unknown>)["role"];
+  return role === undefined || role === null ? "user" : String(role);
+}
+
+/** The content of a raw message, safely. */
+function contentOf(message: unknown): unknown {
+  if (!message || typeof message !== "object") return "";
+  return (message as Record<string, unknown>)["content"];
+}
+
+/** Serialize for hashing. Never throws; unserializable input falls back. */
+function seedOf(message: unknown): string {
+  try {
+    return JSON.stringify(message) ?? "";
+  } catch {
+    return String(message);
+  }
+}
+
+/**
  * Derive a session id from the conversation's FIRST user message AND
  * FIRST assistant message. This ensures:
  * - Two conversations that both open with "hi" but get different replies
@@ -28,23 +66,23 @@ const MAX_TRANSCRIPT_BYTES = 256 * 1024;
  * - Turn 1 (user-only, no assistant yet) is skipped entirely, since the
  *   content reappears verbatim in turn 2's history (Anthropic API is stateless).
  *
+ * The seed is the RAW serialization of those two messages, never their
+ * rendered form: rendering applies the per-block cap, so two conversations
+ * whose opening assistant message is a large tool_use block differing only
+ * past 8000 bytes — a file write or a heredoc, a common opener — would
+ * otherwise hash identically and clobber each other.
+ *
  * Returns null if there's no assistant message yet (turn 1).
  * The engine's richer-transcript-wins upsert then keeps the fullest version.
  */
 export function conversationSessionId(agent: string, messages: unknown[]): string | null {
-  const firstUser = messages.find(
-    (m) => (m as Record<string, unknown> | null)?.["role"] === "user",
-  ) as Record<string, unknown> | undefined;
-  const firstAssistant = messages.find(
-    (m) => (m as Record<string, unknown> | null)?.["role"] === "assistant",
-  ) as Record<string, unknown> | undefined;
+  const firstUser = messages.find((m) => roleOf(m) === "user");
+  const firstAssistant = messages.find((m) => roleOf(m) === "assistant");
 
   // Skip capture entirely if there's no assistant turn yet (turn 1).
-  if (!firstUser || !firstAssistant) return null;
+  if (firstUser === undefined || firstAssistant === undefined) return null;
 
-  const userText = textOf(firstUser["content"]);
-  const assistantText = textOf(firstAssistant["content"]);
-  const seed = userText + "\n \n" + assistantText;
+  const seed = seedOf(firstUser) + "\n \n" + seedOf(firstAssistant);
   const hash = createHash("sha256").update(seed).digest("hex").slice(0, 16);
   return `klio-proxy:${agent}:${hash}`;
 }
@@ -56,8 +94,12 @@ const TURN_TRUNCATED_SUFFIX = "…[turn truncated]";
 const BLOCK_TRUNCATED_SUFFIX = "…[truncated]";
 
 /** UTF-8 bytes a code point occupies as-is. */
-function utf8Width(codePoint: string): number {
-  return Buffer.byteLength(codePoint, "utf8");
+function utf8Width(code: number): number {
+  if (code < 0x80) return 1;
+  if (code < 0x800) return 2;
+  // A lone surrogate is re-encoded as U+FFFD, which is also 3 bytes.
+  if (code < 0x10000) return 3;
+  return 4;
 }
 
 /**
@@ -66,8 +108,14 @@ function utf8Width(codePoint: string): number {
  * A lone surrogate costs 6 ASCII bytes (`\uXXXX`), not the 3 bytes Node
  * would spend replacing it with U+FFFD.
  */
-function jsonWidth(codePoint: string): number {
-  return Buffer.byteLength(JSON.stringify(codePoint), "utf8") - 2;
+function jsonWidth(code: number): number {
+  if (code === 0x22 || code === 0x5c) return 2; // \" and \\
+  if (code < 0x20) {
+    // \b \t \n \f \r have two-character escapes; the rest go to \u00XX.
+    return code === 8 || code === 9 || code === 10 || code === 12 || code === 13 ? 2 : 6;
+  }
+  if (code >= 0xd800 && code <= 0xdfff) return 6; // lone surrogate -> \uXXXX
+  return utf8Width(code);
 }
 
 /**
@@ -77,18 +125,19 @@ function jsonWidth(codePoint: string): number {
 function truncateByCodePoints(
   content: string,
   maxUnits: number,
-  measure: (codePoint: string) => number,
+  measure: (code: number) => number,
 ): string {
   if (maxUnits <= 0) return "";
-  const kept: string[] = [];
   let used = 0;
-  for (const codePoint of content) {
-    const width = measure(codePoint);
+  let end = 0;
+  while (end < content.length) {
+    const code = content.codePointAt(end) as number;
+    const width = measure(code);
     if (used + width > maxUnits) break;
     used += width;
-    kept.push(codePoint);
+    end += code > 0xffff ? 2 : 1;
   }
-  return kept.join("");
+  return content.slice(0, end);
 }
 
 /** Bytes a string costs inside a JSON document, excluding its quotes. */
@@ -190,21 +239,26 @@ export async function emitCapture(opts: EmitCaptureOptions): Promise<void> {
     // Skip capture entirely if there's no assistant turn yet.
     if (sessionId === null) return;
 
-    // Render all messages.
-    const messages = rawMessages.map((m) => {
-      const r = m as Record<string, unknown>;
-      return { role: String(r["role"] ?? "user"), content: textOf(r["content"]) };
-    });
+    // Render all messages. `roleOf` is the same defaulting the session id
+    // uses, so the two paths can never disagree about a message's role.
+    const messages = rawMessages.map((m) => ({
+      role: roleOf(m) || "user",
+      content: textOf(contentOf(m)),
+    }));
     if (opts.assistantText.trim() !== "") {
       messages.push({ role: "assistant", content: opts.assistantText });
     }
 
     // Truncate at turn granularity to fit within the payload cap. Every
-    // measurement below is taken on the fully serialized payload — the
+    // measurement below accounts for the fully serialized payload — the
     // envelope and the elision marker included — so the thing measured is
     // always the thing sent.
-    type Turn = { role: string; content: string };
-
+    //
+    // Sizing is arithmetic, not re-serialization: each turn is serialized
+    // ONCE and its byte size cached. Re-stringifying the growing window on
+    // every candidate made this quadratic, and it runs synchronously in the
+    // response's "finish" handler, where it stalls every other in-flight
+    // proxied request.
     const buildPayload = (msgs: Turn[]): string =>
       JSON.stringify({
         session_id: sessionId,
@@ -212,18 +266,39 @@ export async function emitCapture(opts: EmitCaptureOptions): Promise<void> {
         tool_calls: [] as unknown[],
       });
 
-    const payloadBytes = (msgs: Turn[]): number =>
-      Buffer.byteLength(buildPayload(msgs), "utf8");
+    const turnBytes = (turn: Turn): number =>
+      Buffer.byteLength(JSON.stringify(turn), "utf8");
 
-    const withMarker = (msgs: Turn[], dropped: number, truncated: boolean): Turn[] => {
-      if (dropped <= 0 && !truncated) return msgs;
-      const label = truncated
-        ? dropped > 0
-          ? `[${dropped} turns elided, newest turn truncated]`
-          : "[newest turn truncated]"
-        : `[${dropped} turns elided]`;
-      return [{ role: "system", content: label }, ...msgs];
+    // `JSON.stringify` of the whole payload costs the empty envelope, plus
+    // each turn's own bytes, plus one comma between adjacent turns.
+    const envelopeBytes = Buffer.byteLength(buildPayload([]), "utf8");
+    const sizeOf = (sumOfTurns: number, count: number): number =>
+      count === 0 ? envelopeBytes : envelopeBytes + sumOfTurns + count - 1;
+
+    const sizes = messages.map(turnBytes);
+    // suffixSum[i] = bytes of messages[i..end)
+    const suffixSum = new Array<number>(messages.length + 1).fill(0);
+    for (let i = messages.length - 1; i >= 0; i--) {
+      suffixSum[i] = suffixSum[i + 1] + sizes[i];
+    }
+
+    const markerTurn = (dropped: number, note: MarkerNote): Turn | null => {
+      if (dropped <= 0 && note === "none") return null;
+      const elided = `${dropped} ${dropped === 1 ? "turn" : "turns"} elided`;
+      if (note === "none") return { role: "system", content: `[${elided}]` };
+      const detail =
+        note === "head" ? "oldest kept turn truncated" : "newest turn truncated";
+      return {
+        role: "system",
+        content: dropped > 0 ? `[${elided}, ${detail}]` : `[${detail}]`,
+      };
     };
+
+    const assemble = (marker: Turn | null, head: Turn | null, window: Turn[]): Turn[] => [
+      ...(marker ? [marker] : []),
+      ...(head ? [head] : []),
+      ...window,
+    ];
 
     /**
      * Last resort for a single turn that cannot fit whole: keep the turn,
@@ -231,25 +306,34 @@ export async function emitCapture(opts: EmitCaptureOptions): Promise<void> {
      * envelope are accounted for.
      */
     const buildSingleOversized = (turn: Turn, dropped: number): string => {
-      const skeleton = withMarker([{ role: turn.role, content: "" }], dropped, true);
-      const overhead = payloadBytes(skeleton);
-      const content = truncateTurnContent(turn.content, MAX_TRANSCRIPT_BYTES - overhead);
-      return buildPayload(withMarker([{ role: turn.role, content }], dropped, true));
+      const marker = markerTurn(dropped, "newest");
+      const skeleton: Turn = { role: turn.role, content: "" };
+      const used = sizeOf(
+        turnBytes(skeleton) + (marker ? turnBytes(marker) : 0),
+        marker ? 2 : 1,
+      );
+      const content = truncateTurnContent(turn.content, MAX_TRANSCRIPT_BYTES - used);
+      return buildPayload(assemble(marker, null, [{ role: turn.role, content }]));
     };
 
-    let finalPayload = buildPayload(messages);
+    let finalPayload: string;
 
-    if (Buffer.byteLength(finalPayload, "utf8") > MAX_TRANSCRIPT_BYTES) {
-      // Accumulate newest-first while the payload still fits.
-      let kept: Turn[] = [];
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const candidate = [messages[i], ...kept];
-        if (payloadBytes(candidate) > MAX_TRANSCRIPT_BYTES) break;
-        kept = candidate;
+    if (sizeOf(suffixSum[0], messages.length) <= MAX_TRANSCRIPT_BYTES) {
+      finalPayload = buildPayload(messages);
+    } else {
+      // Admit whole turns newest-first while the complete payload still fits.
+      let start = messages.length;
+      while (start > 0) {
+        const candidate = start - 1;
+        const marker = markerTurn(candidate, "none");
+        const sum = suffixSum[candidate] + (marker ? turnBytes(marker) : 0);
+        const count = messages.length - candidate + (marker ? 1 : 0);
+        if (sizeOf(sum, count) > MAX_TRANSCRIPT_BYTES) break;
+        start = candidate;
       }
 
-      if (kept.length === 0) {
-        // The newest turn alone blows the cap. Keep it, truncated. The
+      if (start >= messages.length) {
+        // Not even the newest turn fits whole. Keep it, truncated. The
         // "no half-present turns" rule does not apply here: there is no
         // partner turn to separate it from, and dropping it would ship a
         // transcript with no conversation in it at all.
@@ -258,33 +342,61 @@ export async function emitCapture(opts: EmitCaptureOptions): Promise<void> {
           messages.length - 1,
         );
       } else {
-        let dropped = messages.length - kept.length;
+        let window = messages.slice(start);
+        let dropped = start;
+        let head: Turn | null = null;
 
-        // No half-present turns: an assistant answer must not survive
-        // without the user prompt it answers. Never empty the transcript
-        // to satisfy it.
-        if (kept.length > 1 && kept[0].role === "assistant") {
-          kept = kept.slice(1);
-          dropped += 1;
+        // The turn that did not fit is usually where all the work is — a
+        // long answer, or the ~33 capped tool results that alone exceed the
+        // cap. Stopping at it and leaving the rest of the budget unused
+        // ships a transcript with no evidence in it. Admit it TRUNCATED
+        // into whatever room is left instead.
+        if (start > 0) {
+          const candidate = messages[start - 1];
+          const marker = markerTurn(start - 1, "head");
+          const skeleton: Turn = { role: candidate.role, content: "" };
+          const used = sizeOf(
+            suffixSum[start] + turnBytes(skeleton) + (marker ? turnBytes(marker) : 0),
+            window.length + 1 + (marker ? 1 : 0),
+          );
+          const room = MAX_TRANSCRIPT_BYTES - used;
+          if (room >= MIN_FRAGMENT_BYTES) {
+            const content = truncateTurnContent(candidate.content, room);
+            if (content !== "") {
+              head = { role: candidate.role, content };
+              dropped = start - 1; // it was truncated, not dropped
+            }
+          }
         }
 
-        // Terminal check: the marker itself costs bytes. Keep dropping the
-        // oldest kept turn until the *complete* payload fits.
-        finalPayload = buildPayload(withMarker(kept, dropped, false));
-        while (Buffer.byteLength(finalPayload, "utf8") > MAX_TRANSCRIPT_BYTES && kept.length > 1) {
-          kept = kept.slice(1);
-          dropped += 1;
-          if (kept.length > 1 && kept[0].role === "assistant") {
-            kept = kept.slice(1);
+        // No half-present turns: an assistant answer must not survive as a
+        // WHOLE turn without the user prompt it answers. A truncated head
+        // is exempt — it is announced as a fragment by the marker, and
+        // dropping it is exactly the evidence loss above. Never empty the
+        // transcript to satisfy the rule.
+        if (head === null) {
+          while (window.length > 1 && window[0].role === "assistant") {
+            window = window.slice(1);
             dropped += 1;
           }
-          finalPayload = buildPayload(withMarker(kept, dropped, false));
         }
 
-        // One turn left and the marker still pushes past the cap: cut the
-        // turn's content rather than ship an empty transcript.
+        // Terminal check: measure what will actually be sent, and keep
+        // dropping the oldest whole turn until it fits.
+        const note: MarkerNote = head ? "head" : "none";
+        finalPayload = buildPayload(assemble(markerTurn(dropped, note), head, window));
+        while (
+          Buffer.byteLength(finalPayload, "utf8") > MAX_TRANSCRIPT_BYTES &&
+          window.length > 1
+        ) {
+          window = window.slice(1);
+          dropped += 1;
+          finalPayload = buildPayload(assemble(markerTurn(dropped, note), head, window));
+        }
+
+        // Still over: fall back to a single truncated turn, which always fits.
         if (Buffer.byteLength(finalPayload, "utf8") > MAX_TRANSCRIPT_BYTES) {
-          finalPayload = buildSingleOversized(kept[0], dropped);
+          finalPayload = buildSingleOversized(head ?? window[0], dropped);
         }
       }
     }

@@ -300,9 +300,10 @@ test("total transcript payload cap: large history is truncated to fit within 256
     }) as unknown as typeof fetch,
   });
 
-  // Payload should be under 256 KB (measured in UTF-8 bytes, not string length)
+  // Payload should be within 256 KB (measured in UTF-8 bytes, not string length).
+  // Exactly 256 KB is the cap being used fully, not exceeded.
   const payloadBytes = Buffer.byteLength(seenBodyStr, "utf8");
-  assert.ok(payloadBytes < 256 * 1024, `payload ${payloadBytes} bytes should be under 256 KB`);
+  assert.ok(payloadBytes <= 256 * 1024, `payload ${payloadBytes} bytes should be within 256 KB`);
 
   // Newest turn should survive (the final assistant message added by emitCapture)
   const hasFinal = seenBody.messages.some((m: any) => m.content && m.content.includes("final"));
@@ -391,7 +392,19 @@ test("oversized newest ASSISTANT turn is kept and truncated, never emptied", asy
   assert.ok(text.length > 1000, "payload must not be content-empty");
 });
 
-test("a mid-exchange cut leaves a non-empty transcript that begins at a user turn", async () => {
+/** A turn admitted only partially is announced by the marker it carries. */
+const isFragment = (turn: any): boolean =>
+  typeof turn?.content === "string" && turn.content.endsWith("…[turn truncated]");
+
+/** The whole turns of a transcript: everything but the marker and any leading fragment. */
+function wholeTurns(parsed: any): any[] {
+  const conversation = parsed.messages.filter((m: any) => m.role !== "system");
+  return conversation.length > 0 && isFragment(conversation[0])
+    ? conversation.slice(1)
+    : conversation;
+}
+
+test("a mid-exchange cut leaves a non-empty transcript whose whole turns begin at a user turn", async () => {
   // Sweep turn sizes so the cut lands on both parities of the exchange.
   for (let size = 2000; size < 2020; size++) {
     const messages: unknown[] = [];
@@ -408,7 +421,15 @@ test("a mid-exchange cut leaves a non-empty transcript that begins at a user tur
     );
     const conversation = parsed.messages.filter((m: any) => m.role !== "system");
     assert.ok(conversation.length > 0, `size ${size}: transcript must not be empty after a cut`);
-    assert.equal(conversation[0].role, "user", `size ${size}: transcript must begin at a user turn`);
+    // A truncated head is contiguous with the window, so it supplies the
+    // context for whatever follows it. Only a window with no head at all
+    // has to begin at a user turn.
+    if (isFragment(conversation[0])) continue;
+    assert.equal(
+      conversation[0].role,
+      "user",
+      `size ${size}: whole turns must begin at a user turn`,
+    );
   }
 });
 
@@ -499,4 +520,152 @@ test("total transcript payload cap: multi-byte content is measured in UTF-8 byte
 
   // Should have dropped many turns (because byte size is larger than char count)
   assert.ok(seenBody.messages.length < 100, "should have dropped many turns");
+});
+
+test("an over-cap turn behind a small newest turn is admitted truncated, not discarded", async () => {
+  // The realistic shape: a huge assistant answer (or ~33 capped tool results),
+  // then a two-byte follow-up. Stopping at the first turn that does not fit
+  // ships the follow-up alone and grades a transcript with no work in it.
+  const huge = "X".repeat(300 * 1024);
+  const { raw, parsed } = await capturePayload(
+    [
+      { role: "user", content: "explain the whole architecture" },
+      { role: "assistant", content: huge },
+      { role: "user", content: "ok" },
+    ],
+    "",
+  );
+
+  const bytes = Buffer.byteLength(raw, "utf8");
+  assert.ok(bytes <= MAX_TRANSCRIPT_BYTES, `payload ${bytes} bytes must be within the cap`);
+  assert.ok(
+    bytes > 200 * 1024,
+    `payload ${bytes} bytes leaves ${MAX_TRANSCRIPT_BYTES - bytes} bytes of the budget unused`,
+  );
+
+  const text = parsed.messages
+    .filter((m: any) => m.role !== "system")
+    .map((m: any) => m.content)
+    .join("\n");
+  assert.ok(text.includes("X".repeat(10000)), "the over-cap turn's work must survive truncated");
+  assert.ok(text.includes("ok"), "the newest turn must survive");
+});
+
+test("a large many-turn history is emitted well under 100 ms", async () => {
+  // Truncation runs synchronously inside res.on("finish"), so a quadratic
+  // re-serialize per candidate window stalls every other in-flight request.
+  const messages: unknown[] = [];
+  for (let i = 0; i < 7000; i++) {
+    messages.push({ role: "user", content: `u${i}-` + "x".repeat(20) });
+    messages.push({ role: "assistant", content: `a${i}-` + "y".repeat(20) });
+  }
+
+  const started = process.hrtime.bigint();
+  const { raw } = await capturePayload(messages, "done");
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+  assert.ok(
+    Buffer.byteLength(raw, "utf8") <= MAX_TRANSCRIPT_BYTES,
+    "payload must still be within the cap",
+  );
+  assert.ok(elapsedMs < 100, `emit took ${elapsedMs.toFixed(0)} ms, expected well under 100 ms`);
+});
+
+test("session id is not fed by the per-block cap: first assistant blocks differing past 8000 bytes differ", () => {
+  const opener = (tail: string) => [
+    { role: "user", content: "scaffold the service" },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          name: "Write",
+          id: "t1",
+          input: { path: "/srv/main.ts", data: "z".repeat(9000) + tail },
+        },
+      ],
+    },
+  ];
+
+  const a = conversationSessionId("codex", opener("AAA"));
+  const b = conversationSessionId("codex", opener("BBB"));
+  assert.ok(a, "id should be derived");
+  assert.notEqual(a, b, "first assistant messages differing past the block cap must not collide");
+});
+
+test("session id stays stable across turns when the opener is a large tool_use block", () => {
+  const opener = [
+    { role: "user", content: "scaffold the service" },
+    {
+      role: "assistant",
+      content: [
+        { type: "tool_use", name: "Write", id: "t1", input: { data: "z".repeat(9000) + "AAA" } },
+      ],
+    },
+  ];
+  const turn3 = [...opener, { role: "user", content: "next" }, { role: "assistant", content: "ok" }];
+  const turnN = [...turn3, { role: "user", content: "more" }, { role: "assistant", content: "sure" }];
+
+  const id2 = conversationSessionId("codex", opener);
+  assert.ok(id2, "turn 2 should have an id");
+  assert.equal(conversationSessionId("codex", turn3), id2, "turn 3 must share the id");
+  assert.equal(conversationSessionId("codex", turnN), id2, "turn N must share the id");
+});
+
+test("a message with no role is treated as a user turn by both the id and the render path", async () => {
+  const messages = [{ content: "x" }, { role: "assistant", content: "y" }];
+  assert.ok(conversationSessionId("codex", messages), "a roleless first message must count as user");
+
+  const { called, parsed } = await capturePayload(messages, "z");
+  assert.equal(called, true, "capture must not be aborted by a roleless message");
+  assert.equal(parsed.messages[0].role, "user", "the roleless turn must render as user");
+});
+
+test("a window opening on several consecutive assistant turns strips all of them", async () => {
+  // tool-use exchanges produce runs of consecutive assistant turns, so a cut
+  // can land two or three deep into one.
+  let exercised = 0;
+  for (let size = 2000; size < 2060; size++) {
+    const messages: unknown[] = [];
+    for (let i = 0; i < 90; i++) {
+      messages.push({ role: "user", content: `q${i} ` + "u".repeat(size) });
+      messages.push({ role: "assistant", content: `a${i}A ` + "a".repeat(size) });
+      messages.push({ role: "assistant", content: `a${i}B ` + "b".repeat(size) });
+      messages.push({ role: "assistant", content: `a${i}C ` + "c".repeat(size) });
+    }
+
+    const { raw, parsed } = await capturePayload(messages, "final answer");
+    assert.ok(
+      Buffer.byteLength(raw, "utf8") <= MAX_TRANSCRIPT_BYTES,
+      `size ${size}: payload must be within the cap`,
+    );
+
+    const conversation = parsed.messages.filter((m: any) => m.role !== "system");
+    assert.ok(conversation.length > 0, `size ${size}: transcript must not be empty`);
+    if (conversation.length > 0 && isFragment(conversation[0])) continue; // partial head, not a whole turn
+
+    exercised++;
+    const whole = wholeTurns(parsed);
+    if (whole.length > 1) {
+      assert.equal(whole[0].role, "user", `size ${size}: no whole turn may lead without its prompt`);
+    }
+  }
+  assert.ok(exercised > 0, "the sweep never reached the no-fragment path; retune the sizes");
+});
+
+test("the elision marker counts honestly and reads singular for one dropped turn", async () => {
+  // Only the opening user turn is fully dropped; the huge assistant turn is
+  // admitted truncated, so the count must be 1 — and read "1 turn", not "1 turns".
+  const { parsed } = await capturePayload(
+    [
+      { role: "user", content: "explain the whole architecture" },
+      { role: "assistant", content: "X".repeat(300 * 1024) },
+      { role: "user", content: "ok" },
+    ],
+    "",
+  );
+  const marker = parsed.messages.find((m: any) => m.role === "system");
+  assert.ok(marker, "a marker is expected");
+  assert.match(marker.content, /\b1 turn elided\b/, `marker "${marker.content}" must count 1 turn`);
+  assert.ok(/truncated/.test(marker.content), "the marker must say a turn was truncated");
 });
