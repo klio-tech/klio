@@ -340,7 +340,13 @@ export async function uninstallSupervisor(
 export type ProbeResult = {
   alive: boolean;
   detail: string;
-  health?: Partial<ProxyHealth>;
+  /**
+   * Extra keys are typed in on purpose: the responder may be the PYTHON
+   * proxy, whose body carries `upstream`/`upstreams` and no `runtime`,
+   * and callers legitimately read those to tell a container apart from
+   * a host process.
+   */
+  health?: Partial<ProxyHealth> & Record<string, unknown>;
 };
 
 /**
@@ -363,7 +369,7 @@ export async function probeProxy(
     if (!response.ok) {
       return { alive: false, detail: `health endpoint returned ${response.status}` };
     }
-    const body = (await response.json()) as Partial<ProxyHealth> | null;
+    const body = (await response.json()) as (Partial<ProxyHealth> & Record<string, unknown>) | null;
     const alive = body?.status === "ok";
     return {
       alive,
@@ -373,7 +379,7 @@ export async function probeProxy(
       // stop` before it signals anything, `klio init` checking for a
       // survivor holding stale credentials — do not have to re-probe and
       // race with whatever changed in between.
-      health: alive ? (body as Partial<ProxyHealth>) : undefined,
+      health: alive ? (body as Partial<ProxyHealth> & Record<string, unknown>) : undefined,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

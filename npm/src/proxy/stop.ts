@@ -77,13 +77,27 @@ export async function stopProxy(opts: StopProxyOptions = {}): Promise<StopProxyR
 
   const health = first.health ?? {};
   if (health.runtime !== "node") {
+    // Three things can answer here, and telling the user the wrong one
+    // is worse than saying nothing. The containerised Python proxy
+    // reports its named `upstreams`; a Klio proxy from BEFORE the
+    // health body carried an identity reports `{"status":"ok"}` and
+    // nothing else. (Found live: an older proxy was classified as "not
+    // a Klio proxy" and the user was pointed at `klio down`, which does
+    // not touch it — so it survived, the new proxy lost the EADDRINUSE
+    // race, and the probe went green against the OLD process.)
+    const isContainer = health.upstreams !== undefined || health.upstream !== undefined;
     return {
       stopped: false,
       wasRunning: true,
-      detail:
-        `something is answering on the proxy port, but it is not a Klio Node proxy ` +
-        `(mode ${health.mode ?? "unknown"}) — left it alone. If this is the local ` +
-        "Docker stack, `klio down` is the command that stops it.",
+      detail: isContainer
+        ? "the proxy on this port is the local Docker stack's container, not a host " +
+          "process — `klio down` is the command that stops it. Left it alone."
+        : health.status === "ok"
+          ? "an older Klio proxy is holding this port. Versions before 0.9.4 do not " +
+            "report their pid, so it cannot be stopped safely from here — end it with " +
+            "`kill $(lsof -ti tcp:8787)` (it also goes away on reboot), then re-run this."
+          : `something is answering on the proxy port, but it is not a Klio proxy ` +
+            `(mode ${health.mode ?? "unknown"}) — left it alone.`,
     };
   }
 
@@ -94,7 +108,9 @@ export async function stopProxy(opts: StopProxyOptions = {}): Promise<StopProxyR
     return {
       stopped: false,
       wasRunning: true,
-      detail: "the proxy is answering but did not report its pid, so it cannot be stopped safely",
+      detail:
+        "the proxy is answering but did not report its pid, so it cannot be stopped " +
+        "safely from here — end it with `kill $(lsof -ti tcp:8787)`.",
     };
   }
   if (pid === process.pid) {

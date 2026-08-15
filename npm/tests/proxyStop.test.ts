@@ -142,3 +142,38 @@ test("proxy stop is a quiet no-op when nothing is listening", async () => {
   assert.equal(code, 0, "nothing to stop is success, not failure");
   assert.match(lines.join("\n"), /not (running|answering)/i);
 });
+
+// A proxy from an OLDER release answers `{"status":"ok"}` and nothing
+// else — no `runtime`, no `pid`. Found live, during before/after
+// measurement: upgrading and then running `klio proxy stop` classified
+// it as "not a Klio Node proxy" and pointed at `klio down`, which is
+// the local Docker stack's command and does nothing here. It survived,
+// the newly spawned proxy lost EADDRINUSE, and the health probe went
+// green against the OLD process — the exact survivor failure this
+// command exists to prevent, just one version further back.
+//
+// Its pid is genuinely unknowable from the wire (that is why the field
+// was added), so this cannot be automated. What it must not do is
+// misdiagnose: say what is there and give a remedy that works.
+const LEGACY_BODY = `{ status: "ok" }`;
+
+test("an older Klio proxy is named as such, with a remedy that exists", { timeout: 20000 }, async () => {
+  const { child, port } = await startFakeProxy(LEGACY_BODY);
+  const lines: string[] = [];
+  try {
+    const code = await runProxyCommand({
+      args: ["stop"],
+      log: (l) => lines.push(l),
+      probeProxyImpl: (() => realProbeProxy(2000, `http://127.0.0.1:${port}/__klio/health`)) as never,
+    });
+
+    const out = lines.join("\n");
+    assert.notEqual(code, 0);
+    assert.equal(isAlive(child.pid as number), true, "we cannot know its pid, so we must not guess one");
+    assert.match(out, /older Klio proxy/i, out);
+    assert.doesNotMatch(out, /klio down/, "klio down is the Docker stack's command, not this one");
+    assert.match(out, /8787/, "the remedy has to tell the user how to find it");
+  } finally {
+    child.kill("SIGKILL");
+  }
+});
