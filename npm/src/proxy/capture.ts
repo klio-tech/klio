@@ -13,10 +13,10 @@ import { createHash } from "node:crypto";
 
 import type { CloudConfig } from "../cloudConfig.js";
 
-/** Max bytes per individual block (tool_use input, tool_result content). */
-const MAX_BLOCK_CHARS = 8000;
+/** Max UTF-8 bytes per individual block (tool_use input, tool_result content). */
+const MAX_BLOCK_BYTES = 8000;
 
-/** Max bytes for the entire transcript payload (256 KB). */
+/** Max UTF-8 bytes for the entire serialized transcript payload (256 KB). */
 const MAX_TRANSCRIPT_BYTES = 256 * 1024;
 
 /**
@@ -49,6 +49,18 @@ export function conversationSessionId(agent: string, messages: unknown[]): strin
   return `klio-proxy:${agent}:${hash}`;
 }
 
+/** Truncate a turn's content to fit within a byte budget, with marker. */
+function truncateTurnContent(content: string, maxBytes: number): string {
+  if (Buffer.byteLength(content, "utf8") <= maxBytes) {
+    return content;
+  }
+  let truncated = content;
+  while (Buffer.byteLength(truncated, "utf8") > maxBytes - 20) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated + "…[turn truncated]";
+}
+
 /** Render Anthropic content (string or block array) to plain text. */
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
@@ -59,8 +71,8 @@ function textOf(content: unknown): string {
     .join("\n");
 }
 
-/** Render a single content block to text. */
-function renderBlock(block: unknown): string {
+/** Render a single content block to text. Exported for unit testing. */
+export function renderBlock(block: unknown): string {
   if (!block || typeof block !== "object") return "";
   const b = block as Record<string, unknown>;
   const type = b["type"];
@@ -75,11 +87,16 @@ function renderBlock(block: unknown): string {
     const input = b["input"];
     try {
       const inputStr = JSON.stringify(input);
-      const truncated =
-        inputStr.length > MAX_BLOCK_CHARS
-          ? inputStr.slice(0, MAX_BLOCK_CHARS) + "…[truncated]"
-          : inputStr;
-      return `[tool_use: ${name}] ${truncated}`;
+      let rendered = inputStr;
+      if (Buffer.byteLength(inputStr, "utf8") > MAX_BLOCK_BYTES) {
+        // Truncate by bytes, not by character count
+        let truncated = inputStr;
+        while (Buffer.byteLength(truncated, "utf8") > MAX_BLOCK_BYTES - 15) {
+          truncated = truncated.slice(0, -1);
+        }
+        rendered = truncated + "…[truncated]";
+      }
+      return `[tool_use: ${name}] ${rendered}`;
     } catch {
       // Circular or unserializable input; render safely.
       return `[tool_use: ${name}] [unserializable input]`;
@@ -94,11 +111,15 @@ function renderBlock(block: unknown): string {
     } else if (Array.isArray(contentValue)) {
       rendered = contentValue.map((c) => renderBlock(c)).filter((t): t is string => t !== "").join("\n");
     }
-    const truncated =
-      rendered.length > MAX_BLOCK_CHARS
-        ? rendered.slice(0, MAX_BLOCK_CHARS) + "…[truncated]"
-        : rendered;
-    return `[tool_result] ${truncated}`;
+    if (Buffer.byteLength(rendered, "utf8") > MAX_BLOCK_BYTES) {
+      // Truncate by bytes, not by character count
+      let truncated = rendered;
+      while (Buffer.byteLength(truncated, "utf8") > MAX_BLOCK_BYTES - 15) {
+        truncated = truncated.slice(0, -1);
+      }
+      rendered = truncated + "…[truncated]";
+    }
+    return `[tool_result] ${rendered}`;
   }
 
   // Unknown block types are skipped.
@@ -137,35 +158,74 @@ export async function emitCapture(opts: EmitCaptureOptions): Promise<void> {
       messages.push({ role: "assistant", content: opts.assistantText });
     }
 
-    // Truncate at turn granularity to fit within payload cap.
+    // Truncate at turn granularity to fit within payload cap (measured in UTF-8 bytes).
     let transcript = messages;
     let elisionMarker = "";
-    const basePayload = {
-      session_id: sessionId,
-      tool_calls: [] as unknown[],
+    let turnTruncated = false;
+
+    // Build the final payload and check if it fits.
+    const buildPayload = (msgs: typeof messages) => {
+      const payload = {
+        session_id: sessionId,
+        messages: msgs,
+        tool_calls: [] as unknown[],
+      };
+      return JSON.stringify(payload);
     };
-    let payloadStr = JSON.stringify({ ...basePayload, messages: transcript });
+
+    let finalPayload = buildPayload(transcript);
+    const payloadBytes = Buffer.byteLength(finalPayload, "utf8");
 
     // If transcript exceeds cap, keep newest turns and drop from oldest.
-    if (payloadStr.length > MAX_TRANSCRIPT_BYTES) {
+    if (payloadBytes > MAX_TRANSCRIPT_BYTES) {
       transcript = [];
+      let droppedCount = messages.length;
+
       for (let i = messages.length - 1; i >= 0; i--) {
-        const testTranscript = [messages[i], ...transcript];
-        const testPayload = JSON.stringify({ ...basePayload, messages: testTranscript });
-        if (testPayload.length <= MAX_TRANSCRIPT_BYTES) {
+        const candidate = messages[i];
+        const testTranscript = [candidate, ...transcript];
+
+        // Check if adding this turn would fit.
+        let testPayload = buildPayload(testTranscript);
+        let testBytes = Buffer.byteLength(testPayload, "utf8");
+
+        if (testBytes <= MAX_TRANSCRIPT_BYTES) {
           transcript = testTranscript;
+          droppedCount = i;
         } else {
-          // Adding this turn would exceed the cap; stop here.
-          const droppedCount = i + 1;
-          elisionMarker = `[${droppedCount} turns elided]`;
-          break;
+          // This turn would cause overflow. Check if it's the newest turn (i === messages.length - 1).
+          if (i === messages.length - 1 && transcript.length === 0) {
+            // Newest turn alone exceeds cap. Keep it but truncate its content.
+            const truncatedContent = truncateTurnContent(candidate.content, MAX_TRANSCRIPT_BYTES / 2);
+            transcript = [{ role: candidate.role, content: truncatedContent }];
+            turnTruncated = true;
+            droppedCount = i;
+            break;
+          } else {
+            // Older turn would overflow; stop here.
+            break;
+          }
         }
       }
-      // Prepend elision marker to the transcript if any turns were dropped.
-      if (elisionMarker) {
+
+      // Ensure transcript never starts with assistant message (need user first).
+      if (transcript.length > 0 && transcript[0].role === "assistant") {
+        transcript = transcript.slice(1);
+        droppedCount += 1;
+      }
+
+      // Add elision marker if turns were dropped and we have content.
+      if (droppedCount > 0 && transcript.length > 0 && !turnTruncated) {
+        elisionMarker = `[${droppedCount} turns elided]`;
+        transcript = [{ role: "system", content: elisionMarker }, ...transcript];
+      } else if (turnTruncated && transcript.length > 0) {
+        elisionMarker = `[${droppedCount} turns elided, newest turn truncated]`;
         transcript = [{ role: "system", content: elisionMarker }, ...transcript];
       }
     }
+
+    // Rebuild final payload to ensure it's under the cap.
+    finalPayload = buildPayload(transcript);
 
     await doFetch(`${opts.config.baseUrl}/capture/transcript`, {
       method: "POST",
@@ -174,11 +234,7 @@ export async function emitCapture(opts: EmitCaptureOptions): Promise<void> {
         "X-Vex-Key": opts.config.apiKey,
         "X-Vex-Agent": opts.config.agentId,
       },
-      body: JSON.stringify({
-        session_id: sessionId,
-        messages: transcript,
-        tool_calls: [],
-      }),
+      body: finalPayload,
     });
   } catch {
     // Best-effort by contract. A capture failure must never surface to

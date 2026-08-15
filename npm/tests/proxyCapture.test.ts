@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { conversationSessionId, emitCapture } from "../src/proxy/capture.js";
+import { conversationSessionId, emitCapture, renderBlock } from "../src/proxy/capture.js";
 
 const CONFIG = { apiKey: "k", agentId: "a", baseUrl: "https://api.example" };
 
@@ -240,52 +240,47 @@ test("array-form tool_result.content recursion: nested blocks are rendered", asy
   assert.match(content, /part 2/, "should render second nested block");
 });
 
-test("unserializable tool_use.input renders safely without throwing", async () => {
-  let seenBody: any = null;
+test("renderBlock with circular reference returns safe string without throwing", () => {
+  // Create a circular object that JSON.stringify cannot handle.
+  const circularObj: any = { a: 1 };
+  circularObj.self = circularObj;
 
-  // Create an input that will fail JSON.stringify when called inside emitCapture's renderBlock.
-  // We can't pass circular objects through the test's body() function, so we test indirectly:
-  // ensure that a tool_use with a serializable input is rendered correctly (the happy path),
-  // and trust the try/catch in renderBlock handles failures.
-  // This test verifies the [unserializable input] fallback code path works by checking
-  // that emitCapture never throws even if rendering fails.
-
-  await emitCapture({
-    config: CONFIG,
-    agent: "codex",
-    requestBody: body([
-      { role: "user", content: "test" },
-      {
-        role: "assistant",
-        content: [
-          { type: "tool_use", name: "Tool1", id: "t1", input: { ok: "data" } },
-          { type: "tool_use", name: "Tool2", id: "t2", input: null },
-        ],
-      },
-    ]),
-    assistantText: "done",
-    fetchImpl: (async (url: any, init: any) => {
-      seenBody = JSON.parse(init.body);
-      return new Response("{}", { status: 200 });
-    }) as unknown as typeof fetch,
+  // renderBlock should catch the error and return a safe string.
+  const result = renderBlock({
+    type: "tool_use",
+    name: "BadTool",
+    id: "t1",
+    input: circularObj,
   });
 
-  // Should render both tool_use blocks without throwing
-  const content = seenBody.messages[1].content;
-  assert.match(content, /\[tool_use: Tool1\]/, "should contain first tool_use");
-  assert.match(content, /\[tool_use: Tool2\]/, "should contain second tool_use");
-  assert.ok(content.includes("ok") || content.includes("null"), "should render tool inputs");
+  assert.match(result, /\[tool_use: BadTool\]/, "should contain tool_use marker");
+  assert.match(result, /\[unserializable input\]/, "should indicate unserializable input");
+  assert.ok(typeof result === "string", "should return a string");
+});
+
+test("renderBlock with BigInt input returns safe string without throwing", () => {
+  // BigInt cannot be JSON.stringify'd.
+  const bigIntInput = BigInt("9999999999999999999999999999");
+
+  const result = renderBlock({
+    type: "tool_use",
+    name: "MathTool",
+    id: "t1",
+    input: bigIntInput,
+  });
+
+  assert.match(result, /\[tool_use: MathTool\]/, "should contain tool_use marker");
+  assert.match(result, /\[unserializable input\]/, "should indicate unserializable input");
+  assert.ok(typeof result === "string", "should return a string");
 });
 
 test("total transcript payload cap: large history is truncated to fit within 256 KB", async () => {
-  // Create a history large enough to exceed 256 KB
+  // Create a history large enough to exceed 256 KB with ASCII content.
   const messages: unknown[] = [];
   messages.push({ role: "user", content: "start" });
   messages.push({ role: "assistant", content: "ok" });
 
   // Add many large turns to definitely exceed the cap.
-  // 256 KB = 262,144 bytes; each message is ~5000 chars, so we need ~50+ messages to exceed.
-  // Use 100 turns to be safe.
   for (let i = 0; i < 100; i++) {
     messages.push({ role: "user", content: "u".repeat(3000) });
     messages.push({ role: "assistant", content: "a".repeat(3000) });
@@ -305,7 +300,7 @@ test("total transcript payload cap: large history is truncated to fit within 256
     }) as unknown as typeof fetch,
   });
 
-  // Payload should be under 256 KB
+  // Payload should be under 256 KB (measured in UTF-8 bytes, not string length)
   const payloadBytes = Buffer.byteLength(seenBodyStr, "utf8");
   assert.ok(payloadBytes < 256 * 1024, `payload ${payloadBytes} bytes should be under 256 KB`);
 
@@ -319,6 +314,46 @@ test("total transcript payload cap: large history is truncated to fit within 256
   );
   assert.ok(hasElisionMarker, "should have elision marker when turns are dropped");
 
-  // Most messages should be dropped (not all 200+ messages)
+  // Most messages should be dropped
   assert.ok(seenBody.messages.length < 100, "should have dropped many messages to fit under cap");
+});
+
+test("total transcript payload cap: multi-byte content is measured in UTF-8 bytes not .length", async () => {
+  // Create a history with multi-byte content to verify byte-level measurement.
+  // This test verifies the fix for Critical 1: using Buffer.byteLength instead of .length.
+  const messages: unknown[] = [];
+  messages.push({ role: "user", content: "start" });
+  messages.push({ role: "assistant", content: "ok" });
+
+  // Add turns with Chinese characters (each ~3 bytes in UTF-8).
+  // "中".repeat(1000) is 1000 chars but ~3000 bytes, so will trigger truncation
+  // at the byte level.
+  for (let i = 0; i < 80; i++) {
+    messages.push({ role: "user", content: "中".repeat(1000) });
+    messages.push({ role: "assistant", content: "文".repeat(1000) });
+  }
+
+  let seenBody: any = null;
+  let seenBodyStr = "";
+  await emitCapture({
+    config: CONFIG,
+    agent: "codex",
+    requestBody: body(messages),
+    assistantText: "完成",
+    fetchImpl: (async (url: any, init: any) => {
+      seenBodyStr = init.body;
+      seenBody = JSON.parse(init.body);
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+
+  // Payload must be under 256 KB (byte-level measurement)
+  const payloadBytes = Buffer.byteLength(seenBodyStr, "utf8");
+  assert.ok(
+    payloadBytes < 256 * 1024,
+    `multi-byte payload ${payloadBytes} bytes should be under 256 KB (not ${seenBodyStr.length} chars)`
+  );
+
+  // Should have dropped many turns (because byte size is larger than char count)
+  assert.ok(seenBody.messages.length < 100, "should have dropped many turns");
 });
