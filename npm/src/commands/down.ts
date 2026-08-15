@@ -12,12 +12,44 @@ import { banner, ok, runSteps } from "../ui.js";
 import { composeDown, resolveComposeBin } from "../docker.js";
 import { runtimeDir } from "../compose.js";
 import { allAdapters } from "../adapters/types.js";
+import { readCloudConfig } from "../cloudConfig.js";
+import { stopProxy } from "../proxy/stop.js";
 
-export async function down(): Promise<void> {
+export type DownOptions = {
+  /** Single-line writer for the cloud path. Defaults to stdout. */
+  log?: (line: string) => void;
+  /** Injection seams; production leaves them undefined. */
+  readCloudConfigFn?: typeof readCloudConfig;
+  stopProxyFn?: typeof stopProxy;
+  resolveComposeBinFn?: typeof resolveComposeBin;
+  composeDownFn?: typeof composeDown;
+};
+
+/**
+ * Stop whatever Klio is running.
+ *
+ * "Whatever Klio is running" is not the same thing in the two modes, and
+ * reaching for compose unconditionally is wrong in exactly the way it
+ * was wrong in `ensure`, `doctor` and `uninit`: cloud has no stack at
+ * all — one detached `proxy serve` process — so a Docker-free machine
+ * got a Docker error while the proxy kept listening. The mode signal is
+ * the same one every other command uses: cloud init writes
+ * ~/.klio/config.json, local init never does.
+ */
+export async function down(opts: DownOptions = {}): Promise<void> {
+  const log = opts.log ?? ((line: string) => process.stdout.write(line + "\n"));
   banner("Stopping Klio");
-  const bin = await resolveComposeBin();
+
+  if ((opts.readCloudConfigFn ?? readCloudConfig)() !== null) {
+    const result = await (opts.stopProxyFn ?? stopProxy)();
+    log(`  ${result.stopped ? "✓" : result.wasRunning ? "!" : "—"} ${result.detail}`);
+    log("  Cloud mode keeps no local stack — your memory lives on the hosted brain.");
+    return;
+  }
+
+  const bin = await (opts.resolveComposeBinFn ?? resolveComposeBin)();
   const start = Date.now();
-  await composeDown(bin, runtimeDir(), false);
+  await (opts.composeDownFn ?? composeDown)(bin, runtimeDir(), false);
   ok("stack stopped (data preserved)", Date.now() - start);
 }
 
