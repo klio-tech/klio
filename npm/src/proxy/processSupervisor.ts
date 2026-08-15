@@ -89,6 +89,16 @@ export function spawnProxy(opts: SpawnProxyOptions): number {
   // A failure to record the pid must not stop the proxy from being
   // spawned or `ensure` from reporting the truth of the health probe —
   // the pid file is bookkeeping, not the source of truth.
+  //
+  // NOTE for anyone tempted to read this file back later (e.g. to give
+  // `klio doctor` a "last known pid" line): the value written here can
+  // easily name a process that died within the second. Nothing in
+  // `reviveCloud` currently reads it back — the EADDRINUSE loser of a
+  // concurrent `ensure` race writes its own pid here and then exits
+  // almost immediately, leaving a pid on disk for a process that no
+  // longer exists. That's harmless today because nothing consults this
+  // file, but a future reader must treat it as a hint, never as proof
+  // of anything currently running.
   try {
     write(pidFilePath(opts.home), String(pid));
   } catch {

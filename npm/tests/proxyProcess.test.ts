@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import type { CloudConfig } from "../src/cloudConfig.js";
@@ -157,32 +157,59 @@ test("ensure: cloud mode does NOT spawn when the health probe succeeds", async (
 // nothing actually listening on the proxy port — `isProxyRunning(pid)`
 // returns true because signal 0 reaches the unrelated process, so a
 // pid-gated `reviveCloud` returned early without ever spawning, and
-// `ensure` reported failure forever on every 60s tick. `spawnProxy` no
-// longer consults the pid at all — this test proves it's unconditional
-// once the probe has failed. `isProxyRunning` is exercised here purely
-// to state the scenario (a real, alive, unrelated pid); the command
-// layer must not call it as a gate.
-test("ensure: a live but unrelated recorded pid does not block revival", async () => {
-  const unrelatedButLivePid = process.pid; // definitely alive, definitely not our proxy
-  assert.equal(isProxyRunning(unrelatedButLivePid), true);
+// `ensure` reported failure forever on every 60s tick.
+//
+// This is deliberately NOT driven through a mock seam — the whole bug
+// was that the old code fell through to `readPid()`'s and
+// `isProxyRunning()`'s REAL, unmocked defaults (`pidFilePath()` /
+// `homedir()` / `process.kill`) whenever no override was injected,
+// which is exactly what a clean test (or a clean CI machine) hands it.
+// A test that injects fake pid seams can't reproduce that — it would
+// pass against the pre-fix code and the post-fix code alike, proving
+// nothing. So this test redirects HOME at a temp directory, writes a
+// REAL pid file there naming a REAL, currently-alive, definitely-not-
+// our-proxy process (`process.pid` — this test's own process), and
+// asserts `spawnProxy` is still called once the probe fails. Against
+// the pre-fix gate, `readPid()`/`isProxyRunning()` would find that
+// file via the real `homedir()` (which honours `$HOME`) and skip the
+// spawn; against the fix, nothing in `reviveCloud` reads the pid file
+// at all, so the spawn always happens.
+test("ensure: a failed probe always spawns, regardless of what a real pid file on disk says", async () => {
+  const tempHome = mkdtempSync(join(tmpdir(), "klio-proxy-realpid-"));
+  const originalHome = process.env["HOME"];
+  try {
+    const pidPath = pidFilePath(tempHome);
+    mkdirSync(dirname(pidPath), { recursive: true });
+    // `process.pid` is genuinely alive for the duration of this test
+    // and is definitely not a klio proxy — exactly the "recycled pid"
+    // scenario from the live repro.
+    writeFileSync(pidPath, String(process.pid), "utf8");
+    assert.equal(isProxyRunning(process.pid), true); // sanity-check the fixture
 
-  let spawnCalls = 0;
-  const probes = [dead, alive];
-  let probeCall = 0;
+    process.env["HOME"] = tempHome; // redirects the real, unmocked homedir()
 
-  const code = await runProxyCommand({
-    args: ["ensure"],
-    log: () => {},
-    probeProxyImpl: (() => probes[Math.min(probeCall++, probes.length - 1)]()) as any,
-    readCloudConfigImpl: () => CLOUD_CONFIG,
-    spawnProxyImpl: (() => {
-      spawnCalls++;
-      return 4321;
-    }) as any,
-  });
+    let spawnCalls = 0;
+    const probes = [dead, alive];
+    let probeCall = 0;
 
-  assert.equal(spawnCalls, 1);
-  assert.equal(code, 0);
+    const code = await runProxyCommand({
+      args: ["ensure"],
+      log: () => {},
+      probeProxyImpl: (() => probes[Math.min(probeCall++, probes.length - 1)]()) as any,
+      readCloudConfigImpl: () => CLOUD_CONFIG,
+      spawnProxyImpl: (() => {
+        spawnCalls++;
+        return 4321;
+      }) as any,
+    });
+
+    assert.equal(spawnCalls, 1);
+    assert.equal(code, 0);
+  } finally {
+    if (originalHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = originalHome;
+    rmSync(tempHome, { recursive: true, force: true });
+  }
 });
 
 test("ensure: cloud mode reports failure (exit 1) when the proxy never comes up", async () => {
