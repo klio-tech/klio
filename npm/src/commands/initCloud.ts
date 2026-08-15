@@ -30,10 +30,12 @@ import { PROXY_PROBE_URL } from "../proxy/constants.js";
 import { spawnProxy, type SpawnProxyOptions } from "../proxy/processSupervisor.js";
 import {
   installSupervisor,
+  probeProxy,
   resolveKlioCommand,
   type InstallResult,
 } from "../proxy/supervisor.js";
 import {
+  describeTradeoffs,
   describeWiring,
   unwireProxy,
   wireProxy,
@@ -175,8 +177,17 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   const anyProxyableAgent =
     detectedNames.has("claude-code") || detectedNames.has("codex");
 
+  // The trade-offs (MCP Tool Search, Remote Control) are only relevant
+  // when we are about to ask — printed BEFORE the prompt so the user
+  // decides with the costs in front of them, not after. Guarded on
+  // `anyProxyableAgent` so a machine with nothing to offer the proxy to
+  // sees no extra output, same as before this feature existed.
+  if (anyProxyableAgent) {
+    describeTradeoffs(log);
+  }
+
   const proxyOffer = await maybeOfferProxy({
-    ask: (message) => promptFn({ message }),
+    ask: buildProxyAsk(promptFn),
     anyProxyableAgent,
     wire: () => wireProxyStack({ log }),
   });
@@ -209,6 +220,14 @@ export type OfferProxyOptions = {
   wire: () => Promise<void>;
 };
 
+/**
+ * `enabled` is false either because the user declined or because
+ * `wire()` threw — `error` distinguishes the two. Note that a
+ * *supervisor* install failure specifically (step 2 of `wireProxyStack`)
+ * does NOT show up here: it is non-fatal by design (proxy/supervisor.ts)
+ * and is reported only through the `log()` lines `wireProxyStack` writes
+ * while wiring, not through this result.
+ */
 export type OfferProxyResult = { enabled: boolean; error?: string };
 
 /**
@@ -243,6 +262,43 @@ export async function maybeOfferProxy(
   }
 }
 
+/**
+ * Build the `ask` callback `maybeOfferProxy` calls, wired through the
+ * real `prompt()` helper.
+ *
+ * The single, load-bearing thing this does is pass `default: "n"`.
+ * Without it, `prompt()` treats an empty line as invalid input when no
+ * default is set (prompt.ts: `if (!final && !opts.default)`) and loops
+ * back to read another line — which breaks two ways:
+ *
+ *   - Interactive: a bare Enter re-prints "value required" and asks
+ *     again, so the user can never simply hit Enter to decline — the
+ *     headline requirement of this feature.
+ *   - Non-interactive (piped/closed stdin): once the stream ends,
+ *     `readLine()` resolves `""` immediately and forever (see
+ *     prompt.ts's `handleEnd`), so the loop spins without ever
+ *     yielding a value that satisfies `!final && !opts.default` —
+ *     a genuine hang that would brick `npx klio init` under CI or any
+ *     piped input.
+ *
+ * With `default: "n"`, an empty line resolves immediately to `"n"`,
+ * which `maybeOfferProxy` already treats as a decline.
+ *
+ * Exported (rather than inlined at the `initCloud` call site) so the
+ * unit suite can drive this exact call shape through the REAL
+ * `prompt()` implementation with a closed stream, instead of asserting
+ * against a mocked `ask` that could never have caught this bug.
+ */
+export function buildProxyAsk(
+  promptFn: (opts: {
+    message: string;
+    default?: string;
+    mask?: boolean;
+  }) => Promise<string>,
+): (message: string) => Promise<string> {
+  return (message: string) => promptFn({ message, default: "n" });
+}
+
 /** Inputs to `wireProxyStack`. Every collaborator is injectable for tests. */
 export type WireProxyStackOptions = {
   log: (line: string) => void;
@@ -252,6 +308,13 @@ export type WireProxyStackOptions = {
     klioCommand: string[],
   ) => Promise<InstallResult>;
   spawnProxyFn?: (opts: SpawnProxyOptions) => number;
+  /**
+   * Health probe used to confirm the proxy is actually answering after
+   * `spawnProxy` returns. Defaults to the real `probeProxy` from
+   * proxy/supervisor.ts, probing the real 127.0.0.1 proxy port. Tests
+   * override this to point at a fake listener instead.
+   */
+  probeProxyFn?: () => Promise<{ alive: boolean; detail: string }>;
   resolveKlioCommandFn?: (
     argv1?: string,
     execPath?: string,
@@ -259,6 +322,12 @@ export type WireProxyStackOptions = {
   ) => string[];
   cliPath?: string;
   version?: string;
+  /** Reprobe attempts after spawning, before declaring step 3 failed. */
+  probeAttempts?: number;
+  /** Delay between reprobe attempts, in ms. */
+  probeIntervalMs?: number;
+  /** Injectable delay. Defaults to a real `setTimeout`-backed sleep. */
+  sleepFn?: (ms: number) => Promise<void>;
 };
 
 /**
@@ -280,10 +349,27 @@ export type WireProxyStackOptions = {
  *      install is reported and we proceed — rolling back working agent
  *      wiring over a reboot-resilience gap would be a worse outcome for
  *      the user than the gap itself.
- *   3. `spawnProxy` failing is the worst case this function can produce:
- *      agents would be pointed at 127.0.0.1 with nothing listening.
- *      Wiring is rolled back with `unwireProxy` before the failure is
- *      reported, so an agent is never left pointed at a dead port.
+ *   3. `spawnProxy` failing — including SILENTLY, by returning a pid for
+ *      a process that never actually binds the port — is the worst case
+ *      this function can produce: agents would be pointed at 127.0.0.1
+ *      with nothing listening. A returned pid proves nothing:
+ *      `spawnProxy` (processSupervisor.ts) detaches a new process and
+ *      returns its pid the instant the OS forks it, and its own
+ *      `child.on("error")` listener only ever sees SPAWN-level failures
+ *      (e.g. a missing binary) — never the child's own asynchronous
+ *      `EADDRINUSE` from inside its `server.listen()`. So, exactly like
+ *      this codebase's own `ensure()` (commands/proxy.ts) does after a
+ *      revive, we reprobe after spawning and treat "still not
+ *      answering" as this step's real failure signal. Wiring is rolled
+ *      back with `unwireProxy` on either kind of failure (the spawn
+ *      call throwing, or the reprobe never going green), so an agent is
+ *      never left pointed at a dead port.
+ *
+ * `unwireProxy` is itself per-agent-isolated and can fail for one agent
+ * while succeeding for another. Both rollback call sites inspect its
+ * result: if the rollback was itself incomplete, the thrown message
+ * says exactly which agent(s) are still pointed at the proxy rather
+ * than unconditionally claiming a clean undo.
  */
 export async function wireProxyStack(
   opts: WireProxyStackOptions,
@@ -293,20 +379,24 @@ export async function wireProxyStack(
   const unwireProxyFn = opts.unwireProxyFn ?? unwireProxy;
   const installSupervisorFn = opts.installSupervisorFn ?? installSupervisor;
   const spawnProxyFn = opts.spawnProxyFn ?? spawnProxy;
+  const probeProxyFn = opts.probeProxyFn ?? (() => probeProxy());
   const resolveKlioCommandFn = opts.resolveKlioCommandFn ?? resolveKlioCommand;
   const cliPath = opts.cliPath ?? resolve(process.argv[1] ?? "");
+  // Mirrors commands/proxy.ts's `ensure()`: 10 attempts × 500ms ≈ 5s of
+  // grace for the proxy to bind before we give up on it.
+  const probeAttempts = opts.probeAttempts ?? 10;
+  const probeIntervalMs = opts.probeIntervalMs ?? 500;
+  const sleepFn =
+    opts.sleepFn ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
   // Step 1 — point every detected agent at the local proxy.
   const wiring = wireProxyFn({ log });
   describeWiring(wiring, log);
   if (wiring.errors.length > 0) {
-    unwireProxyFn({ log });
     const detail = wiring.errors
       .map((e) => `${e.agent}: ${e.message}`)
       .join("; ");
-    throw new Error(
-      `proxy wiring failed (${detail}) — rolled back, nothing was left pointed at the proxy`,
-    );
+    throw new Error(describeRollback(unwireProxyFn({ log }), `proxy wiring failed (${detail})`));
   }
 
   // Step 2 — install the supervisor. Non-fatal by design; see the
@@ -320,17 +410,55 @@ export async function wireProxyStack(
       : `    ! ${supervisor.detail}`,
   );
 
-  // Step 3 — start the proxy process itself.
+  // Step 3 — start the proxy process itself, then confirm it is
+  // actually answering before declaring victory. See the doc comment
+  // above for why the pid alone is not proof.
+  let pid: number;
   try {
-    const pid = spawnProxyFn({ cliPath });
-    log(`    · proxy process started (pid ${pid})`);
+    pid = spawnProxyFn({ cliPath });
   } catch (err) {
-    unwireProxyFn({ log });
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `proxy failed to start (${message}) — rolled back, nothing points at 127.0.0.1`,
+      describeRollback(unwireProxyFn({ log }), `proxy failed to start (${message})`),
     );
   }
+  log(`    · proxy process spawned (pid ${pid})`);
+
+  let alive = false;
+  for (let attempt = 0; attempt < probeAttempts && !alive; attempt++) {
+    await sleepFn(probeIntervalMs);
+    const probe = await probeProxyFn();
+    alive = probe.alive;
+  }
+  if (!alive) {
+    throw new Error(
+      describeRollback(
+        unwireProxyFn({ log }),
+        "proxy did not answer after starting (a busy port or a crash on boot are the usual causes)",
+      ),
+    );
+  }
+  log("    · proxy is answering");
+}
+
+/**
+ * Compose a rollback outcome into a thrown message. `unwireProxy`
+ * (wiring.ts) is per-agent-isolated and can itself fail for one agent
+ * while succeeding for another — a double failure. Silently claiming a
+ * clean rollback in that case would be dishonest exactly where honesty
+ * about what is still applied matters most, so we name what's still
+ * pointed at the proxy instead.
+ */
+function describeRollback(undone: WireProxyResult, reason: string): string {
+  if (undone.errors.length === 0) {
+    return `${reason} — rolled back, nothing was left pointed at the proxy`;
+  }
+  const detail = undone.errors.map((e) => `${e.agent}: ${e.message}`).join("; ");
+  return (
+    `${reason} — rollback ALSO failed (${detail}). ` +
+    `${undone.errors.map((e) => e.agent).join(", ")} may still be pointed at the proxy — ` +
+    "run `klio uninit` to finish removing it."
+  );
 }
 
 /**
