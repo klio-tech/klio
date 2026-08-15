@@ -318,6 +318,149 @@ test("total transcript payload cap: large history is truncated to fit within 256
   assert.ok(seenBody.messages.length < 100, "should have dropped many messages to fit under cap");
 });
 
+const MAX_TRANSCRIPT_BYTES = 256 * 1024;
+
+/** Capture the exact string handed to fetch, so the assertion sees what ships. */
+async function capturePayload(
+  messages: unknown[],
+  assistantText: string,
+): Promise<{ raw: string; parsed: any; called: boolean }> {
+  let raw = "";
+  let called = false;
+  await emitCapture({
+    config: CONFIG,
+    agent: "codex",
+    requestBody: body(messages),
+    assistantText,
+    fetchImpl: (async (_url: any, init: any) => {
+      called = true;
+      raw = String(init.body);
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+  return { raw, parsed: raw === "" ? null : JSON.parse(raw), called };
+}
+
+/** Concatenated conversation text, excluding the synthetic system elision marker. */
+function conversationText(parsed: any): string {
+  return parsed.messages
+    .filter((m: any) => m.role !== "system")
+    .map((m: any) => String(m.content ?? ""))
+    .join("\n");
+}
+
+test("oversized newest USER turn is kept and truncated, never emptied", async () => {
+  const huge = "U".repeat(300 * 1024);
+  const { raw, parsed, called } = await capturePayload(
+    [
+      { role: "user", content: "start" },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: huge },
+    ],
+    "", // no trailing assistant text, so the oversized user turn is newest
+  );
+
+  assert.equal(called, true, "capture should still be attempted");
+  assert.ok(
+    Buffer.byteLength(raw, "utf8") <= MAX_TRANSCRIPT_BYTES,
+    `payload ${Buffer.byteLength(raw, "utf8")} bytes must be within the cap`,
+  );
+  const text = conversationText(parsed);
+  assert.ok(text.includes("UUUUUUUUUU"), "the oversized user turn's content must survive truncated");
+  assert.ok(text.length > 1000, "payload must not be content-empty");
+});
+
+test("oversized newest ASSISTANT turn is kept and truncated, never emptied", async () => {
+  const huge = "A".repeat(300 * 1024);
+  const { raw, parsed, called } = await capturePayload(
+    [
+      { role: "user", content: "start" },
+      { role: "assistant", content: "ok" },
+    ],
+    huge, // the model's own oversized response is the newest turn
+  );
+
+  assert.equal(called, true, "capture should still be attempted");
+  assert.ok(
+    Buffer.byteLength(raw, "utf8") <= MAX_TRANSCRIPT_BYTES,
+    `payload ${Buffer.byteLength(raw, "utf8")} bytes must be within the cap`,
+  );
+  assert.ok(parsed.messages.length > 0, "transcript must not be empty");
+  const text = conversationText(parsed);
+  assert.ok(text.includes("AAAAAAAAAA"), "the oversized assistant turn's content must survive truncated");
+  assert.ok(text.length > 1000, "payload must not be content-empty");
+});
+
+test("a mid-exchange cut leaves a non-empty transcript that begins at a user turn", async () => {
+  // Sweep turn sizes so the cut lands on both parities of the exchange.
+  for (let size = 2000; size < 2020; size++) {
+    const messages: unknown[] = [];
+    for (let i = 0; i < 120; i++) {
+      messages.push({ role: "user", content: `q${i} ` + "u".repeat(size) });
+      messages.push({ role: "assistant", content: `a${i} ` + "a".repeat(size) });
+    }
+
+    const { raw, parsed } = await capturePayload(messages, "final answer");
+
+    assert.ok(
+      Buffer.byteLength(raw, "utf8") <= MAX_TRANSCRIPT_BYTES,
+      `size ${size}: payload ${Buffer.byteLength(raw, "utf8")} bytes must be within the cap`,
+    );
+    const conversation = parsed.messages.filter((m: any) => m.role !== "system");
+    assert.ok(conversation.length > 0, `size ${size}: transcript must not be empty after a cut`);
+    assert.equal(conversation[0].role, "user", `size ${size}: transcript must begin at a user turn`);
+  }
+});
+
+test("the elision marker cannot push the payload past the cap", async () => {
+  // Many tiny turns: the loop fills right up to the cap, then the marker is added.
+  const messages: unknown[] = [];
+  for (let i = 0; i < 6000; i++) {
+    messages.push({ role: "user", content: `u${i}-` + "x".repeat(10) });
+    messages.push({ role: "assistant", content: `a${i}-` + "y".repeat(10) });
+  }
+
+  const { raw, parsed } = await capturePayload(messages, "done");
+
+  const bytes = Buffer.byteLength(raw, "utf8");
+  assert.ok(bytes <= MAX_TRANSCRIPT_BYTES, `payload ${bytes} bytes must be within the cap`);
+  assert.ok(parsed.messages.length > 0, "transcript must not be empty");
+});
+
+test("truncation never splits a surrogate pair", async () => {
+  const huge = "\u{1F600}".repeat(150_000);
+  const { raw, parsed } = await capturePayload(
+    [
+      { role: "user", content: "start" },
+      { role: "assistant", content: "ok" },
+    ],
+    huge,
+  );
+
+  const bytes = Buffer.byteLength(raw, "utf8");
+  assert.ok(bytes <= MAX_TRANSCRIPT_BYTES, `payload ${bytes} bytes must be within the cap`);
+
+  // The wire form must not carry escaped lone surrogates.
+  assert.ok(
+    !/\\u[dD][89abAB][0-9a-fA-F]{2}/.test(raw),
+    "serialized payload must not contain escaped lone surrogates",
+  );
+
+  // And the decoded content must contain no unpaired surrogate code unit.
+  const text = conversationText(parsed);
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      assert.ok(next >= 0xdc00 && next <= 0xdfff, `lone high surrogate at index ${i}`);
+      i++;
+    } else {
+      assert.ok(!(code >= 0xdc00 && code <= 0xdfff), `lone low surrogate at index ${i}`);
+    }
+  }
+  assert.ok(text.includes("\u{1F600}"), "truncated content must still carry whole emoji");
+});
+
 test("total transcript payload cap: multi-byte content is measured in UTF-8 bytes not .length", async () => {
   // Create a history with multi-byte content to verify byte-level measurement.
   // This test verifies the fix for Critical 1: using Buffer.byteLength instead of .length.
