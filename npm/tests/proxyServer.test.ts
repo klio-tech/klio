@@ -34,7 +34,7 @@ async function withServer(
 async function withRealUpstream(
   upstreamHandler: http.RequestListener,
   serverOpts: Omit<Parameters<typeof createProxyServer>[0], "upstreams" | "fetchImpl">,
-  run: (proxyBase: string) => Promise<void>,
+  run: (proxyBase: string, proxyServer: http.Server) => Promise<void>,
 ) {
   const upstream = http.createServer(upstreamHandler);
   await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
@@ -48,7 +48,7 @@ async function withRealUpstream(
   const { port } = proxy.address() as AddressInfo;
 
   try {
-    await run(`http://127.0.0.1:${port}`);
+    await run(`http://127.0.0.1:${port}`, proxy);
   } finally {
     await new Promise<void>((r) => proxy.close(() => r()));
     await new Promise<void>((r) => upstream.close(() => r()));
@@ -666,3 +666,206 @@ test("a gzip-compressed upstream response is forwarded without a stale content-e
     },
   );
 });
+
+// Finding 1: a client abort/RST GENUINELY mid-upload on the OVER-CAP
+// path must eventually tear the upstream connection down — bounded,
+// not left to Node's multi-minute default `server.requestTimeout`.
+//
+// Two things make this a real differentiator rather than a test that
+// passes either way:
+//
+//   * A raw `http.request()` with PACED writes (one 1 MB chunk every
+//     100ms), not `fetch()` with a synchronously-fully-enqueued
+//     `ReadableStream`. A fully-enqueued stream gets handed to the OS
+//     almost instantly over loopback, so by the time an abort fires
+//     there is nothing left "mid-upload" to interrupt — confirmed:
+//     that version passed even against the OLD, lazy-attachment code,
+//     because loopback delivers the whole body before the abort ever
+//     lands. Pacing keeps the client genuinely still sending.
+//   * A DELIBERATELY SLOW upstream reader (resumes once every 100ms),
+//     so draining a multi-MB prefix through it takes seconds if
+//     nothing short-circuits it — this is what actually exercises the
+//     "still draining the prefix when the abort happens" window Finding
+//     1 describes. Without this throttle, the (untouched) prefix drains
+//     fast enough on its own that the old lazy-attachment code passes
+//     too — confirmed.
+//
+// The bound this actually achieves end-to-end, under this adversarial
+// combination, is single-digit SECONDS (the idle-timeout detector
+// alone fires in single-digit milliseconds; the rest of the time is
+// `undici`'s connection pooling actually releasing the socket — see
+// `server.ts`'s `LIVE_IDLE_TIMEOUT_MS` doc) — not milliseconds, but a
+// dramatic, bounded improvement over "reaped only by a multi-minute
+// default timeout." The poll window below is sized generously above
+// that measured latency, not tuned to the smallest window that happens
+// to pass.
+test(
+  "a client RST genuinely mid-upload on the over-cap path tears the upstream connection down within a bounded window",
+  { timeout: 20000 },
+  async () => {
+    let upstreamClosedAtMs = -1;
+    let upstreamReceivedBytes = 0;
+    const testStart = Date.now();
+
+    await withRealUpstream(
+      (req, res) => {
+        req.pause();
+        const timer = setInterval(() => req.resume(), 100);
+        req.on("data", (chunk: Buffer) => {
+          upstreamReceivedBytes += chunk.length;
+          req.pause(); // throttle: one burst per 100ms tick, not a free flow
+        });
+        req.on("close", () => {
+          if (upstreamClosedAtMs < 0) upstreamClosedAtMs = Date.now() - testStart;
+          clearInterval(timer);
+        });
+        req.on("end", () => {
+          clearInterval(timer);
+          res.writeHead(200);
+          res.end("{}");
+        });
+      },
+      { config: CONFIG, inject: false },
+      async (base) => {
+        const url = new URL(base);
+        const chunkSize = 1024 * 1024;
+        const totalChunks = 20; // well over the 10 MB cap
+
+        const clientReq = http.request({
+          host: url.hostname,
+          port: url.port,
+          path: "/v1/models",
+          method: "POST",
+        });
+        clientReq.on("error", () => {
+          // A destroyed socket mid-write is expected to error here;
+          // that outcome is not what this test is checking.
+        });
+
+        let chunkIndex = 0;
+        function writeNext(): void {
+          if (chunkIndex >= totalChunks) {
+            clientReq.end();
+            return;
+          }
+          clientReq.write(Buffer.alloc(chunkSize, chunkIndex % 256));
+          chunkIndex += 1;
+          setTimeout(writeNext, 100);
+        }
+        writeNext();
+
+        // By 1.2s, ~12 chunks (12 MB — over the 10 MB cap) have gone
+        // out and ~8 more are still to come: genuinely mid-upload.
+        await new Promise((r) => setTimeout(r, 1200));
+        clientReq.socket?.destroy();
+
+        // Poll for the upstream connection closing. Bounded at 12s:
+        // comfortably above the ~6-8s this measures in practice (see
+        // the comment above the test), and still an order of magnitude
+        // under what draining the full buffered prefix through the
+        // throttled pipe would take on its own if nothing short-
+        // circuited it (many tens of seconds at ~640KB/s), let alone
+        // Node's multi-minute default `server.requestTimeout`.
+        const deadline = Date.now() + 12000;
+        while (upstreamClosedAtMs < 0 && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+
+        assert.ok(
+          upstreamClosedAtMs >= 0,
+          `upstream connection should have closed within 12s of the client RST ` +
+            `(received ${upstreamReceivedBytes} bytes before giving up) — ` +
+            `if this fails, the abort is only being noticed once the prefix fully drains`,
+        );
+      },
+    );
+  },
+);
+
+// Finding 2: an upstream that responds WITHOUT ever reading the (over-
+// cap) request body must not leave the client-facing socket open.
+// Without BufferedThenLive._destroy() tearing `live` down when the
+// wrapper itself is destroyed (which is what happens once undici
+// abandons an unfinished half-duplex request body after the response
+// has already arrived), the paused, still-unread client request just
+// sits there — reaped only by Node's ~5-minute default
+// server.requestTimeout, not by anything this proxy does.
+test(
+  "an upstream that responds early without reading the over-cap body does not leave the client socket open",
+  { timeout: 10000 },
+  async () => {
+    let clientSocketClosed = false;
+
+    await withRealUpstream(
+      (_req, res) => {
+        // Respond immediately without ever reading the request body —
+        // e.g. an upstream rejecting on headers alone (a 413 for a
+        // too-large request).
+        res.writeHead(413, { "content-type": "application/json" });
+        res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "too large" } }));
+      },
+      { config: CONFIG, inject: false },
+      async (base, proxyServer) => {
+        // Observe the raw client<->proxy socket alongside the proxy's
+        // own request handling. `http.Server` supports more than one
+        // "request" listener; this one only watches, never touches
+        // `req`/`res`.
+        proxyServer.on("request", (req) => {
+          req.socket.on("close", () => {
+            clientSocketClosed = true;
+          });
+        });
+
+        const chunkSize = 1024 * 1024;
+        const totalChunks = 15; // well over the 10 MB cap
+        const requestBody = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (let i = 0; i < totalChunks; i++) {
+              controller.enqueue(Buffer.alloc(chunkSize, i % 256));
+            }
+            controller.close();
+          },
+        });
+
+        const res = await fetch(`${base}/v1/models`, {
+          method: "POST",
+          body: requestBody,
+          // @ts-expect-error Node fetch requires duplex for a streamed body.
+          duplex: "half",
+        });
+        // The over-cap path sets `connection: close` on the outgoing
+        // request (see server.ts) so an abort can actually tear the
+        // upstream socket down rather than sitting pooled — a real,
+        // if uncommon, side effect of that is the upstream sometimes
+        // closing its end quickly enough to race the proxy's own
+        // still-in-flight write of the (intentionally unread, 15 MB)
+        // body, which the proxy correctly reports as a 502 rather than
+        // silently losing. Either outcome is a legitimate proxy
+        // response to "upstream responded without reading the body";
+        // what this test actually checks is what happens next.
+        assert.ok(
+          res.status === 413 || res.status === 502,
+          `expected the relayed 413 or the proxy's own 502 on a raced connection close, got ${res.status}`,
+        );
+        await res.text();
+
+        // Bounded window for the abandoned request body stream to be
+        // torn down. Without _destroy()/abandon() propagating to
+        // `live`, this socket is only ever reaped by Node's default
+        // 5-minute server.requestTimeout — nowhere near this window.
+        // 6s (not 3s) to absorb the occasional slower path on the
+        // raced-502 outcome above, where cleanup goes through a
+        // different event than the clean-413 case.
+        const deadline = Date.now() + 6000;
+        while (!clientSocketClosed && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        assert.ok(
+          clientSocketClosed,
+          "the client socket should close once the abandoned request body is torn down, " +
+            "not linger until the server's request timeout",
+        );
+      },
+    );
+  },
+);
