@@ -9,6 +9,7 @@ import {
   readProxyEnv,
   removeProxyEnv,
 } from "../src/proxy/claudeCodeProxy.js";
+import { describeTradeoffs } from "../src/proxy/wiring.js";
 import { readWiringState } from "../src/proxy/state.js";
 import { PROXY_BASE_URL } from "../src/proxy/constants.js";
 
@@ -282,4 +283,39 @@ test("readProxyEnv does not throw on malformed JSON", () => {
 
   const current = readProxyEnv(settings);
   assert.equal(current.ANTHROPIC_BASE_URL, null);
+});
+
+// --- the consent surface has to be TRUE -------------------------------
+//
+// `describeTradeoffs` is the informed-consent block: it is what the user
+// reads immediately before deciding whether to route every model call
+// through a process we installed. It said "This release is PASS-THROUGH
+// ONLY — it forwards traffic unchanged", which was true of the Python
+// proxy and is false of this one: on Anthropic's messages path this
+// proxy appends to `system` and captures the conversation. Being wrong
+// there is worse than being silent, and it printed directly above a
+// prompt that said the opposite.
+
+test("the trade-offs block does not claim pass-through only", () => {
+  const lines: string[] = [];
+  describeTradeoffs((l) => lines.push(l));
+  const text = lines.join("\n");
+
+  assert.doesNotMatch(text, /pass-?through only/i, `still claims pass-through only:\n${text}`);
+  assert.doesNotMatch(text, /forwards traffic\s*\n?\s*unchanged/i);
+  // It has to say what it actually does instead.
+  assert.match(text, /system/i, "must name the one field it modifies");
+  assert.match(text, /captur/i, "must disclose capture");
+  // And name the kill switches, so "off" is discoverable at the moment
+  // consent is given.
+  assert.match(text, /KLIO_PROXY_INJECT/);
+  assert.match(text, /KLIO_PROXY_CAPTURE/);
+});
+
+test("the trade-offs block is honest that Codex gets pass-through today", () => {
+  const lines: string[] = [];
+  describeTradeoffs((l) => lines.push(l));
+  const text = lines.join("\n");
+  assert.match(text, /codex/i);
+  assert.match(text, /responses/i, "must name the API Codex actually uses");
 });

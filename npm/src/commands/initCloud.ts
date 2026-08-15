@@ -251,11 +251,22 @@ export async function maybeOfferProxy(
   opts: OfferProxyOptions,
 ): Promise<OfferProxyResult> {
   if (!opts.anyProxyableAgent) return { enabled: false };
+  // The claim here is scoped on purpose. Injection and capture both
+  // gate on a POST to a path ending `/messages` (proxy/server.ts), so
+  // they reach agents on Anthropic's messages API — Claude Code, and
+  // anything else speaking that shape. Codex is wired to the proxy as
+  // well, but `wire_api = "responses"` (proxy/codexProxy.ts) puts its
+  // traffic on `/v1/responses`, which this release forwards byte for
+  // byte. Saying "every request" and "even in agents without hook
+  // support" without that carve-out promised Codex users three things
+  // they do not get.
   const answer = (
     await opts.ask(
-      "Route model calls through a local Klio proxy? It injects your team's\n" +
-        "context into every request and captures sessions for grading, even in\n" +
-        "agents without hook support. Runs on 127.0.0.1 and fails open. [y/N]: ",
+      "Route model calls through a local Klio proxy? For agents on Anthropic's\n" +
+        "messages API (Claude Code), it appends your team's context to each\n" +
+        "request and captures the session for grading — no hook support needed.\n" +
+        "Codex is forwarded unchanged for now (it uses the /v1/responses API).\n" +
+        "Runs on 127.0.0.1 and fails open. [y/N]: ",
     )
   )
     .trim()

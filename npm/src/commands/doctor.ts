@@ -19,7 +19,8 @@
 // real request and reports what came back.
 //
 // Deliberately NOT a check: whether compression is saving tokens. This
-// release is pass-through only, and doctor should not imply otherwise.
+// release injects and captures but does not compress, and doctor should
+// not imply otherwise.
 
 import { resolve } from "node:path";
 
@@ -100,7 +101,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     log(`  Repaired ${healed.length} problem(s).`);
   }
   if (failed.length === 0) {
-    log("  Everything checks out. (Pass-through only — no compression yet.)");
+    log("  Everything checks out. (Injection and capture only — no compression yet.)");
     log("");
     return 0;
   }

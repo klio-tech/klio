@@ -163,15 +163,37 @@ export function describeWiring(result: WireProxyResult, log: (line: string) => v
 
 /**
  * The costs of routing through a non-Anthropic base URL. Printed at
- * init time because both are silent otherwise.
+ * init time because all of them are silent otherwise.
+ *
+ * This block is the informed-consent surface — the last thing a user
+ * reads before agreeing to route every model call through a process we
+ * installed — so its accuracy is functional, not cosmetic. It used to
+ * say "This release is PASS-THROUGH ONLY — it forwards traffic
+ * unchanged", which was true of the PYTHON proxy (proxy/, still the
+ * local stack's) and is false of this one: on Anthropic's messages path
+ * it appends to `system` and captures the conversation. Anything added
+ * here must describe what the code does today, not what an earlier
+ * stage did.
  */
 export function describeTradeoffs(log: (line: string) => void): void {
   log("");
   log("    What this changes, and what it costs:");
   log("");
   log("      • Every model call now goes through the local proxy first.");
-  log("        This release is PASS-THROUGH ONLY — it forwards traffic");
-  log("        unchanged. No compression yet, and no token savings yet.");
+  log("        On Anthropic's messages endpoint it APPENDS your team's");
+  log("        Klio memories to the request's `system` field, and sends");
+  log("        the conversation to Klio afterwards as grading evidence.");
+  log("        Nothing else is touched: `messages`, `tools`, `tool_choice`");
+  log("        and `tool_reference` blocks are forwarded byte for byte,");
+  log("        and any doubt forwards your original bytes unmodified.");
+  log("        Turn either half off at any time, without uninstalling:");
+  log("        KLIO_PROXY_INJECT=off and KLIO_PROXY_CAPTURE=off.");
+  log("        There is no compression yet, so no token savings yet.");
+  log("");
+  log("      • Codex is wired through the proxy too, but as PASS-THROUGH");
+  log("        for now: Codex talks the /v1/responses API, and this");
+  log("        release only transforms the Anthropic messages path. Its");
+  log("        traffic is forwarded unchanged — no injection, no capture.");
   log("");
   log("      • MCP Tool Search is disabled by default when the base URL");
   log("        is not Anthropic's. We set ENABLE_TOOL_SEARCH=true to turn");
