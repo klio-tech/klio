@@ -6,7 +6,12 @@ import { test } from "node:test";
 
 import type { CloudConfig } from "../src/cloudConfig.js";
 import { runProxyCommand } from "../src/commands/proxy.js";
-import { isProxyRunning, pidFilePath, readPid, spawnProxy } from "../src/proxy/processSupervisor.js";
+import {
+  isProxyRunning,
+  pidFilePath,
+  readPid,
+  spawnProxy,
+} from "../src/proxy/processSupervisor.js";
 
 test("pid file lives beside the other klio state", () => {
   assert.match(pidFilePath("/home/x"), /^\/home\/x\/\.klio\/proxy\.pid$/);
@@ -29,7 +34,7 @@ test("spawn is detached, unref'd, and records the pid", () => {
     spawnImpl: ((_cmd: string, args: string[], o: any) => {
       seenArgs = args;
       seenOpts = o;
-      return { pid: 4242, unref() {} } as any;
+      return { pid: 4242, unref() {}, on() {} } as any;
     }) as any,
     writeFileImpl: (_p, d) => { written = d; },
   });
@@ -44,7 +49,7 @@ test("directory creation failure is non-fatal to spawn", () => {
     cliPath: "/tmp/cli.js",
     home: "/nonexistent-home-dir-for-test",
     spawnImpl: ((_cmd: string, _args: string[], _o: any) => {
-      return { pid: 5151, unref() {} } as any;
+      return { pid: 5151, unref() {}, on() {} } as any;
     }) as any,
     writeFileImpl: (_p, _d) => {
       throw new Error("ENOENT: no such directory");
@@ -60,7 +65,7 @@ test("spawnProxy creates ~/.klio if it doesn't exist and writes the pid there", 
       cliPath: "/tmp/cli.js",
       home,
       spawnImpl: ((_cmd: string, _args: string[], _o: any) => {
-        return { pid: 9999, unref() {} } as any;
+        return { pid: 9999, unref() {}, on() {} } as any;
       }) as any,
     });
     assert.equal(pid, 9999);
@@ -83,12 +88,15 @@ test("readPid returns null when the pid file is missing or malformed", () => {
 
 // --- ensure()'s cloud-mode process strategy ----------------------------
 //
-// `ensure` must probe first and only revive on failure — the pid file
-// is consulted purely to avoid a duplicate spawn, never as proof of
-// health. These tests drive `runProxyCommand` end to end with every
-// seam (probe, cloud-config read, pid read/liveness, spawn, startProxy)
-// injected so nothing touches the network, a real process, or the real
-// filesystem.
+// `ensure` must probe first and only revive on failure. On the cloud
+// path, revival ALWAYS attempts `spawnProxy` once the probe has
+// failed — it is not gated behind a `kill(pid, 0)` liveness check on
+// the last recorded pid, because a pid can be recycled by a totally
+// unrelated process. Regression coverage for that: "a live but
+// unrelated recorded pid does not block revival" below. These tests
+// drive `runProxyCommand` end to end with every seam (probe,
+// cloud-config read, spawn, startProxy) injected so nothing touches
+// the network, a real process, or the real filesystem.
 
 const CLOUD_CONFIG: CloudConfig = {
   apiKey: "ag_live_test",
@@ -113,8 +121,6 @@ test("ensure: cloud mode spawns when the health probe fails", async () => {
     log: () => {},
     probeProxyImpl: (() => probes[Math.min(probeCall++, probes.length - 1)]()) as any,
     readCloudConfigImpl: () => CLOUD_CONFIG,
-    readPidImpl: () => null,
-    isProxyRunningImpl: () => false,
     spawnProxyImpl: (() => {
       spawnCalls++;
       return 4321;
@@ -144,7 +150,22 @@ test("ensure: cloud mode does NOT spawn when the health probe succeeds", async (
   assert.equal(code, 0);
 });
 
-test("ensure: cloud mode skips spawning a duplicate when the recorded pid is still alive", async () => {
+// Regression for the critical bug the review caught: a recycled pid
+// (some unrelated long-lived process happening to reuse the number
+// klio recorded) must NOT block revival. Real-world repro was: put an
+// unrelated process's pid in ~/.klio/proxy.pid, cloud config present,
+// nothing actually listening on the proxy port — `isProxyRunning(pid)`
+// returns true because signal 0 reaches the unrelated process, so a
+// pid-gated `reviveCloud` returned early without ever spawning, and
+// `ensure` reported failure forever on every 60s tick. `spawnProxy` no
+// longer consults the pid at all — this test proves it's unconditional
+// once the probe has failed. `isProxyRunning` is exercised here purely
+// to state the scenario (a real, alive, unrelated pid); the command
+// layer must not call it as a gate.
+test("ensure: a live but unrelated recorded pid does not block revival", async () => {
+  const unrelatedButLivePid = process.pid; // definitely alive, definitely not our proxy
+  assert.equal(isProxyRunning(unrelatedButLivePid), true);
+
   let spawnCalls = 0;
   const probes = [dead, alive];
   let probeCall = 0;
@@ -154,15 +175,13 @@ test("ensure: cloud mode skips spawning a duplicate when the recorded pid is sti
     log: () => {},
     probeProxyImpl: (() => probes[Math.min(probeCall++, probes.length - 1)]()) as any,
     readCloudConfigImpl: () => CLOUD_CONFIG,
-    readPidImpl: () => 555,
-    isProxyRunningImpl: () => true,
     spawnProxyImpl: (() => {
       spawnCalls++;
       return 4321;
     }) as any,
   });
 
-  assert.equal(spawnCalls, 0);
+  assert.equal(spawnCalls, 1);
   assert.equal(code, 0);
 });
 
@@ -172,8 +191,6 @@ test("ensure: cloud mode reports failure (exit 1) when the proxy never comes up"
     log: () => {},
     probeProxyImpl: dead as any,
     readCloudConfigImpl: () => CLOUD_CONFIG,
-    readPidImpl: () => null,
-    isProxyRunningImpl: () => false,
     spawnProxyImpl: (() => 4321) as any,
   });
 

@@ -19,7 +19,7 @@ import { readCloudConfig } from "../cloudConfig.js";
 import { runtimeDir } from "../compose.js";
 import { composeUpService, resolveComposeBin } from "../docker.js";
 import { PROXY_PORT, PROXY_SERVICE } from "../proxy/constants.js";
-import { isProxyRunning, readPid, spawnProxy } from "../proxy/processSupervisor.js";
+import { spawnProxy } from "../proxy/processSupervisor.js";
 import { startProxy } from "../proxy/server.js";
 import { probeProxy } from "../proxy/supervisor.js";
 
@@ -37,8 +37,6 @@ export type ProxyCommandOptions = {
   composeUpServiceImpl?: typeof composeUpService;
   readCloudConfigImpl?: typeof readCloudConfig;
   spawnProxyImpl?: typeof spawnProxy;
-  isProxyRunningImpl?: typeof isProxyRunning;
-  readPidImpl?: typeof readPid;
   startProxyImpl?: typeof startProxy;
   /** Absolute path to the CLI entrypoint, used when spawning `proxy serve`. */
   cliPath?: string;
@@ -72,10 +70,19 @@ export async function runProxyCommand(opts: ProxyCommandOptions): Promise<number
  * `proxy serve` in cloud mode — only runs when the probe fails, which
  * is what makes it safe to schedule every minute.
  *
- * The probe is the ONLY authority on "is it up". The pid file consulted
- * on the cloud path is best-effort bookkeeping to avoid spawning a
- * second proxy on top of one already coming up; it never substitutes
- * for the probe result.
+ * The probe is the ONLY authority on "is it up" — including on the
+ * cloud path. `spawnProxy` always runs when the probe has failed; it
+ * is NOT gated behind a `kill(pid, 0)` check on the last recorded pid.
+ * A pid can be recycled by an unrelated process (a coincidental
+ * `sleep 300 &` reusing the number is enough), so "does a process with
+ * this pid exist" can never stand in for "is our proxy listening" —
+ * gating on it would make revival silently stop working for as long as
+ * the coincidental holder lives, with the supervisor reporting failure
+ * forever and never trying again. Deduplication instead falls out of
+ * `startProxy`'s own EADDRINUSE rejection: if a proxy is already up,
+ * the spawned `proxy serve` exits 1 within about a second and the
+ * still-running original keeps answering the next probe. The pid file
+ * is written purely for bookkeeping (see processSupervisor.ts).
  */
 async function ensure(log: (line: string) => void, opts: ProxyCommandOptions): Promise<number> {
   const probe = opts.probeProxyImpl ?? probeProxy;
@@ -127,21 +134,11 @@ async function ensure(log: (line: string) => void, opts: ProxyCommandOptions): P
 
 /**
  * Cloud-mode revive: no compose file, no daemon — spawn the CLI's own
- * `proxy serve` detached. Skips spawning when the last recorded pid is
- * still alive (best-effort — see the module-level note on `ensure`).
+ * `proxy serve` detached. Always runs when called (the probe having
+ * already failed is what gated the call); see the note on `ensure`
+ * for why a pid-liveness pre-check would be unsound here.
  */
 async function reviveCloud(opts: ProxyCommandOptions): Promise<void> {
-  const readPidImpl = opts.readPidImpl ?? readPid;
-  const isRunning = opts.isProxyRunningImpl ?? isProxyRunning;
-
-  const existingPid = readPidImpl();
-  if (existingPid !== null && isRunning(existingPid)) {
-    // Already coming up (or hung) under a pid we recorded — avoid
-    // spawning a duplicate. The retry loop in `ensure` decides whether
-    // this counts as success; the pid alone never does.
-    return;
-  }
-
   const spawn = opts.spawnProxyImpl ?? spawnProxy;
   const cliPath = opts.cliPath ?? resolve(process.argv[1] ?? "");
   spawn({ cliPath });

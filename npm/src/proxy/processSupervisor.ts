@@ -77,6 +77,13 @@ export function spawnProxy(opts: SpawnProxyOptions): number {
     detached: true,
     stdio: "ignore",
   });
+  // Defensive, not currently load-bearing: `process.execPath` is always
+  // a valid binary and a bad `cliPath` surfaces as a normal nonzero
+  // child exit rather than a spawn-level `'error'` event. Listening
+  // anyway means a future change to how the child is launched (e.g. a
+  // shell wrapper, a different argv[0]) can't turn into an unhandled
+  // 'error' event and crash the `ensure` process that called us.
+  child.on("error", () => {});
   const pid = child.pid ?? 0;
   child.unref();
   // A failure to record the pid must not stop the proxy from being
