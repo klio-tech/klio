@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 
+import { configFingerprint } from "../src/cloudConfig.js";
 import { createProxyServer, startProxy } from "../src/proxy/server.js";
 
 const CONFIG = { apiKey: "k", agentId: "a", baseUrl: "https://api.example" };
@@ -1161,4 +1162,68 @@ test("KLIO_PROXY_CAPTURE=off is a kill switch even with a valid cloud config", a
     KLIO_PROXY_INJECT: undefined,
   });
   assert.equal(calls, 0, "the documented kill switch must still turn capture off");
+});
+
+// --- health identifies WHICH proxy is answering ------------------------
+//
+// `klio proxy status` printed "alive (unknown mode)" because the Node
+// health handler never returned `mode` at all (supervisor.ts reads
+// `body.mode`), and — the load-bearing half — nothing in the body let a
+// caller tell OUR proxy from any other listener on 8787, or tell a proxy
+// running the config we just wrote from a survivor of an earlier `init`
+// still holding the port with revoked credentials. `runtime`, `pid` and
+// `config_fingerprint` are what make `klio proxy stop` safe and make
+// init's post-spawn probe able to detect a stale survivor.
+test("health reports mode, runtime, pid and a config fingerprint", async () => {
+  await withServer(
+    { config: CONFIG, fetchImpl: (async () => { throw new Error("upstream must not be called"); }) as any, captureEnabled: true },
+    async (base) => {
+      const body = (await (await fetch(`${base}/__klio/health`)).json()) as Record<string, unknown>;
+      assert.equal(body["status"], "ok");
+      assert.equal(body["mode"], "inject+capture");
+      assert.equal(body["runtime"], "node");
+      assert.equal(body["pid"], process.pid);
+      assert.equal(body["config_fingerprint"], configFingerprint(CONFIG));
+    },
+  );
+});
+
+// The health body is served unauthenticated on loopback, so it must
+// never leak the API key it fingerprints.
+test("health never exposes the API key itself", async () => {
+  const secret = "ag_live_do_not_leak_me_1234567890";
+  await withServer(
+    { config: { ...CONFIG, apiKey: secret }, fetchImpl: (async () => { throw new Error("no"); }) as any },
+    async (base) => {
+      const raw = await (await fetch(`${base}/__klio/health`)).text();
+      assert.ok(!raw.includes(secret), `health body leaked the key: ${raw}`);
+      assert.match(raw, /"config_fingerprint":"[0-9a-f]{16}"/);
+    },
+  );
+});
+
+test("health mode names exactly the transforms that are live", async () => {
+  const cases: [Parameters<typeof createProxyServer>[0], string][] = [
+    [{ config: CONFIG, inject: true, captureEnabled: true }, "inject+capture"],
+    [{ config: CONFIG, inject: true, captureEnabled: false }, "inject"],
+    [{ config: CONFIG, inject: false, captureEnabled: true }, "capture"],
+    [{ config: CONFIG, inject: false, captureEnabled: false }, "passthrough"],
+    // No config: nothing can inject or capture whatever the flags say.
+    [{ config: null, inject: true, captureEnabled: true }, "passthrough"],
+  ];
+  for (const [opts, expected] of cases) {
+    await withServer(opts, async (base) => {
+      const body = (await (await fetch(`${base}/__klio/health`)).json()) as Record<string, unknown>;
+      assert.equal(body["mode"], expected, JSON.stringify(opts));
+    });
+  }
+});
+
+test("a fingerprint changes when any field of the config changes, and is stable otherwise", () => {
+  const base = { apiKey: "k1", agentId: "a1", baseUrl: "https://b1" };
+  assert.equal(configFingerprint(base), configFingerprint({ ...base }));
+  assert.notEqual(configFingerprint(base), configFingerprint({ ...base, apiKey: "k2" }));
+  assert.notEqual(configFingerprint(base), configFingerprint({ ...base, agentId: "a2" }));
+  assert.notEqual(configFingerprint(base), configFingerprint({ ...base, baseUrl: "https://b2" }));
+  assert.equal(configFingerprint(null), "none");
 });

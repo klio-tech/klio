@@ -28,8 +28,13 @@ import type { AddressInfo } from "node:net";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
-import { readCloudConfig, type CloudConfig } from "../cloudConfig.js";
-import { PROXY_HEALTH_PATH, PROXY_HOST, PROXY_PORT } from "./constants.js";
+import { configFingerprint, readCloudConfig, type CloudConfig } from "../cloudConfig.js";
+import {
+  PROXY_HEALTH_PATH,
+  PROXY_HOST,
+  PROXY_PORT,
+  type ProxyHealth,
+} from "./constants.js";
 import { emitCapture, type EmitCaptureOptions } from "./capture.js";
 import { filterRequestHeaders, filterResponseHeaders } from "./headers.js";
 import { injectMemories, type Memory } from "./inject.js";
@@ -484,6 +489,27 @@ function envIsFalsy(value: string | undefined): boolean {
   return value !== undefined && FALSY_ENV_VALUES.has(value.trim().toLowerCase());
 }
 
+/**
+ * What this proxy is actually doing to traffic right now, for
+ * `/__klio/health` and thus for `klio proxy status`.
+ *
+ * Reports the transforms that can genuinely fire, not the flags as
+ * passed: both need a cloud config (there is nothing to recall from and
+ * nowhere to capture to without one), so a config-less proxy is
+ * `passthrough` however the flags are set. `passthrough` is also the
+ * word the Python proxy uses for the same state, so the two
+ * implementations answer this question in the same vocabulary.
+ */
+function describeMode(
+  config: CloudConfig | null,
+  inject: boolean,
+  capture: boolean,
+): string {
+  if (config === null) return "passthrough";
+  const live = [inject ? "inject" : "", capture ? "capture" : ""].filter((s) => s !== "");
+  return live.length > 0 ? live.join("+") : "passthrough";
+}
+
 export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
   const upstreams: Record<string, string> = { ...DEFAULT_UPSTREAMS, ...(opts.upstreams ?? {}) };
   const recall = opts.recall ?? (async () => []);
@@ -516,7 +542,17 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
     const rawUrl = req.url ?? "/";
 
     if (req.method === "GET" && new URL(rawUrl, "http://internal.invalid").pathname === PROXY_HEALTH_PATH) {
-      sendJson(res, 200, {}, { status: "ok" });
+      // Liveness only — deliberately does not touch the upstream, so an
+      // Anthropic outage can never make the supervisor kill a healthy
+      // proxy. See {@link ProxyHealth} for why the extra fields exist.
+      const health: ProxyHealth = {
+        status: "ok",
+        mode: describeMode(opts.config, injectEnabled, captureEnabled),
+        runtime: "node",
+        pid: process.pid,
+        config_fingerprint: configFingerprint(opts.config),
+      };
+      sendJson(res, 200, {}, health);
       return;
     }
 

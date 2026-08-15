@@ -15,20 +15,38 @@
 // conflating the two would mean someone reaching for "stop routing my
 // traffic" loses their memory as a side effect.
 
-import { unwireProxy, type WireProxyResult } from "../proxy/wiring.js";
-import { uninstallSupervisor } from "../proxy/supervisor.js";
-import { PROXY_SERVICE } from "../proxy/constants.js";
+import { unlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
+
+import { readCloudConfig } from "../cloudConfig.js";
 import { runtimeDir } from "../compose.js";
 import { resolveComposeBin } from "../docker.js";
-import { spawn } from "node:child_process";
+import { PROXY_SERVICE } from "../proxy/constants.js";
+import { pidFilePath } from "../proxy/processSupervisor.js";
+import { stopProxy } from "../proxy/stop.js";
+import { uninstallSupervisor } from "../proxy/supervisor.js";
+import { unwireProxy, type WireProxyResult } from "../proxy/wiring.js";
 
 export type UninitOptions = {
   log?: (line: string) => void;
-  /** Leave the container running; only undo the config wiring. */
+  /** Leave the proxy running; only undo the config wiring. */
   keepRunning?: boolean;
   claudeSettings?: string;
   codexConfig?: string;
   statePath?: string;
+  /** Home directory to clean stale state from. Overridden by tests. */
+  home?: string;
+  /**
+   * Injection seams. Production leaves every one undefined and gets the
+   * real implementation; the unit suite substitutes recorders so it
+   * never signals a process, shells out to Docker, or unloads the
+   * developer's own launchd agent.
+   */
+  readCloudConfigFn?: typeof readCloudConfig;
+  stopProxyFn?: typeof stopProxy;
+  uninstallSupervisorFn?: typeof uninstallSupervisor;
+  resolveComposeBinFn?: typeof resolveComposeBin;
+  stopServiceFn?: (cmd: string, args: string[], cwd: string) => Promise<void>;
 };
 
 export async function uninit(opts: UninitOptions = {}): Promise<number> {
@@ -50,24 +68,34 @@ export async function uninit(opts: UninitOptions = {}): Promise<number> {
   });
   describeUnwiring(wiring, log);
 
-  const supervisor = await uninstallSupervisor();
+  const supervisor = await (opts.uninstallSupervisorFn ?? uninstallSupervisor)();
   log(`  ✓ Supervisor: ${supervisor.detail}`);
 
+  // Which "stop" applies depends on how the proxy is RUN, and the two
+  // are not interchangeable. `ensure()` (commands/proxy.ts) already
+  // branches on exactly this signal — cloud init writes
+  // ~/.klio/config.json, local init never does — and uninit has to
+  // branch the same way. It did not, and unconditionally ran `docker
+  // compose stop proxy`: on a Docker-free cloud machine that throws a
+  // container error while the detached `proxy serve` keeps listening on
+  // 8787 until reboot, which is the one thing this command exists to
+  // prevent.
+  const cloudMode = (opts.readCloudConfigFn ?? readCloudConfig)() !== null;
+
   if (!opts.keepRunning) {
-    try {
-      const bin = await resolveComposeBin();
-      await stopService(bin.cmd, [...bin.prefix, "stop", PROXY_SERVICE], runtimeDir());
-      log("  ✓ Proxy container stopped");
-    } catch (err) {
-      // Not a failure of uninit's purpose. The wiring is gone, so the
-      // agent works; a still-running container is inert and costs a few
-      // MB of RAM.
-      log(
-        `  ! Could not stop the proxy container ` +
-          `(${err instanceof Error ? err.message : String(err)}). ` +
-          `Harmless — nothing points at it any more.`,
-      );
-    }
+    if (cloudMode) await stopCloudProxy(opts, log);
+    else await stopLocalProxy(opts, log);
+  }
+
+  // Independent of `keepRunning` and of the mode: nothing reads this
+  // file any more (ownership is proven from the health body, not from a
+  // pid on disk), so an older install's copy is stale state that a
+  // future reader could mistake for authority. Best-effort by design —
+  // a file we cannot delete is not a reason to fail the escape hatch.
+  try {
+    unlinkSync(pidFilePath(opts.home));
+  } catch {
+    /* absent or unremovable — neither matters */
   }
 
   log("");
@@ -114,6 +142,48 @@ function describeUnwiring(result: WireProxyResult, log: (line: string) => void):
       result.codex.changed
         ? `  ✓ Codex: ${result.codex.summary}`
         : `  — Codex: ${result.codex.summary}`,
+    );
+  }
+}
+
+/**
+ * Cloud mode: the proxy is a detached host process, stopped by signal —
+ * but only once the health body has proven it is ours (proxy/stop.ts).
+ *
+ * A proxy that could not be stopped is reported with a `!`, never a
+ * tick. It is not fatal (the wiring is already gone, so the agent talks
+ * to Anthropic directly again), but it is also not nothing: a survivor
+ * holding port 8787 is exactly what makes the next `klio init` report
+ * success while running on credentials the user rotated away from.
+ */
+async function stopCloudProxy(opts: UninitOptions, log: (line: string) => void): Promise<void> {
+  const result = await (opts.stopProxyFn ?? stopProxy)();
+  if (!result.wasRunning) {
+    log(`  — Proxy: ${result.detail}`);
+  } else if (result.stopped) {
+    log(`  ✓ ${result.detail}`);
+  } else {
+    log(`  ! ${result.detail}`);
+    log("    Nothing points at it any more, but re-running `klio init` while it");
+    log("    is still up would report success against the OLD process.");
+  }
+}
+
+/** Local mode: the proxy is a container, stopped by compose. */
+async function stopLocalProxy(opts: UninitOptions, log: (line: string) => void): Promise<void> {
+  try {
+    const bin = await (opts.resolveComposeBinFn ?? resolveComposeBin)();
+    const stop = opts.stopServiceFn ?? stopService;
+    await stop(bin.cmd, [...bin.prefix, "stop", PROXY_SERVICE], runtimeDir());
+    log("  ✓ Proxy container stopped");
+  } catch (err) {
+    // Not a failure of uninit's purpose. The wiring is gone, so the
+    // agent works; a still-running container is inert and costs a few
+    // MB of RAM.
+    log(
+      `  ! Could not stop the proxy container ` +
+        `(${err instanceof Error ? err.message : String(err)}). ` +
+        `Harmless — nothing points at it any more.`,
     );
   }
 }

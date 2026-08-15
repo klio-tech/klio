@@ -1,89 +1,41 @@
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import type { CloudConfig } from "../src/cloudConfig.js";
 import { runProxyCommand } from "../src/commands/proxy.js";
-import {
-  isProxyRunning,
-  pidFilePath,
-  readPid,
-  spawnProxy,
-} from "../src/proxy/processSupervisor.js";
+import { pidFilePath, spawnProxy } from "../src/proxy/processSupervisor.js";
 
-test("pid file lives beside the other klio state", () => {
+// `pidFilePath` outlives the pid FILE: nothing writes it any more (a
+// pid on disk was never evidence of anything — see processSupervisor.ts),
+// but `klio uninit` still needs the path to delete what an older install
+// left behind.
+test("pid file path is still resolvable so uninit can clean up after older installs", () => {
   assert.match(pidFilePath("/home/x"), /^\/home\/x\/\.klio\/proxy\.pid$/);
 });
 
-test("a live pid reports running", () => {
-  assert.equal(isProxyRunning(123, () => {}), true);
-});
-
-test("a dead pid reports not running", () => {
-  assert.equal(isProxyRunning(123, () => { throw new Error("ESRCH"); }), false);
-});
-
-test("spawn is detached, unref'd, and records the pid", () => {
+test("spawn is detached and unref'd, and writes no pid file", () => {
   let seenArgs: string[] = [];
   let seenOpts: any = null;
-  let written = "";
-  const pid = spawnProxy({
-    cliPath: "/tmp/cli.js",
-    spawnImpl: ((_cmd: string, args: string[], o: any) => {
-      seenArgs = args;
-      seenOpts = o;
-      return { pid: 4242, unref() {}, on() {} } as any;
-    }) as any,
-    writeFileImpl: (_p, d) => { written = d; },
-  });
-  assert.equal(pid, 4242);
-  assert.deepEqual(seenArgs, ["/tmp/cli.js", "proxy", "serve"]);
-  assert.equal(seenOpts.detached, true);
-  assert.equal(written, "4242");
-});
-
-test("directory creation failure is non-fatal to spawn", () => {
-  const pid = spawnProxy({
-    cliPath: "/tmp/cli.js",
-    home: "/nonexistent-home-dir-for-test",
-    spawnImpl: ((_cmd: string, _args: string[], _o: any) => {
-      return { pid: 5151, unref() {}, on() {} } as any;
-    }) as any,
-    writeFileImpl: (_p, _d) => {
-      throw new Error("ENOENT: no such directory");
-    },
-  });
-  assert.equal(pid, 5151);
-});
-
-test("spawnProxy creates ~/.klio if it doesn't exist and writes the pid there", () => {
   const home = mkdtempSync(join(tmpdir(), "klio-proxy-process-"));
   try {
     const pid = spawnProxy({
       cliPath: "/tmp/cli.js",
-      home,
-      spawnImpl: ((_cmd: string, _args: string[], _o: any) => {
-        return { pid: 9999, unref() {}, on() {} } as any;
+      spawnImpl: ((_cmd: string, args: string[], o: any) => {
+        seenArgs = args;
+        seenOpts = o;
+        return { pid: 4242, unref() {}, on() {} } as any;
       }) as any,
     });
-    assert.equal(pid, 9999);
-    assert.equal(readFileSync(pidFilePath(home), "utf8"), "9999");
+    assert.equal(pid, 4242);
+    assert.deepEqual(seenArgs, ["/tmp/cli.js", "proxy", "serve"]);
+    assert.equal(seenOpts.detached, true);
+    assert.equal(existsSync(pidFilePath(home)), false, "the orphan pid write must be gone");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
-});
-
-test("readPid returns null when the pid file is missing or malformed", () => {
-  assert.equal(
-    readPid("/nope", () => {
-      throw new Error("ENOENT");
-    }),
-    null,
-  );
-  assert.equal(readPid("/x", () => "not-a-number"), null);
-  assert.equal(readPid("/x", () => "4242\n"), 4242);
 });
 
 // --- ensure()'s cloud-mode process strategy ----------------------------
@@ -160,20 +112,18 @@ test("ensure: cloud mode does NOT spawn when the health probe succeeds", async (
 // `ensure` reported failure forever on every 60s tick.
 //
 // This is deliberately NOT driven through a mock seam — the whole bug
-// was that the old code fell through to `readPid()`'s and
-// `isProxyRunning()`'s REAL, unmocked defaults (`pidFilePath()` /
-// `homedir()` / `process.kill`) whenever no override was injected,
-// which is exactly what a clean test (or a clean CI machine) hands it.
-// A test that injects fake pid seams can't reproduce that — it would
-// pass against the pre-fix code and the post-fix code alike, proving
-// nothing. So this test redirects HOME at a temp directory, writes a
-// REAL pid file there naming a REAL, currently-alive, definitely-not-
-// our-proxy process (`process.pid` — this test's own process), and
-// asserts `spawnProxy` is still called once the probe fails. Against
-// the pre-fix gate, `readPid()`/`isProxyRunning()` would find that
-// file via the real `homedir()` (which honours `$HOME`) and skip the
-// spawn; against the fix, nothing in `reviveCloud` reads the pid file
-// at all, so the spawn always happens.
+// was that the old code fell through to the REAL, unmocked pid-file
+// readers (`pidFilePath()` / `homedir()` / `process.kill`) whenever no
+// override was injected, which is exactly what a clean test (or a clean
+// CI machine) hands it. A test that injects fake pid seams can't
+// reproduce that — it would pass against the pre-fix code and the
+// post-fix code alike, proving nothing. So this test redirects HOME at a
+// temp directory, writes a REAL pid file there naming a REAL,
+// currently-alive, definitely-not-our-proxy process (`process.pid` —
+// this test's own process), and asserts `spawnProxy` is still called
+// once the probe fails. The readers are gone entirely now, and a pid
+// file left on disk by an OLDER install is exactly the input that must
+// still not change the outcome.
 test("ensure: a failed probe always spawns, regardless of what a real pid file on disk says", async () => {
   const tempHome = mkdtempSync(join(tmpdir(), "klio-proxy-realpid-"));
   const originalHome = process.env["HOME"];
@@ -184,7 +134,6 @@ test("ensure: a failed probe always spawns, regardless of what a real pid file o
     // and is definitely not a klio proxy — exactly the "recycled pid"
     // scenario from the live repro.
     writeFileSync(pidPath, String(process.pid), "utf8");
-    assert.equal(isProxyRunning(process.pid), true); // sanity-check the fixture
 
     process.env["HOME"] = tempHome; // redirects the real, unmocked homedir()
 

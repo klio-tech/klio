@@ -29,7 +29,7 @@ import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 
-import { PROXY_HEALTH_PATH, PROXY_PROBE_URL } from "./constants.js";
+import { PROXY_HEALTH_PATH, PROXY_PROBE_URL, type ProxyHealth } from "./constants.js";
 
 /** Reverse-DNS label — launchd's convention, and the plist's filename. */
 export const LAUNCHD_LABEL = "tech.klio.proxy";
@@ -331,6 +331,19 @@ export async function uninstallSupervisor(
 }
 
 /**
+ * What a health probe learned. `health` is present only when something
+ * answered `{ "status": "ok" }`, and is deliberately PARTIAL: the
+ * responder may be an older Klio proxy, the Python container, or some
+ * unrelated listener that happens to serve that shape, so every field
+ * has to be treated as absent until checked.
+ */
+export type ProbeResult = {
+  alive: boolean;
+  detail: string;
+  health?: Partial<ProxyHealth>;
+};
+
+/**
  * Is the proxy answering?
  *
  * Deliberately dials the IPv4 literal rather than `localhost`: Docker
@@ -342,7 +355,7 @@ export async function uninstallSupervisor(
 export async function probeProxy(
   timeoutMs = 3000,
   url = `${PROXY_PROBE_URL}${PROXY_HEALTH_PATH}`,
-): Promise<{ alive: boolean; detail: string }> {
+): Promise<ProbeResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -350,10 +363,17 @@ export async function probeProxy(
     if (!response.ok) {
       return { alive: false, detail: `health endpoint returned ${response.status}` };
     }
-    const body = (await response.json()) as { status?: string; mode?: string };
+    const body = (await response.json()) as Partial<ProxyHealth> | null;
+    const alive = body?.status === "ok";
     return {
-      alive: body.status === "ok",
-      detail: body.status === "ok" ? `alive (${body.mode ?? "unknown mode"})` : "unhealthy",
+      alive,
+      detail: alive ? `alive (${body?.mode ?? "unknown mode"})` : "unhealthy",
+      // Handed back verbatim (and only when the responder is healthy) so
+      // callers that need to know WHICH proxy answered — `klio proxy
+      // stop` before it signals anything, `klio init` checking for a
+      // survivor holding stale credentials — do not have to re-probe and
+      // race with whatever changed in between.
+      health: alive ? (body as Partial<ProxyHealth>) : undefined,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

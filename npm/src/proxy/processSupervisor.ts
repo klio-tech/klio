@@ -2,75 +2,54 @@
 //
 // Local mode revives the proxy with `docker compose up -d proxy`. Cloud
 // mode has no compose file and no daemon, so it spawns the CLI's own
-// `proxy serve` detached and remembers the pid. `ensure`'s contract is
-// unchanged either way: probe first, revive only on failure, exit 0 when
-// the proxy answers and 1 when it cannot be fixed.
+// `proxy serve` detached. `ensure`'s contract is unchanged either way:
+// probe first, revive only on failure, exit 0 when the proxy answers and
+// 1 when it cannot be fixed.
 //
-// The pid file is best-effort bookkeeping only. It exists so `ensure`
-// does not spawn a second proxy on top of one that is already coming
-// up; it is NEVER treated as proof the proxy is healthy — a pid can be
-// recycled by an unrelated process, so only the health probe (in
-// ../commands/proxy.ts) gets to decide "is it up".
+// NOTHING HERE RECORDS A PID, deliberately. An earlier version wrote
+// ~/.klio/proxy.pid, and its own comment admitted nothing read it back:
+// the EADDRINUSE loser of a concurrent `ensure` race wrote its pid there
+// and exited a moment later, so the file routinely named a process that
+// no longer existed. The one attempt to USE it — gating revival on
+// `kill(pid, 0)` — was reverted after a recycled pid permanently blocked
+// revival on a live machine.
+//
+// The question a pid file was reaching for ("is our proxy running, and
+// which process is it?") is answered instead by the proxy's own
+// `/__klio/health` body, which reports `runtime: "node"`, its pid, and a
+// fingerprint of the config it booted with. That is evidence from the
+// process itself rather than a stale note about it, and it is what
+// `klio proxy stop` (../proxy/stop.ts) requires before signalling
+// anything. `pidFilePath` survives only so `klio uninit` can delete the
+// file an older install left behind.
 
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
+/** Where older installs recorded the proxy pid. Nothing writes it now; `klio uninit` removes it. */
 export function pidFilePath(home: string = homedir()): string {
   return join(home, ".klio", "proxy.pid");
-}
-
-/** Signal 0 tests for existence without delivering a signal. */
-export function isProxyRunning(
-  pid: number,
-  killImpl: (p: number, s: number) => void = process.kill.bind(process),
-): boolean {
-  try {
-    killImpl(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Read back the pid `spawnProxy` recorded, if any. Never throws — a
- * missing or malformed pid file just means "no bookkeeping available",
- * which `ensure` treats the same as "no pid on record" rather than an
- * error.
- */
-export function readPid(
-  path: string = pidFilePath(),
-  readImpl: (p: string) => string = (p) => readFileSync(p, "utf8"),
-): number | null {
-  let raw: string;
-  try {
-    raw = readImpl(path);
-  } catch {
-    return null;
-  }
-  const pid = Number.parseInt(raw.trim(), 10);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
 export type SpawnProxyOptions = {
   cliPath: string;
   spawnImpl?: typeof spawn;
-  writeFileImpl?: (path: string, data: string) => void;
-  home?: string;
 };
 
+/**
+ * Start `klio proxy serve` as a detached background process and return
+ * its pid.
+ *
+ * The pid is returned for LOGGING ONLY. It proves the OS forked a
+ * process, not that a proxy is listening: `server.listen()`'s
+ * EADDRINUSE arrives asynchronously inside the child, long after the
+ * parent has its pid. Every caller must confirm with a health probe —
+ * `ensure` (../commands/proxy.ts) and `wireProxyStack`
+ * (../commands/initCloud.ts) both do.
+ */
 export function spawnProxy(opts: SpawnProxyOptions): number {
   const doSpawn = opts.spawnImpl ?? spawn;
-  const write =
-    opts.writeFileImpl ??
-    ((p: string, d: string) => {
-      // `~/.klio` may not exist on a fresh machine — create it before
-      // writing rather than let the pid write be the thing that fails.
-      mkdirSync(dirname(p), { recursive: true });
-      writeFileSync(p, d, "utf8");
-    });
   // Detached + unref so the proxy outlives the `ensure` invocation that
   // started it — the supervisor fires every 60s and must not hold it.
   const child = doSpawn(process.execPath, [opts.cliPath, "proxy", "serve"], {
@@ -86,23 +65,5 @@ export function spawnProxy(opts: SpawnProxyOptions): number {
   child.on("error", () => {});
   const pid = child.pid ?? 0;
   child.unref();
-  // A failure to record the pid must not stop the proxy from being
-  // spawned or `ensure` from reporting the truth of the health probe —
-  // the pid file is bookkeeping, not the source of truth.
-  //
-  // NOTE for anyone tempted to read this file back later (e.g. to give
-  // `klio doctor` a "last known pid" line): the value written here can
-  // easily name a process that died within the second. Nothing in
-  // `reviveCloud` currently reads it back — the EADDRINUSE loser of a
-  // concurrent `ensure` race writes its own pid here and then exits
-  // almost immediately, leaving a pid on disk for a process that no
-  // longer exists. That's harmless today because nothing consults this
-  // file, but a future reader must treat it as a hint, never as proof
-  // of anything currently running.
-  try {
-    write(pidFilePath(opts.home), String(pid));
-  } catch {
-    // non-fatal — see comment above.
-  }
   return pid;
 }

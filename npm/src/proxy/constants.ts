@@ -58,6 +58,41 @@ export const PROXY_PROBE_URL = `http://127.0.0.1:${PROXY_PORT}`;
 /** Liveness endpoint. Namespaced so it can never shadow an API path. */
 export const PROXY_HEALTH_PATH = "/__klio/health";
 
+/**
+ * The body {@link PROXY_HEALTH_PATH} returns, and the ONLY proof of
+ * ownership anything in this CLI is allowed to act on before signalling
+ * a process.
+ *
+ * A pid on its own is not proof: pids are recycled, and a health probe
+ * that merely answers proves only that SOMETHING is bound to 8787. That
+ * "something" may be the Python proxy in a container (whose pid lives in
+ * another namespace — signalling it on the host would kill an unrelated
+ * process), or a stray dev server, or a SURVIVOR of an earlier `klio
+ * init` still serving with credentials that have since been rotated.
+ *
+ * So the body carries three discriminators:
+ *
+ *   * `runtime: "node"` — emitted only by this file's server. The Python
+ *     proxy (proxy/src/klio_proxy/app.py) returns `status`, `upstream`,
+ *     `upstreams` and `mode`, and no `runtime` or `pid`. Nothing may
+ *     signal a pid read from a body without this field.
+ *   * `pid` — the host pid to signal, valid precisely because `runtime`
+ *     says the responder is a host process, not a container.
+ *   * `config_fingerprint` — see `configFingerprint` in cloudConfig.ts.
+ *     Lets `klio init` tell "the proxy I just started" from "a survivor
+ *     holding the port with the key I just rotated away from".
+ *
+ * `mode` names the transforms that are actually live, so `klio proxy
+ * status` can say what the proxy is DOING rather than "unknown mode".
+ */
+export type ProxyHealth = {
+  status: "ok";
+  mode: string;
+  runtime: "node";
+  pid: number;
+  config_fingerprint: string;
+};
+
 /** Compose service name — used with `docker compose up/restart <svc>`. */
 export const PROXY_SERVICE = "proxy";
 

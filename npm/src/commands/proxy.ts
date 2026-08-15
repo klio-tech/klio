@@ -1,4 +1,4 @@
-// `klio proxy <ensure|status|serve>` — the command the supervisor runs.
+// `klio proxy <ensure|status|serve|stop>` — the command the supervisor runs.
 //
 // Kept separate from `klio doctor` because the two have different
 // audiences and different failure behaviour. `doctor` talks to a human
@@ -21,6 +21,7 @@ import { composeUpService, resolveComposeBin } from "../docker.js";
 import { PROXY_PORT, PROXY_SERVICE } from "../proxy/constants.js";
 import { spawnProxy } from "../proxy/processSupervisor.js";
 import { startProxy } from "../proxy/server.js";
+import { stopProxy } from "../proxy/stop.js";
 import { probeProxy } from "../proxy/supervisor.js";
 
 export type ProxyCommandOptions = {
@@ -38,6 +39,7 @@ export type ProxyCommandOptions = {
   readCloudConfigImpl?: typeof readCloudConfig;
   spawnProxyImpl?: typeof spawnProxy;
   startProxyImpl?: typeof startProxy;
+  stopProxyImpl?: typeof stopProxy;
   /** Absolute path to the CLI entrypoint, used when spawning `proxy serve`. */
   cliPath?: string;
 };
@@ -53,9 +55,11 @@ export async function runProxyCommand(opts: ProxyCommandOptions): Promise<number
       return status(log, opts);
     case "serve":
       return serve(log, opts);
+    case "stop":
+      return stop(log, opts);
     default:
       process.stderr.write(
-        `klio proxy: unknown subcommand: ${sub}\nusage: klio proxy <ensure|status|serve>\n`,
+        `klio proxy: unknown subcommand: ${sub}\nusage: klio proxy <ensure|status|serve|stop>\n`,
       );
       return 2;
   }
@@ -142,6 +146,21 @@ async function reviveCloud(opts: ProxyCommandOptions): Promise<void> {
   const spawn = opts.spawnProxyImpl ?? spawnProxy;
   const cliPath = opts.cliPath ?? resolve(process.argv[1] ?? "");
   spawn({ cliPath });
+}
+
+/**
+ * Stop the running proxy.
+ *
+ * Exit codes follow the same rule as the rest of this command: 0 when
+ * the proxy is not running (whether it already wasn't, or because we
+ * just stopped it — both leave the user where they asked to be), 1 when
+ * something is still listening that we could not or would not stop.
+ */
+async function stop(log: (line: string) => void, opts: ProxyCommandOptions): Promise<number> {
+  const stopImpl = opts.stopProxyImpl ?? stopProxy;
+  const result = await stopImpl({ probeImpl: opts.probeProxyImpl ? () => opts.probeProxyImpl!() : undefined });
+  log(`klio proxy: ${result.detail}`);
+  return !result.wasRunning || result.stopped ? 0 : 1;
 }
 
 /** One-line liveness report for humans and scripts. */

@@ -391,12 +391,11 @@ test(
             // the blocker above already occupies the port we probe
             // below, so the REAL probeProxy() call will correctly
             // report "not alive" no matter what this child does. The
-            // pid-file write is stubbed out so the test never touches
-            // `~/.klio`.
+            // `spawnProxy` records nothing on disk, so the test needs no
+            // filesystem stubbing.
             spawnProxyFn: (o) =>
               realSpawnProxy({
                 ...o,
-                writeFileImpl: () => {},
                 spawnImpl: ((_command, _args, options) => {
                   const child = nodeSpawn(process.execPath, ["-e", "0"], options);
                   spawnedChildren.push(child);
@@ -513,4 +512,117 @@ test("a rollback that itself partially fails says so, and names what's still wir
   assert.match(result.error ?? "", /codex/);
   assert.match(result.error ?? "", /config\.toml is locked/);
   assert.match(result.error ?? "", /klio uninit/);
+});
+
+// ---------------------------------------------------------------------
+// Critical — a SURVIVOR of an earlier init must not be mistaken for the
+// proxy we just started.
+//
+// `startProxy` reads ~/.klio/config.json exactly once at boot and the
+// recaller closes over the key it found. So: `uninit` → `init` with a
+// ROTATED key → the new `proxy serve` loses EADDRINUSE to the survivor
+// → the post-spawn probe goes green against the OLD process → init
+// prints "✓ Proxy on" while every recall and capture authenticates with
+// a revoked key. Fail-open then turns that into "no injection, ever",
+// with no signal at all. The health body's `config_fingerprint` is what
+// tells the two apart.
+// ---------------------------------------------------------------------
+
+function health(fingerprint: string) {
+  return {
+    alive: true,
+    detail: "alive (inject+capture)",
+    health: {
+      status: "ok" as const,
+      mode: "inject+capture",
+      runtime: "node" as const,
+      pid: 4242,
+      config_fingerprint: fingerprint,
+    },
+  };
+}
+
+test("a survivor holding the port with a stale config is stopped and replaced, not reported as success", async () => {
+  let spawnCalls = 0;
+  let stopCalls = 0;
+  let unwireCalled = false;
+  const lines: string[] = [];
+
+  await wireProxyStack(
+    stackSeams({
+      log: (l) => lines.push(l),
+      expectedFingerprint: "cafebabecafebabe",
+      spawnProxyFn: () => {
+        spawnCalls++;
+        return 4242;
+      },
+      // First round: an old proxy answers with a DIFFERENT fingerprint.
+      // After it is stopped, the proxy we spawned binds and matches.
+      probeProxyFn: async () =>
+        stopCalls === 0 ? health("0000000000000000") : health("cafebabecafebabe"),
+      stopProxyFn: async () => {
+        stopCalls++;
+        return { stopped: true, wasRunning: true, detail: "stopped the proxy (pid 4242)" };
+      },
+      unwireProxyFn: () => {
+        unwireCalled = true;
+        return okWiring();
+      },
+    }),
+  );
+
+  assert.equal(stopCalls, 1, "the stale survivor must be stopped");
+  assert.equal(spawnCalls, 2, "the proxy must be respawned once the port is free");
+  assert.equal(unwireCalled, false, "a recovered mismatch is not a wiring failure");
+  assert.match(lines.join("\n"), /answering/);
+});
+
+test("a survivor that cannot be stopped rolls back rather than claiming the proxy is on", async () => {
+  let unwireCalled = false;
+  const result = await maybeOfferProxy({
+    ask: async () => "y",
+    anyProxyableAgent: true,
+    wire: () =>
+      wireProxyStack(
+        stackSeams({
+          expectedFingerprint: "cafebabecafebabe",
+          probeProxyFn: async () => health("0000000000000000"),
+          stopProxyFn: async () => ({
+            stopped: false,
+            wasRunning: true,
+            detail: "could not signal the proxy (pid 4242): EPERM",
+          }),
+          unwireProxyFn: () => {
+            unwireCalled = true;
+            return okWiring();
+          },
+        }),
+      ),
+  });
+
+  assert.equal(result.enabled, false, "a proxy running someone else's config is not success");
+  assert.match(result.error ?? "", /different configuration|stale/i);
+  assert.match(result.error ?? "", /rolled back/);
+  assert.equal(unwireCalled, true);
+});
+
+test("a matching fingerprint is accepted without stopping anything", async () => {
+  let stopCalls = 0;
+  let spawnCalls = 0;
+  await wireProxyStack(
+    stackSeams({
+      expectedFingerprint: "cafebabecafebabe",
+      spawnProxyFn: () => {
+        spawnCalls++;
+        return 4242;
+      },
+      probeProxyFn: async () => health("cafebabecafebabe"),
+      stopProxyFn: async () => {
+        stopCalls++;
+        return { stopped: true, wasRunning: true, detail: "stopped" };
+      },
+    }),
+  );
+  assert.equal(stopCalls, 0);
+  assert.equal(spawnCalls, 1);
 });

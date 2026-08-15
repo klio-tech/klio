@@ -25,14 +25,16 @@ import {
   maskKey,
   verifyCloudKey,
 } from "../cloud.js";
-import { writeCloudConfig, type CloudConfig } from "../cloudConfig.js";
+import { configFingerprint, writeCloudConfig, type CloudConfig } from "../cloudConfig.js";
 import { PROXY_PROBE_URL } from "../proxy/constants.js";
 import { spawnProxy, type SpawnProxyOptions } from "../proxy/processSupervisor.js";
+import { stopProxy, type StopProxyResult } from "../proxy/stop.js";
 import {
   installSupervisor,
   probeProxy,
   resolveKlioCommand,
   type InstallResult,
+  type ProbeResult,
 } from "../proxy/supervisor.js";
 import {
   describeTradeoffs,
@@ -136,7 +138,8 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   // we're about to install (and the `klio hook` client they invoke) can
   // authenticate immediately on the very first Claude Code event.
   const writeConfigFn = opts.writeConfigFn ?? writeCloudConfig;
-  writeConfigFn({ apiKey: key, agentId, baseUrl: CLOUD_BASE_URL });
+  const cloudConfig: CloudConfig = { apiKey: key, agentId, baseUrl: CLOUD_BASE_URL };
+  writeConfigFn(cloudConfig);
 
   log("");
   log(`    Pointing your agents at ${CLOUD_MCP_URL}`);
@@ -189,7 +192,11 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   const proxyOffer = await maybeOfferProxy({
     ask: buildProxyAsk(promptFn),
     anyProxyableAgent,
-    wire: () => wireProxyStack({ log }),
+    // The fingerprint of the config written moments ago is what lets
+    // step 3 tell "the proxy I just started" from "a survivor of an
+    // earlier init still holding 8787 with the key you rotated away
+    // from" — the two are indistinguishable to a bare health probe.
+    wire: () => wireProxyStack({ log, expectedFingerprint: configFingerprint(cloudConfig) }),
   });
 
   if (proxyOffer.enabled) {
@@ -314,7 +321,18 @@ export type WireProxyStackOptions = {
    * proxy/supervisor.ts, probing the real 127.0.0.1 proxy port. Tests
    * override this to point at a fake listener instead.
    */
-  probeProxyFn?: () => Promise<{ alive: boolean; detail: string }>;
+  probeProxyFn?: () => Promise<ProbeResult>;
+  /** Stops a survivor holding the port. Defaults to the real `stopProxy`. */
+  stopProxyFn?: () => Promise<StopProxyResult>;
+  /**
+   * Fingerprint of the config this init just wrote (see
+   * `configFingerprint` in cloudConfig.ts). When set, a proxy answering
+   * with a DIFFERENT fingerprint is treated as a survivor of an earlier
+   * init rather than as the proxy we started. Undefined disables the
+   * check, which is only ever right for callers that have not written a
+   * config at all.
+   */
+  expectedFingerprint?: string;
   resolveKlioCommandFn?: (
     argv1?: string,
     execPath?: string,
@@ -410,35 +428,68 @@ export async function wireProxyStack(
       : `    ! ${supervisor.detail}`,
   );
 
-  // Step 3 — start the proxy process itself, then confirm it is
-  // actually answering before declaring victory. See the doc comment
-  // above for why the pid alone is not proof.
-  let pid: number;
-  try {
-    pid = spawnProxyFn({ cliPath });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      describeRollback(unwireProxyFn({ log }), `proxy failed to start (${message})`),
-    );
-  }
-  log(`    · proxy process spawned (pid ${pid})`);
+  // Step 3 — start the proxy process itself, then confirm that the
+  // thing now answering is the proxy WE started, running the config we
+  // just wrote. See the doc comment above for why the pid alone is not
+  // proof, and `configFingerprint` (cloudConfig.ts) for why "something
+  // answers" is not proof either.
+  //
+  // At most two rounds: spawn → probe → (stop a survivor → spawn →
+  // probe). Bounded deliberately — if a second, unstoppable process
+  // keeps claiming the port, looping would just take longer to reach
+  // the same rollback.
+  const stopProxyFn = opts.stopProxyFn ?? (() => stopProxy());
+  let failure = "";
 
-  let alive = false;
-  for (let attempt = 0; attempt < probeAttempts && !alive; attempt++) {
-    await sleepFn(probeIntervalMs);
-    const probe = await probeProxyFn();
-    alive = probe.alive;
+  for (let round = 0; round < 2; round++) {
+    let pid: number;
+    try {
+      pid = spawnProxyFn({ cliPath });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        describeRollback(unwireProxyFn({ log }), `proxy failed to start (${message})`),
+      );
+    }
+    log(`    · proxy process spawned (pid ${pid})`);
+
+    let probe: ProbeResult | null = null;
+    for (let attempt = 0; attempt < probeAttempts && !(probe?.alive ?? false); attempt++) {
+      await sleepFn(probeIntervalMs);
+      probe = await probeProxyFn();
+    }
+    if (!probe?.alive) {
+      // Nothing is listening at all: respawning would hit the same wall,
+      // so this is terminal rather than another round.
+      failure =
+        "proxy did not answer after starting (a busy port or a crash on boot are the usual causes)";
+      break;
+    }
+
+    const actual = probe.health?.config_fingerprint;
+    if (opts.expectedFingerprint === undefined || actual === opts.expectedFingerprint) {
+      log("    · proxy is answering");
+      return;
+    }
+
+    // Something IS serving the proxy port, but not with the credentials
+    // this init just wrote — a proxy left over from a previous init,
+    // still holding a key that may since have been rotated or revoked.
+    // Reporting success here is the worst available outcome: the user
+    // is told the proxy is on while every recall and capture silently
+    // fails authentication.
+    failure =
+      "the proxy already on port 8787 is running a different configuration " +
+      "(a stale process from an earlier `klio init`)";
+    if (round > 0) break;
+
+    log("    ! an older proxy is holding the port with stale credentials — stopping it");
+    const stopped = await stopProxyFn();
+    log(`    · ${stopped.detail}`);
+    if (!stopped.stopped) break;
   }
-  if (!alive) {
-    throw new Error(
-      describeRollback(
-        unwireProxyFn({ log }),
-        "proxy did not answer after starting (a busy port or a crash on boot are the usual causes)",
-      ),
-    );
-  }
-  log("    · proxy is answering");
+
+  throw new Error(describeRollback(unwireProxyFn({ log }), failure));
 }
 
 /**

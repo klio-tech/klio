@@ -11,6 +11,7 @@
 // 0700 directory, and re-chmod'd on every write so an existing file's
 // perms are corrected too (writeFileSync's mode only applies on create).
 
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -72,6 +73,33 @@ export function readCloudConfig(
       : CLOUD_BASE_URL;
 
   return { apiKey, agentId, baseUrl };
+}
+
+/** Domain separation, so this digest can never collide with any other use of the same inputs. */
+const FINGERPRINT_DOMAIN = "klio-proxy-config-fingerprint:v1\n";
+
+/**
+ * A short, NON-REVERSIBLE identifier for "which config is this".
+ *
+ * Published on the proxy's own `/__klio/health` so a caller can tell a
+ * proxy running the config it just wrote from a SURVIVOR of an earlier
+ * `klio init` still holding port 8787 with credentials that have since
+ * been rotated or revoked. Without it, `init` → rotate key → `init`
+ * reports "✓ Proxy on" while every recall and capture authenticates
+ * with the old key, and fail-open turns that into "no injection, ever",
+ * silently.
+ *
+ * The API KEY ITSELF IS NEVER EXPOSED — only this digest, and only over
+ * loopback. A digest is enough because the question being answered is
+ * "same or different", never "what is it".
+ */
+export function configFingerprint(config: CloudConfig | null): string {
+  if (config === null) return "none";
+  return createHash("sha256")
+    .update(FINGERPRINT_DOMAIN)
+    .update(`${config.apiKey}\n${config.agentId}\n${config.baseUrl}`)
+    .digest("hex")
+    .slice(0, 16);
 }
 
 /**
