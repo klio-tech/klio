@@ -688,15 +688,26 @@ test("a gzip-compressed upstream response is forwarded without a stale content-e
 // made the upstream hang up the instant it finished responding, while
 // the proxy was still writing the remaining megabytes; the write
 // EPIPE'd and `fetch()` rejected instead of yielding the response it
-// already held, turning the 413 into a Klio-authored `api_error` about
-// 40% of the time. One iteration catches that only ~17% of the time,
-// which is how it survived a round of review — so this runs the
-// exchange repeatedly.
+// already held, turning the 413 into a Klio-authored `api_error`. A
+// single iteration against that revision (f795722) only catches this
+// intermittently, so the exchange runs repeatedly to make the coverage
+// reliable.
 //
-// The client here is `fetch` with a streamed body ON PURPOSE: a raw
-// `http.request` writing the same 15 MB does NOT reproduce the defect
-// (measured: 40/40 iterations clean against the broken revision), so
-// swapping it would silently retire this coverage.
+// Measured directly against f795722, 5 batches of 8 iterations each:
+//   fetch() with a streamed body, fresh pair per iteration (this shape):
+//     20/40 non-413
+//   raw http.request, fresh pair per iteration:
+//     18/40 non-413
+//   fetch() with a streamed body, one warm pair reused across a batch:
+//     24/40 non-413
+// The defect is not specific to `fetch` vs. `http.request`, and it is
+// not specific to a cold pair — every shape tried reproduces it at
+// roughly 50% per iteration, so neither is load-bearing coverage on its
+// own. 8 iterations is kept because it costs well under a second
+// against a passing proxy and, at that per-iteration rate, reliably
+// fails this test — confirmed across 5 consecutive full-file runs
+// against f795722 — so there is no measured runtime to reclaim by
+// shrinking it further.
 test(
   "an upstream that responds early without reading the over-cap body has its 413 relayed, never replaced by a 502",
   { timeout: 60000 },
@@ -704,11 +715,10 @@ test(
     const ITERATIONS = 8;
 
     for (let i = 0; i < ITERATIONS; i++) {
-      // A FRESH proxy and upstream per iteration, deliberately: the race
-      // is between the upstream closing its socket and the proxy's still
-      // in-flight write, and it only reproduces on a cold pair. Looping
-      // requests through one warm pair instead does not reproduce it at
-      // all (measured: 0/32 against the broken revision).
+      // A fresh proxy and upstream per iteration. Not required to
+      // reproduce the defect (see measurements above) but kept for
+      // parity with how the proxy is actually used — each request in
+      // production can land on a different upstream connection.
       await withRealUpstream(
         (_req, res) => {
           res.writeHead(413, { "content-type": "application/json" });
@@ -752,7 +762,10 @@ test(
 // it. Asserting that the client SOCKET closes does not test the proxy at
 // all — the client's own teardown satisfies that, and an `abandon()`
 // deliberately broken to detach without resuming still passes it. This
-// assertion does not: broken that way, it fails with `write EPIPE`.
+// assertion does not: broken that way, it fails, but not with one fixed
+// symptom — measured 10 runs against a detach-without-resume break: 3
+// failed with `write EPIPE`, 7 failed with the "drained 0/1" message
+// below (the deadline expiring because `req` never reached "end").
 test(
   "an abandoned over-cap request body is drained by the proxy, not left paused",
   { timeout: 20000 },
