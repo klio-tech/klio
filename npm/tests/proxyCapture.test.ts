@@ -669,3 +669,51 @@ test("the elision marker counts honestly and reads singular for one dropped turn
   assert.match(marker.content, /\b1 turn elided\b/, `marker "${marker.content}" must count 1 turn`);
   assert.ok(/truncated/.test(marker.content), "the marker must say a turn was truncated");
 });
+
+// --- an empty role must not silently drop the whole capture -----------
+//
+// `roleOf` returned `String("")` for `role: ""`, which matches neither
+// "user" nor "assistant", so `conversationSessionId` returned null and
+// the ENTIRE capture was skipped — while the render path applied
+// `roleOf(m) || "user"` and would happily have treated the same message
+// as a user turn. The two paths disagreeing is the bug: an omitted role
+// captured fine, an empty-string role captured NOTHING, and the only
+// signal was the absence of evidence.
+
+test("an empty-string role is a user turn, exactly like an absent one", () => {
+  const empty = [{ role: "", content: "hello" }, { role: "assistant", content: "hi" }];
+  const blank = [{ role: "   ", content: "hello" }, { role: "assistant", content: "hi" }];
+
+  assert.notEqual(conversationSessionId("codex", empty), null, "an empty role must not skip capture");
+  assert.notEqual(conversationSessionId("codex", blank), null, "a blank role must not skip capture");
+  // The id itself is seeded from the RAW message bytes on purpose (that
+  // is what stops two conversations with the same rendered opening from
+  // colliding), so `{role:""}` and `{}` legitimately hash differently.
+  // What must match is the CAPTURABILITY decision, asserted above.
+});
+
+test("an empty-string role still emits a capture POST", async () => {
+  let posts = 0;
+  await emitCapture({
+    config: CONFIG,
+    agent: "codex",
+    requestBody: body([
+      { role: "", content: "hello" },
+      { role: "assistant", content: "hi" },
+    ]),
+    assistantText: "sure",
+    fetchImpl: (async () => {
+      posts++;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+  assert.equal(posts, 1, "a capturable conversation must be POSTed regardless of role spelling");
+});
+
+// The sibling case is DELIBERATELY not fixed: a non-object message entry
+// (a bare string in `messages`) has no content to render, so inventing a
+// turn for it would put fabricated evidence in front of a grader. It
+// stays uncapturable on purpose.
+test("a non-object message entry remains uncapturable, by design", () => {
+  assert.equal(conversationSessionId("codex", ["hello", { role: "assistant", content: "hi" }]), null);
+});

@@ -32,14 +32,28 @@ type Turn = { role: string; content: string };
 type MarkerNote = "none" | "head" | "newest";
 
 /**
- * The role of a raw message. A message with no role is a user message —
- * the same default the render path applies, so the two never disagree
- * about whether a conversation has an opening user turn.
+ * The role of a raw message. A message whose role is absent, null, or
+ * BLANK is a user message — the same default the render path applies,
+ * so the two can never disagree about whether a conversation has an
+ * opening user turn.
+ *
+ * The blank case is not hypothetical bookkeeping: `String("")` matches
+ * neither "user" nor "assistant", so `conversationSessionId` returned
+ * null and the ENTIRE capture was silently skipped, while the render
+ * path's `|| "user"` would have treated the very same message as a user
+ * turn. An omitted role captured; an empty-string role captured nothing.
+ *
+ * A NON-OBJECT entry (a bare string in `messages`) still returns "" and
+ * therefore still makes the conversation uncapturable — DELIBERATELY.
+ * There is no content to render, and inventing a turn for it would put
+ * fabricated evidence in front of a grader. Do not "fix" that.
  */
 function roleOf(message: unknown): string {
   if (!message || typeof message !== "object") return "";
   const role = (message as Record<string, unknown>)["role"];
-  return role === undefined || role === null ? "user" : String(role);
+  if (role === undefined || role === null) return "user";
+  const text = String(role).trim();
+  return text === "" ? "user" : text;
 }
 
 /** The content of a raw message, safely. */
@@ -239,10 +253,13 @@ export async function emitCapture(opts: EmitCaptureOptions): Promise<void> {
     // Skip capture entirely if there's no assistant turn yet.
     if (sessionId === null) return;
 
-    // Render all messages. `roleOf` is the same defaulting the session id
-    // uses, so the two paths can never disagree about a message's role.
+    // Render all messages. `roleOf` is the same defaulting the session
+    // id uses — no `|| "user"` fallback here, because that fallback WAS
+    // the divergence: it quietly accepted roles the id path rejected,
+    // hiding the fact that those conversations were never captured at
+    // all. One function, one answer.
     const messages = rawMessages.map((m) => ({
-      role: roleOf(m) || "user",
+      role: roleOf(m),
       content: textOf(contentOf(m)),
     }));
     if (opts.assistantText.trim() !== "") {
