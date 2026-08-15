@@ -13,6 +13,12 @@ import { createHash } from "node:crypto";
 
 import type { CloudConfig } from "../cloudConfig.js";
 
+/** Max bytes per individual block (tool_use input, tool_result content). */
+const MAX_BLOCK_CHARS = 8000;
+
+/** Max bytes for the entire transcript payload (256 KB). */
+const MAX_TRANSCRIPT_BYTES = 256 * 1024;
+
 /**
  * Derive a session id from the conversation's FIRST user message AND
  * FIRST assistant message. This ensures:
@@ -69,7 +75,10 @@ function renderBlock(block: unknown): string {
     const input = b["input"];
     try {
       const inputStr = JSON.stringify(input);
-      const truncated = inputStr.length > 8000 ? inputStr.slice(0, 8000) + "…[truncated]" : inputStr;
+      const truncated =
+        inputStr.length > MAX_BLOCK_CHARS
+          ? inputStr.slice(0, MAX_BLOCK_CHARS) + "…[truncated]"
+          : inputStr;
       return `[tool_use: ${name}] ${truncated}`;
     } catch {
       // Circular or unserializable input; render safely.
@@ -85,7 +94,10 @@ function renderBlock(block: unknown): string {
     } else if (Array.isArray(contentValue)) {
       rendered = contentValue.map((c) => renderBlock(c)).filter((t): t is string => t !== "").join("\n");
     }
-    const truncated = rendered.length > 8000 ? rendered.slice(0, 8000) + "…[truncated]" : rendered;
+    const truncated =
+      rendered.length > MAX_BLOCK_CHARS
+        ? rendered.slice(0, MAX_BLOCK_CHARS) + "…[truncated]"
+        : rendered;
     return `[tool_result] ${truncated}`;
   }
 
@@ -110,16 +122,49 @@ export async function emitCapture(opts: EmitCaptureOptions): Promise<void> {
     const rawMessages = Array.isArray(parsed["messages"]) ? (parsed["messages"] as unknown[]) : [];
     if (rawMessages.length === 0) return;
 
+    // Derive session ID from UNTRUNCATED messages (before any truncation).
+    // This ensures the ID stays stable across turns and prevents collisions.
     const sessionId = conversationSessionId(opts.agent, rawMessages);
     // Skip capture entirely if there's no assistant turn yet.
     if (sessionId === null) return;
 
+    // Render all messages.
     const messages = rawMessages.map((m) => {
       const r = m as Record<string, unknown>;
       return { role: String(r["role"] ?? "user"), content: textOf(r["content"]) };
     });
     if (opts.assistantText.trim() !== "") {
       messages.push({ role: "assistant", content: opts.assistantText });
+    }
+
+    // Truncate at turn granularity to fit within payload cap.
+    let transcript = messages;
+    let elisionMarker = "";
+    const basePayload = {
+      session_id: sessionId,
+      tool_calls: [] as unknown[],
+    };
+    let payloadStr = JSON.stringify({ ...basePayload, messages: transcript });
+
+    // If transcript exceeds cap, keep newest turns and drop from oldest.
+    if (payloadStr.length > MAX_TRANSCRIPT_BYTES) {
+      transcript = [];
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const testTranscript = [messages[i], ...transcript];
+        const testPayload = JSON.stringify({ ...basePayload, messages: testTranscript });
+        if (testPayload.length <= MAX_TRANSCRIPT_BYTES) {
+          transcript = testTranscript;
+        } else {
+          // Adding this turn would exceed the cap; stop here.
+          const droppedCount = i + 1;
+          elisionMarker = `[${droppedCount} turns elided]`;
+          break;
+        }
+      }
+      // Prepend elision marker to the transcript if any turns were dropped.
+      if (elisionMarker) {
+        transcript = [{ role: "system", content: elisionMarker }, ...transcript];
+      }
     }
 
     await doFetch(`${opts.config.baseUrl}/capture/transcript`, {
@@ -131,7 +176,7 @@ export async function emitCapture(opts: EmitCaptureOptions): Promise<void> {
       },
       body: JSON.stringify({
         session_id: sessionId,
-        messages,
+        messages: transcript,
         tool_calls: [],
       }),
     });
