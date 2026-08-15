@@ -50,10 +50,15 @@ async function withRealUpstream(
   try {
     await run(`http://127.0.0.1:${port}`, proxy);
   } finally {
-    // `close()` alone waits for every still-open connection to end. The
-    // slow-upstream tests below deliberately leave connections stalled
-    // (that is the condition under test), so a plain `close()` would
-    // hang the whole run and hide the result — including a failure.
+    // `close()` alone waits for every still-open connection to end, and
+    // several tests below deliberately leave connections stalled — an
+    // over-cap body still relaying to an upstream that is not reading it
+    // outlives the assertion that ended the test. Forcing them shut
+    // keeps teardown bounded and independent of what the test left
+    // behind. (Not demonstrated to be load-bearing: the suite also
+    // completes without it. Kept because a hung `close()` would hide
+    // every result in the run, which is a bad failure mode to leave
+    // available.)
     proxy.closeAllConnections();
     upstream.closeAllConnections();
     await new Promise<void>((r) => proxy.close(() => r()));
@@ -673,178 +678,129 @@ test("a gzip-compressed upstream response is forwarded without a stale content-e
   );
 });
 
-// A client abort/RST GENUINELY mid-upload on the OVER-CAP path must
-// leave the upstream connection released, not open forever.
+// FAIL OPEN, absolutely. An upstream that answers WITHOUT reading the
+// (over-cap) request body — a 413 rejected on headers alone — was
+// reachable and returned a well-formed response, so the proxy must
+// relay it. The only 5xx this server may ever author is the reserved
+// 502 for a genuinely unreachable upstream.
 //
-// Read this together with the KNOWN LIMITATION block in server.ts. The
-// guarantee here is deliberately narrower than a previous round of this
-// test asserted, because the wider one was only ever met by inferring a
-// dead client from socket silence — which destroyed healthy slow-TTFB,
-// long-SSE-gap and backpressured-upload traffic (all four now covered
-// below). What holds, and what this checks:
+// A previous round set `connection: close` on the over-cap path, which
+// made the upstream hang up the instant it finished responding, while
+// the proxy was still writing the remaining megabytes; the write
+// EPIPE'd and `fetch()` rejected instead of yielding the response it
+// already held, turning the 413 into a Klio-authored `api_error` about
+// 40% of the time. One iteration catches that only ~17% of the time,
+// which is how it survived a round of review — so this runs the
+// exchange repeatedly.
 //
-//   * The client's already-in-flight bytes are queued AHEAD of its
-//     FIN/RST, so the reset only surfaces once they have been consumed
-//     (measured on loopback: 5.2 MB of backlog). While the upstream is
-//     keeping up — the normal case, and the case here — that happens
-//     quickly and `live` raises a real "aborted"/"error".
-//   * That evidence, and only that evidence, aborts the upstream fetch,
-//     which releases the connection. Without the AbortController, an
-//     upstream with a full receive window never lets the fetch settle at
-//     all (measured: still pending at 30s).
-//
-// A DELIBERATELY throttled upstream is NOT used here: throttling is the
-// backpressure case, where the reset stays buried behind the backlog and
-// nothing is detected promptly. That is the documented leak, not a bug
-// this test can assert away.
+// The client here is `fetch` with a streamed body ON PURPOSE: a raw
+// `http.request` writing the same 15 MB does NOT reproduce the defect
+// (measured: 40/40 iterations clean against the broken revision), so
+// swapping it would silently retire this coverage.
 test(
-  "a client RST genuinely mid-upload on the over-cap path releases the upstream connection",
-  { timeout: 20000 },
+  "an upstream that responds early without reading the over-cap body has its 413 relayed, never replaced by a 502",
+  { timeout: 60000 },
   async () => {
-    let upstreamClosedAtMs = -1;
-    let upstreamReceivedBytes = 0;
-    const testStart = Date.now();
+    const ITERATIONS = 8;
 
-    await withRealUpstream(
-      (req, res) => {
-        req.on("data", (chunk: Buffer) => { upstreamReceivedBytes += chunk.length; });
-        req.on("close", () => {
-          if (upstreamClosedAtMs < 0) upstreamClosedAtMs = Date.now() - testStart;
-        });
-        req.on("end", () => {
-          res.writeHead(200);
-          res.end("{}");
-        });
-      },
-      { config: CONFIG, inject: false },
-      async (base) => {
-        const url = new URL(base);
-        const clientReq = http.request({
-          host: url.hostname,
-          port: url.port,
-          path: "/v1/models",
-          method: "POST",
-        });
-        clientReq.on("error", () => {
-          // Destroying our own socket mid-write errors here by design.
-        });
-
-        // PACED writes (1 MB every 100ms), not a synchronously enqueued
-        // ReadableStream: a fully-enqueued body is handed to the OS
-        // almost instantly over loopback, leaving nothing "mid-upload"
-        // to interrupt by the time the abort fires.
-        let chunkIndex = 0;
-        function writeNext(): void {
-          if (chunkIndex >= 30) {
-            clientReq.end();
-            return;
-          }
-          clientReq.write(Buffer.alloc(1024 * 1024, chunkIndex % 256));
-          chunkIndex += 1;
-          setTimeout(writeNext, 100);
-        }
-        writeNext();
-
-        // By 1.2s ~12 MB has gone out (over the 10 MB cap) with ~18 MB
-        // still to come: genuinely mid-upload.
-        await new Promise((r) => setTimeout(r, 1200));
-        clientReq.socket?.destroy();
-
-        const deadline = Date.now() + 12000;
-        while (upstreamClosedAtMs < 0 && Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 50));
-        }
-
-        assert.ok(
-          upstreamClosedAtMs >= 0,
-          `the upstream connection should have been released after the client RST ` +
-            `(it received ${upstreamReceivedBytes} bytes before the test gave up)`,
-        );
-      },
-    );
+    for (let i = 0; i < ITERATIONS; i++) {
+      // A FRESH proxy and upstream per iteration, deliberately: the race
+      // is between the upstream closing its socket and the proxy's still
+      // in-flight write, and it only reproduces on a cold pair. Looping
+      // requests through one warm pair instead does not reproduce it at
+      // all (measured: 0/32 against the broken revision).
+      await withRealUpstream(
+        (_req, res) => {
+          res.writeHead(413, { "content-type": "application/json" });
+          res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "too large" } }));
+        },
+        { config: CONFIG, inject: false },
+        async (base) => {
+          const requestBody = new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (let c = 0; c < 15; c++) controller.enqueue(Buffer.alloc(1024 * 1024, c % 256));
+              controller.close();
+            },
+          });
+          const res = await fetch(`${base}/v1/models`, {
+            method: "POST",
+            body: requestBody,
+            // @ts-expect-error Node fetch requires duplex for a streamed body.
+            duplex: "half",
+          });
+          assert.equal(res.status, 413, `iteration ${i}: the upstream's own 413 must be relayed, not replaced`);
+          assert.equal(
+            JSON.parse(await res.text()).error.type,
+            "invalid_request_error",
+            `iteration ${i}: the relayed body must be the upstream's, not a Klio-authored api_error`,
+          );
+        },
+      );
+    }
   },
 );
 
-// Finding 2: an upstream that responds WITHOUT ever reading the (over-
-// cap) request body must not leave the client-facing socket open.
-// Without BufferedThenLive._destroy() tearing `live` down when the
-// wrapper itself is destroyed (which is what happens once undici
-// abandons an unfinished half-duplex request body after the response
-// has already arrived), the paused, still-unread client request just
-// sits there — reaped only by Node's ~5-minute default
-// server.requestTimeout, not by anything this proxy does.
+// `BufferedThenLive.abandon()`. Once the response has gone out, a
+// still-uploading client's over-cap body must be DRAINED and discarded
+// — not left paused (reaped only by Node's 300s default
+// `server.requestTimeout`), and not destroyed either, which would tear
+// down the socket the client is reading its response from.
+//
+// Draining is something only the proxy can do, which is the point of
+// this shape: the client below writes its whole body and never hangs
+// up, so `req` reaching "end" can only come from `abandon()` resuming
+// it. Asserting that the client SOCKET closes does not test the proxy at
+// all — the client's own teardown satisfies that, and an `abandon()`
+// deliberately broken to detach without resuming still passes it. This
+// assertion does not: broken that way, it fails with `write EPIPE`.
 test(
-  "an upstream that responds early without reading the over-cap body does not leave the client socket open",
-  { timeout: 10000 },
+  "an abandoned over-cap request body is drained by the proxy, not left paused",
+  { timeout: 20000 },
   async () => {
-    let clientSocketClosed = false;
+    const drained: boolean[] = [];
 
     await withRealUpstream(
       (_req, res) => {
-        // Respond immediately without ever reading the request body —
-        // e.g. an upstream rejecting on headers alone (a 413 for a
-        // too-large request).
         res.writeHead(413, { "content-type": "application/json" });
         res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "too large" } }));
       },
       { config: CONFIG, inject: false },
       async (base, proxyServer) => {
-        // Observe the raw client<->proxy socket alongside the proxy's
-        // own request handling. `http.Server` supports more than one
-        // "request" listener; this one only watches, never touches
-        // `req`/`res`.
+        // `http.Server` supports more than one "request" listener; this
+        // one only watches, never touches `req`/`res`, and never
+        // consumes the body — so "end" here comes from the proxy alone.
         proxyServer.on("request", (req) => {
-          req.socket.on("close", () => {
-            clientSocketClosed = true;
-          });
+          const index = drained.length;
+          drained.push(false);
+          req.on("end", () => { drained[index] = true; });
         });
 
-        const chunkSize = 1024 * 1024;
-        const totalChunks = 15; // well over the 10 MB cap
-        const requestBody = new ReadableStream<Uint8Array>({
-          start(controller) {
-            for (let i = 0; i < totalChunks; i++) {
-              controller.enqueue(Buffer.alloc(chunkSize, i % 256));
-            }
-            controller.close();
-          },
+        const url = new URL(base);
+        // A raw request, not `fetch`: this client writes its whole 15 MB
+        // regardless of the response arriving first, which is exactly
+        // the situation `abandon()` exists for.
+        const status = await new Promise<number>((resolve, reject) => {
+          const clientReq = http.request(
+            { host: url.hostname, port: url.port, path: "/v1/models", method: "POST" },
+            (clientRes) => {
+              clientRes.resume();
+              clientRes.on("end", () => resolve(clientRes.statusCode ?? 0));
+            },
+          );
+          clientReq.on("error", reject);
+          for (let c = 0; c < 15; c++) clientReq.write(Buffer.alloc(1024 * 1024, c % 256));
+          clientReq.end();
         });
+        assert.equal(status, 413, "sanity: the response must have been delivered before the body finished");
 
-        const res = await fetch(`${base}/v1/models`, {
-          method: "POST",
-          body: requestBody,
-          // @ts-expect-error Node fetch requires duplex for a streamed body.
-          duplex: "half",
-        });
-        // FAIL OPEN, absolutely: the upstream was reachable and
-        // returned a well-formed 413. The proxy must relay it. The
-        // only Klio-authored error this server may ever produce is the
-        // reserved 502-on-unreachable-upstream, and this is not that.
-        // A proxy-side write failure on the request body AFTER the
-        // response has already arrived must never be allowed to
-        // discard that response.
-        assert.equal(res.status, 413, "the upstream's own 413 must be relayed, never replaced by a 502");
-        assert.equal(
-          JSON.parse(await res.text()).error.type,
-          "invalid_request_error",
-          "the relayed body must be the upstream's, not a Klio-authored api_error",
-        );
-
-        // Bounded window for the abandoned request body stream to be
-        // torn down. Without _destroy()/abandon() propagating to
-        // `live`, this socket is only ever reaped by Node's default
-        // 5-minute server.requestTimeout — nowhere near this window.
-        // 6s (not 3s) to absorb the occasional slower path on the
-        // raced-502 outcome above, where cleanup goes through a
-        // different event than the clean-413 case.
         const deadline = Date.now() + 6000;
-        while (!clientSocketClosed && Date.now() < deadline) {
+        while (drained.some((d) => !d) && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 50));
         }
         assert.ok(
-          clientSocketClosed,
-          "the client socket should close once the abandoned request body is torn down, " +
-            "not linger until the server's request timeout",
+          drained.length > 0 && drained.every((d) => d),
+          "the abandoned over-cap body must be drained by the proxy, not left paused until " +
+            `the server's request timeout (drained ${drained.filter((d) => d).length}/${drained.length})`,
         );
       },
     );

@@ -143,57 +143,77 @@ function extractAssistantText(buf: Buffer, contentType: string | undefined): str
 }
 
 /**
- * KNOWN LIMITATION, deliberately accepted — read this before adding an
- * idle timeout here again.
+ * KNOWN LIMITATION, NOT FIXED — read this before adding an idle timeout
+ * or an abort here again.
  *
- * A client that disappears MID-UPLOAD on the over-cap path, while the
- * relay to the upstream is backpressured, is not detected promptly. The
- * remaining body drains to the upstream at the upstream's pace and the
- * exchange ends when that truncated body ends, rather than being torn
- * down when the client actually went away. On a cancelled >10 MB upload
- * that is wasted upstream work.
+ * A client that disappears MID-UPLOAD on the over-cap path is not
+ * detected, and the upstream request is not torn down. The remaining
+ * body keeps being relayed to the upstream at the upstream's pace; the
+ * exchange ends only when that truncated body ends. Measured through
+ * this proxy, after the client was provably gone:
  *
- * This is a leak on a rare path, and every attempt to close it has cost
- * more than it saved. Two were measured against real sockets:
+ *   * BACKPRESSURED UPSTREAM (a consumer slower than the client): the
+ *     proxy kept relaying for 30.5s, delivering 12.5 MB of a dead
+ *     client's body upstream. The `fetch()` settled at 24.4s; the
+ *     upstream socket closed at 30.6s.
+ *   * DEAF UPSTREAM (accepts the connection, never reads the body): not
+ *     released at all within 120s. Bounded in practice only by Node's
+ *     300s default `server.requestTimeout`.
  *
- *   1. INFER DEATH FROM SILENCE (a previous round of this file:
- *      `live.socket.setTimeout(2000, …)`). It cannot work, for two
- *      independent reasons. The socket is SHARED with `res`, and
- *      `http.Server.timeout` defaults to 0 — so arming it creates a 2s
- *      idle timeout that otherwise would not exist for the rest of that
- *      socket's life, and Node's own `socketOnTimeout` destroys the
- *      socket when it fires unless a `req`/`res`/`server` `"timeout"`
- *      listener returns truthy (once `req.complete` is true, `req`'s is
- *      not even consulted). And more fundamentally: this path exists to
- *      relay a body to a consumer SLOWER than the client, so TCP
- *      backpressure stalls inbound data as a matter of course, and
- *      silence cannot distinguish "the client is gone" from "the client
- *      is blocked by the backpressure we ourselves created" — which for
- *      >10 MB bodies is the COMMON case. Measured through this proxy: a
- *      4s upstream TTFB became a client `UND_ERR_SOCKET`, a 3.5s SSE gap
- *      broke the stream (Anthropic's own pings are ~10s apart), and a
- *      healthy backpressured 14 MB upload EPIPE'd at 2s having sent
- *      11.5 MB. All three worked before the timer was added. Breaking
- *      healthy requests to reclaim a rare leak is a bad trade, and a
- *      fail-open violation besides.
+ * That is wasted upstream work on a cancelled >10 MB upload. It is a
+ * leak on a rare path, and every attempt to close it has cost more than
+ * it saved. Three were built and measured against real sockets:
+ *
+ *   1. INFER DEATH FROM SILENCE (`live.socket.setTimeout(2000, …)`). It
+ *      cannot work, for two independent reasons. The socket is SHARED
+ *      with `res`, and `http.Server.timeout` defaults to 0 — so arming
+ *      it creates a 2s idle timeout that otherwise would not exist for
+ *      the rest of that socket's life, and Node's own `socketOnTimeout`
+ *      destroys the socket when it fires unless a `req`/`res`/`server`
+ *      `"timeout"` LISTENER EXISTS (existence is the gate, not the
+ *      listener's return value — and once `req.complete` is true, which
+ *      is exactly when the client has finished uploading, `req`'s
+ *      listener is not consulted at all, so the destroy happens anyway).
+ *      More fundamentally: this path exists to relay a body to a
+ *      consumer SLOWER than the client, so TCP backpressure stalls
+ *      inbound data as a matter of course, and silence cannot
+ *      distinguish "the client is gone" from "the client is blocked by
+ *      the backpressure we ourselves created" — which for >10 MB bodies
+ *      is the COMMON case. Measured through this proxy: a 4s upstream
+ *      TTFB became a client `UND_ERR_SOCKET`, a 3.5s SSE gap broke the
+ *      stream (Anthropic's own pings are ~10s apart), and a healthy
+ *      backpressured 14 MB upload EPIPE'd at 2s having sent 11.5 MB. All
+ *      three worked before the timer was added. Breaking healthy
+ *      requests to reclaim a rare leak is a bad trade, and a fail-open
+ *      violation besides.
  *
  *   2. FORCE A READ ATTEMPT (periodically `resume()` `live`, since Node
  *      only ever notices a dead peer while attempting a read — which is
  *      exactly why a paused `IncomingMessage` stays silent on
- *      disconnect no matter how early listeners are attached). The
- *      mechanism is sound and false-positive-free, but the client's
- *      already-in-flight bytes are queued AHEAD of its FIN/RST: measured
- *      on loopback, 5.2 MB had to be consumed before the reset surfaced
- *      at all. Draining that to discover the client is gone means
- *      buffering it in memory, which is precisely the bound the cap
- *      exists to enforce.
+ *      disconnect no matter how early listeners are attached). Sound and
+ *      free of false positives, and still useless here: the client's
+ *      already-in-flight bytes are queued AHEAD of its FIN/RST —
+ *      measured on loopback, 5.2 MB had to be consumed before the reset
+ *      surfaced at all. Draining that to discover the client is gone
+ *      means buffering it, which is precisely the bound the cap exists
+ *      to enforce.
  *
- * So there is no idle timer here at all, and `http.Server.timeout` is
- * left at 0. Teardown is driven only by EVIDENCE — `live`'s own
- * `"aborted"`/`"error"`/`"close"`, and `res`'s `"close"` — which do fire
- * whenever the upstream is keeping up (the normal case) and are then
- * carried through to the upstream by the `AbortController` in
- * `handleRequest`.
+ *   3. ABORT THE UPSTREAM FETCH from `live`'s `"aborted"`/`"error"` or
+ *      `res`'s `"close"`. Inert, and measured so: 8ms vs 11ms with the
+ *      signal attached vs stripped against a fast upstream (where
+ *      `capStream.destroy()` already settles it), 24381ms vs 23868ms
+ *      against a slow one, never in either case against a deaf one. It
+ *      never fires in the cases that need it, because every one of those
+ *      evidence sources requires the proxy to be actively READING the
+ *      client socket — which only happens once the upstream is already
+ *      consuming, i.e. exactly when there is no problem.
+ *
+ * So there is no idle timer, no probe and no abort here, and
+ * `http.Server.timeout` is left at 0. Teardown is driven only by
+ * evidence that arrives on its own: `live`'s `"aborted"`/`"error"`/
+ * `"close"` and `res`'s `"close"`. When the upstream is keeping up those
+ * fire promptly; when it is not, nothing fires and the limitation above
+ * is what happens.
  */
 
 /**
@@ -236,18 +256,10 @@ class BufferedThenLive extends Readable {
   private readonly onLiveClose: () => void;
   private readonly onLiveAborted: () => void;
   private readonly onLiveError: (err: Error) => void;
-  private clientGoneReported = false;
 
   constructor(
     private readonly prefix: Buffer[],
     private readonly live: http.IncomingMessage,
-    /**
-     * Invoked at most once, when `live` has PROVEN the client is gone —
-     * a real `"aborted"`/`"error"`, never an inference from silence.
-     * Destroying this stream alone does not free the upstream request;
-     * see the `AbortController` in `handleRequest`.
-     */
-    private readonly onClientGone: () => void = () => {},
   ) {
     super();
 
@@ -264,11 +276,9 @@ class BufferedThenLive extends Readable {
     this.onLiveEnd = (): void => this.finishLive();
     this.onLiveClose = (): void => this.finishLive();
     this.onLiveAborted = (): void => {
-      this.reportClientGone();
       this.destroy(new Error("client aborted mid-upload"));
     };
     this.onLiveError = (err: Error): void => {
-      this.reportClientGone();
       this.destroy(err);
     };
 
@@ -280,13 +290,6 @@ class BufferedThenLive extends Readable {
     // above {@link BufferedThenLive}. Arming it here armed Node's own
     // socket-destroy path on a socket shared with `res`, which killed
     // healthy slow-TTFB, long-SSE-gap, and backpressured-upload traffic.
-  }
-
-  /** At most once, and only ever from evidence the client really is gone. */
-  private reportClientGone(): void {
-    if (this.clientGoneReported) return;
-    this.clientGoneReported = true;
-    this.onClientGone();
   }
 
   private finishLive(): void {
@@ -374,7 +377,6 @@ class BufferedThenLive extends Readable {
  */
 function readRequestBody(
   req: http.IncomingMessage,
-  onClientGone: () => void,
 ): Promise<{ capped: false; body: Buffer } | { capped: true; stream: BufferedThenLive }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -405,7 +407,7 @@ function readRequestBody(
         // second time for as long as this closure scope survives —
         // benign for one request, a real transient-memory floor under
         // a burst of concurrent over-cap requests.
-        resolve({ capped: true, stream: new BufferedThenLive(chunks, req, onClientGone) });
+        resolve({ capped: true, stream: new BufferedThenLive(chunks, req) });
       }
     }
 
@@ -517,25 +519,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       return;
     }
 
-    // Destroying the request-body stream is NOT by itself enough to
-    // free the upstream request. With the upstream's receive window
-    // full and the upstream never closing, `undici`'s pending write
-    // never fails and the `fetch()` promise simply never settles —
-    // measured: still pending at 30s against an upstream that accepts
-    // the connection and then never reads. An explicit abort ends it in
-    // single-digit milliseconds. Armed ONLY from evidence the client is
-    // gone (`live`'s own `"aborted"`/`"error"`, or `res`'s `"close"`),
-    // never from an idle inference — see the block above
-    // `BufferedThenLive`.
-    let abortUpstream: AbortController | null = null;
-    let upstreamAborted = false;
-    const abortUpstreamOnce = (): void => {
-      if (upstreamAborted || abortUpstream === null) return;
-      upstreamAborted = true;
-      abortUpstream.abort(new Error("client went away mid-upload"));
-    };
-
-    const body = await readRequestBody(req, abortUpstreamOnce);
+    const body = await readRequestBody(req);
     const upstreamUrl = `${upstream.base}${upstream.path}${upstream.search}`;
 
     // Shape predicate ONLY — "is this a request injection and capture
@@ -563,7 +547,6 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
     // wiring below for WHEN, and `BufferedThenLive.abandon()` for WHY
     // that is `abandon()` and not `.destroy()` on the common path.
     const capStream: BufferedThenLive | null = body.capped ? body.stream : null;
-    if (capStream) abortUpstream = new AbortController();
 
     // `"finish"`: the response was delivered normally — the client may
     // still be mid-upload of the (over-cap) body, so release `capStream`
@@ -589,7 +572,6 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       if (capStreamSettled) return;
       capStreamSettled = true;
       capStream?.destroy();
-      abortUpstreamOnce();
     });
 
     if (body.capped) {
@@ -633,11 +615,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
     // the header. That is a fail-open violation — the only 5xx this
     // server may author is the reserved 502 for a genuinely unreachable
     // upstream, and a reachable upstream that responded is not that.
-    // `abortUpstream` reaches socket teardown instead, without making
-    // the upstream close on us mid-write.
+    // Nothing replaces it: an abort was tried and measured inert (see
+    // item 3 of the KNOWN LIMITATION block above), so the over-cap path
+    // is left pooled like every other request.
 
     const init: RequestInit & { duplex?: "half" } = { method: req.method, headers };
-    if (abortUpstream) init.signal = abortUpstream.signal;
     if (hasBody) {
       init.body = outBody as unknown as RequestInit["body"];
       init.duplex = "half";
@@ -661,10 +643,9 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       try {
         upstreamResponse = await doFetch(upstreamUrl, init);
       } catch (err) {
-        // If WE aborted this fetch because the client went away, there
-        // is nobody left to answer and `res` is already gone; writing a
-        // 502 into a dead socket only manufactures a second error.
-        if (upstreamAborted || res.writableEnded || res.destroyed) return;
+        // Nothing to answer if the client is already gone; writing a 502
+        // into a dead socket only manufactures a second error.
+        if (res.writableEnded || res.destroyed) return;
         sendJson(
           res,
           502,
@@ -757,7 +738,6 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       if (!capStreamSettled) {
         capStreamSettled = true;
         capStream?.destroy();
-        abortUpstreamOnce();
       }
       throw err;
     }
