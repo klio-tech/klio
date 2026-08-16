@@ -1,6 +1,6 @@
 {
   "name": "@klio-tech/klio",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "Persistent memory for your AI coding agents \u2014 local-first, encrypted, MCP-native. One-command onboarding via Docker.",
   "keywords": [
     "klio",
@@ -39,7 +39,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test --import tsx 'tests/**/*.test.ts'",
+    "test": "node tests/run.mjs",
     "lint": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build"
   },

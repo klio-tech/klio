@@ -159,3 +159,76 @@ test("a healthy proxy is left alone on both paths", async () => {
     }
   });
 });
+
+// ---- doctor takes back what 0.9.4–0.9.6 wrote -------------------------
+//
+// Check 1 used to RE-APPLY the proxy env to ~/.claude/settings.json
+// whenever it was missing. That was the wrong direction: Klio's hooks
+// cover Claude Code regardless of auth mode, a Claude subscription never
+// routes to a custom base URL at all, and the entry costs Remote
+// Control. doctor is the second command a user in trouble reaches for,
+// so it undoes the wiring instead of restoring it — but only where
+// Klio's own record proves Klio wrote the value.
+
+import { applyProxyEnv, claudeSettingsPath } from "../src/proxy/claudeCodeProxy.js";
+import { PROXY_BASE_URL } from "../src/proxy/constants.js";
+import { readJson, writeJson } from "../src/adapters/fileutil.js";
+
+test("doctor restores Claude Code's settings, and never re-applies the proxy env", async () => {
+  await inScratchHome(async () => {
+    // Exactly what 0.9.6 left behind, written through the real code.
+    applyProxyEnv();
+    assert.equal(
+      (readJson(claudeSettingsPath())["env"] as Record<string, string>)["ANTHROPIC_BASE_URL"],
+      PROXY_BASE_URL,
+      "precondition: the scratch home looks like a 0.9.6 install",
+    );
+
+    const lines: string[] = [];
+    await doctor({
+      log: (l) => lines.push(l),
+      skipEndToEnd: true,
+      readCloudConfigFn: () => CLOUD_CONFIG,
+      probeProxyFn: async () => ({ alive: true, detail: "alive (inject+capture)" }),
+      spawnProxyFn: () => 1,
+      resolveComposeBinFn: async () => {
+        throw new Error("must not be called");
+      },
+      sleepFn: async () => {},
+    } as never);
+
+    const settings = readJson(claudeSettingsPath());
+    assert.equal(
+      settings["env"],
+      undefined,
+      `doctor must not leave the proxy env behind:\n${JSON.stringify(settings)}`,
+    );
+    assert.match(lines.join("\n"), /Claude Code settings/);
+  });
+});
+
+test("doctor leaves a base URL it cannot prove it wrote", async () => {
+  await inScratchHome(async () => {
+    // Klio's value, but no wiring record to authorize touching it.
+    writeJson(claudeSettingsPath(), {
+      env: { ANTHROPIC_BASE_URL: PROXY_BASE_URL, ENABLE_TOOL_SEARCH: "true" },
+    });
+
+    const lines: string[] = [];
+    await doctor({
+      log: (l) => lines.push(l),
+      skipEndToEnd: true,
+      readCloudConfigFn: () => CLOUD_CONFIG,
+      probeProxyFn: async () => ({ alive: true, detail: "alive (inject+capture)" }),
+      spawnProxyFn: () => 1,
+      resolveComposeBinFn: async () => {
+        throw new Error("must not be called");
+      },
+      sleepFn: async () => {},
+    } as never);
+
+    const env = readJson(claudeSettingsPath())["env"] as Record<string, string>;
+    assert.equal(env["ANTHROPIC_BASE_URL"], PROXY_BASE_URL, "left exactly as found");
+    assert.match(lines.join("\n"), /no record of setting it/i, "and it has to SAY so");
+  });
+});

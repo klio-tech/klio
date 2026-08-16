@@ -96,7 +96,13 @@ import {
   type CuratorConfig,
 } from "../curatorConfig.js";
 import { initCloud, type InitCloudOptions } from "./initCloud.js";
-import { describeTradeoffs, describeWiring, wireProxy } from "../proxy/wiring.js";
+import { migrateClaudeCodeProxyEnv } from "../proxy/claudeCodeMigration.js";
+import {
+  describeClaudeCodeMigration,
+  describeTradeoffs,
+  describeWiring,
+  wireProxy,
+} from "../proxy/wiring.js";
 import {
   installSupervisor,
   probeProxy,
@@ -773,6 +779,12 @@ async function runProxyStep(): Promise<void> {
   narrate(
     "Klio can sit between your agent and Anthropic. This release forwards traffic unchanged — the plumbing ships before the compression does.",
   );
+
+  // Before anything else, and regardless of whether the proxy is even
+  // up: take back what 0.9.4–0.9.6 wrote into ~/.claude/settings.json.
+  // A dead proxy is a reason not to wire NEW agents; it is not a reason
+  // to leave someone's Remote Control broken for another release.
+  describeClaudeCodeMigration(migrateClaudeCodeProxyEnv(), writeLine);
 
   const probe = await probeProxy();
   if (!probe.alive) {

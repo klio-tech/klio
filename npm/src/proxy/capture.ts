@@ -26,6 +26,15 @@
 // the grader on the other end reads one transcript format, and two
 // truncation policies would be two sets of bugs.
 //
+// That claim was false for one release. The Responses reader applied
+// the 8 KB per-block cap to a MESSAGE's whole text, where the Messages
+// path applies it to tool blocks only — so a 50 KB paste survived
+// through Claude Code and was cut to 7998 characters through Codex,
+// inside a 256 KB payload cap that had plenty of room. Fixed in
+// responsesShape.ts, not amended here: the parity is worth more than
+// the cap was, and a Codex user's stack trace is exactly the evidence
+// this path exists to carry.
+//
 // Strictly after the response is forwarded, strictly fire-and-forget.
 
 import { createHash } from "node:crypto";
