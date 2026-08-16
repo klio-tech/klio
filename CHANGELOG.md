@@ -4,6 +4,38 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.5] — 2026-08-15
+
+### Changed — the local proxy prompt now defaults to yes
+
+Cloud `klio init` now offers the local proxy **defaulting to yes** — a
+bare Enter accepts (`[Y/n]`, was `[y/N]`). The proxy is the only
+integration point that needs nothing from the agent (no hooks, no SDK),
+so defaulting to no meant most users never got the strongest version of
+the product. The safety net that justified the old default has since
+shipped: fail-open forwarding, supervisor revival every 60s, `klio
+doctor` healing, `klio proxy stop`, and kill switches that persist
+across a reboot. The trade-offs still print before every prompt, and
+the answer parsing is still exact-match: only an empty answer (the
+default) or an explicit `y`/`yes` accepts; `n`, `no`, and any
+unrecognized input (`nope`, `yy`, garbled paste, ...) decline — a
+default-yes prompt fails toward the safer outcome on anything that
+isn't a clean accept, never the other way around.
+
+Decline at the prompt (type `n`), or turn it off any time afterward
+with `klio proxy inject off` / `klio proxy capture off` (kill switches)
+or `klio uninit` (removes the wiring entirely).
+
+**Non-interactive sessions always decline, regardless of the default.**
+If stdin isn't a TTY — CI, `npx @klio-tech/klio init < /dev/null`, any
+piped script — the proxy offer is skipped before it ever prompts, and
+`klio init` prints one line explaining why and how to enable it later
+(re-run `klio init` from a terminal). This is a hard guard, not a
+side-effect of the prompt's own default: an ended/piped stdin resolves
+an empty read immediately, which is what makes non-interactive init
+safe from ever installing a proxy, a supervisor unit, or a config
+rewrite as an implicit outcome nobody was there to choose.
+
 ## [0.9.4] — 2026-08-14
 
 ### Added — the local proxy: injection + capture for any agent (cloud, opt-in)

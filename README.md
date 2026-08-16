@@ -394,11 +394,27 @@ the other side: it sits on `127.0.0.1:8787` between your agent and the
 model API, and any agent that lets you override its base URL gets team
 memory with no agent-side code whatsoever.
 
-`klio init` (cloud mode) offers it **after** wiring your agents, and
-**defaults to no** — pointing `ANTHROPIC_BASE_URL` at localhost is the
-most invasive thing this tool does to a machine. Accepting it points
-Claude Code and Codex at the proxy, installs a launchd/systemd
-supervisor that re-checks every 60s, and starts the proxy.
+`klio init` (cloud mode) offers it **after** wiring your agents, and as
+of 0.9.5 **defaults to yes** — a bare Enter accepts. It's the only
+integration point that needs nothing from the agent, so leaving it off
+by default meant most users never got the strongest version of the
+product. Pointing `ANTHROPIC_BASE_URL` at localhost is still the most
+invasive thing this tool does to a machine, which is why the trade-offs
+print before the prompt every time — but the proxy fails open, is
+revived by the supervisor every 60s, is healed by `klio doctor`, and
+comes with kill switches (below) and a one-command escape hatch
+(`klio uninit`), so accepting is no longer the riskier default. Type
+`n` (or `no`) to decline, or run `klio init` again later once you're
+ready. Accepting points Claude Code and Codex at the proxy, installs a
+launchd/systemd supervisor that re-checks every 60s, and starts the
+proxy.
+
+**Non-interactive sessions always decline.** If stdin isn't a TTY
+(CI, `npx @klio-tech/klio init < /dev/null`, any piped script) the
+proxy offer is skipped and declined outright, regardless of the
+default — `klio init` prints one line saying why and how to enable it
+later (re-run `klio init` from a terminal). A default-yes prompt must
+never resolve on its own just because nothing was there to answer it.
 
 **What it does to a request.** On a `POST` whose path ends `/messages`
 (Anthropic's Messages API) it appends one block of your team's Klio

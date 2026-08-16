@@ -64,7 +64,7 @@ function snapshotUnits(): Record<string, string | null> {
 // maybeOfferProxy — the brief's floor tests, verbatim.
 // ---------------------------------------------------------------------
 
-test("bare Enter declines — the default is no", async () => {
+test("bare Enter accepts — the default is yes", async () => {
   let wired = false;
   const result = await maybeOfferProxy({
     ask: async () => "",
@@ -73,8 +73,8 @@ test("bare Enter declines — the default is no", async () => {
       wired = true;
     },
   });
-  assert.equal(result.enabled, false);
-  assert.equal(wired, false);
+  assert.equal(result.enabled, true);
+  assert.equal(wired, true);
 });
 
 test("an explicit yes wires the proxy", async () => {
@@ -120,8 +120,14 @@ test("a wiring failure is reported, not thrown", async () => {
 // maybeOfferProxy — answer parsing.
 // ---------------------------------------------------------------------
 
-test("y/yes accept in any case; n, empty, whitespace, and junk decline", async () => {
-  const accept = ["y", "yes", "Y", "YES", "Yes"];
+test("y/yes/empty accept in any case; n, no, whitespace, and junk decline", async () => {
+  // Empty is the bare-Enter default, now yes. "y"/"yes" (any case) are
+  // the explicit accepts. Everything else declines — including "n"/"no"
+  // AND unrecognized junk ("nope", "sure", "yep", "yy"): a default-yes
+  // prompt fails toward the safer outcome (no proxy) on anything that
+  // isn't a clean, exact-match accept, rather than treating "not an
+  // exact no" as license to install something nobody clearly asked for.
+  const accept = ["", "y", "yes", "Y", "YES", "Yes"];
   for (const answer of accept) {
     let wired = false;
     const result = await maybeOfferProxy({
@@ -135,7 +141,7 @@ test("y/yes accept in any case; n, empty, whitespace, and junk decline", async (
     assert.equal(wired, true, `expected "${answer}" to wire`);
   }
 
-  const decline = ["n", "no", "N", "", "   ", "sure", "yep", "yy"];
+  const decline = ["n", "no", "N", "   ", "sure", "yep", "yy", "nope"];
   for (const answer of decline) {
     let wired = false;
     const result = await maybeOfferProxy({
@@ -467,16 +473,24 @@ test(
 );
 
 // ---------------------------------------------------------------------
-// Critical 2 — a bare Enter must decline instantly, and a closed/piped
-// stdin must never hang. Driven through the REAL prompt() so a change
-// that reintroduces the missing `default` can't hide behind a mock.
+// Critical 2 — a bare Enter must accept instantly (the new default),
+// and a non-interactive stdin (piped/closed, no TTY) must decline
+// WITHOUT EVER HANGING — and without silently installing anything just
+// because nobody was there to answer the prompt. Driven through the
+// REAL prompt() so a change that reintroduces the missing `default`,
+// or that drops the `isInteractive` guard, can't hide behind a mock.
+// Every test in this block carries its own `{ timeout }` so a
+// regression that reintroduces the hang FAILS instead of stalling the
+// whole suite.
 // ---------------------------------------------------------------------
 
 test(
-  "buildProxyAsk + real prompt(): bare Enter declines instantly",
+  "interactive: bare Enter accepts instantly and wires the proxy",
   { timeout: 2000 },
   async () => {
     const stdin = new Readable({ read() {} });
+    // Simulates a real terminal attached to stdin.
+    (stdin as unknown as { isTTY: boolean }).isTTY = true;
     const written: string[] = [];
     const stdout = new Writable({
       write(chunk, _enc, cb) {
@@ -485,21 +499,57 @@ test(
       },
     });
 
-    const ask = buildProxyAsk((o) => realPrompt({ ...o, stdin, stdout }));
-    const pending = ask(
-      "Route model calls through a local Klio proxy? ... [y/N]: ",
-    );
+    let wired = false;
+    const pending = maybeOfferProxy({
+      ask: buildProxyAsk((o) => realPrompt({ ...o, stdin, stdout })),
+      anyProxyableAgent: true,
+      isInteractive: (stdin as unknown as { isTTY: boolean }).isTTY === true,
+      wire: async () => {
+        wired = true;
+      },
+    });
     stdin.push("\n");
-    const value = await pending;
-    assert.equal(value, "n");
+    const result = await pending;
+    assert.equal(result.enabled, true);
+    assert.equal(wired, true);
     assert.doesNotMatch(written.join(""), /value required/);
   },
 );
 
 test(
-  "buildProxyAsk + real prompt(): a closed/piped stdin resolves promptly instead of hanging",
+  "interactive: an explicit n declines and does not wire",
   { timeout: 2000 },
   async () => {
+    const stdin = new Readable({ read() {} });
+    (stdin as unknown as { isTTY: boolean }).isTTY = true;
+    const stdout = new Writable({
+      write(_chunk, _enc, cb) {
+        cb();
+      },
+    });
+
+    let wired = false;
+    const pending = maybeOfferProxy({
+      ask: buildProxyAsk((o) => realPrompt({ ...o, stdin, stdout })),
+      anyProxyableAgent: true,
+      isInteractive: (stdin as unknown as { isTTY: boolean }).isTTY === true,
+      wire: async () => {
+        wired = true;
+      },
+    });
+    stdin.push("n\n");
+    const result = await pending;
+    assert.equal(result.enabled, false);
+    assert.equal(wired, false);
+  },
+);
+
+test(
+  "non-interactive: a closed/piped stdin declines promptly instead of hanging, and never wires",
+  { timeout: 2000 },
+  async () => {
+    // No `isTTY` set at all — matches a real piped/redirected stdin
+    // (`klio init < /dev/null`, any CI runner without a TTY attached).
     const stdin = new Readable({ read() {} });
     const stdout = new Writable({
       write(_chunk, _enc, cb) {
@@ -507,16 +557,29 @@ test(
       },
     });
 
-    const ask = buildProxyAsk((o) => realPrompt({ ...o, stdin, stdout }));
-    const pending = ask(
-      "Route model calls through a local Klio proxy? ... [y/N]: ",
-    );
-    // End the stream with no data at all — simulates a piped/redirected
-    // stdin that closes immediately (e.g. `klio init < /dev/null`, or
-    // any CI runner that doesn't attach a TTY).
+    let asked = false;
+    let wired = false;
+    const pending = maybeOfferProxy({
+      ask: buildProxyAsk((o) => {
+        asked = true;
+        return realPrompt({ ...o, stdin, stdout });
+      }),
+      anyProxyableAgent: true,
+      isInteractive: (stdin as unknown as { isTTY?: boolean }).isTTY === true,
+      wire: async () => {
+        wired = true;
+      },
+    });
+    // End the stream with no data at all — if the `isInteractive` guard
+    // were ever removed, this is exactly the input shape that used to
+    // hang `prompt()` forever (handleEnd resolving "" without a
+    // default) or, worse under a default-yes prompt, silently accept.
     stdin.push(null);
-    const value = await pending;
-    assert.equal(value, "n");
+    const result = await pending;
+    assert.equal(result.enabled, false);
+    assert.equal(result.skippedNonInteractive, true);
+    assert.equal(wired, false, "a non-interactive session must never wire the proxy");
+    assert.equal(asked, false, "the prompt must never even be reached on a non-interactive stdin");
   },
 );
 
