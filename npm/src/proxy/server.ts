@@ -35,9 +35,13 @@ import {
   PROXY_PORT,
   type ProxyHealth,
 } from "./constants.js";
-import { emitCapture, type EmitCaptureOptions } from "./capture.js";
+import { emitCapture, type CaptureShape, type EmitCaptureOptions } from "./capture.js";
 import { filterRequestHeaders, filterResponseHeaders } from "./headers.js";
-import { injectMemories } from "./inject.js";
+import { injectMemories, injectMemoriesResponses } from "./inject.js";
+import {
+  extractResponsesAssistantText,
+  lastUserInputText,
+} from "./responsesShape.js";
 import {
   INJECT_REASON_HEADER,
   createWarmingRecaller,
@@ -158,10 +162,32 @@ function lastUserMessageText(parsedBody: unknown): string {
 const SSE_DATA_LINE = /^data:\s*(.+)$/;
 
 /**
+ * Which transform, if any, applies to a request — decided by PATH
+ * SUFFIX, the only thing available before the body is read.
+ *
+ *   * `/v1/messages`  → Anthropic's Messages API.
+ *   * `/v1/responses` → OpenAI's Responses API, which is what Codex
+ *     sends (`wire_api = "responses"`, proxy/codexProxy.ts). This
+ *     release is the first to do anything with it; every earlier one
+ *     forwarded it byte for byte, so Codex — the one agent that cannot
+ *     use hooks and therefore the only reason this proxy exists — got
+ *     nothing.
+ *
+ * Anything else is `null`, reported as `not-applicable`, and forwarded
+ * untouched.
+ */
+function shapeOfPath(path: string): CaptureShape | null {
+  if (path.endsWith("/messages")) return "messages";
+  if (path.endsWith("/responses")) return "responses";
+  return null;
+}
+
+/**
  * Best-effort assistant text out of a (possibly teed, possibly
- * truncated) response body, for capture only. Handles both a plain
- * Messages JSON response and an SSE stream of `content_block_delta`
- * events. Never throws — a malformed or truncated body just yields "".
+ * truncated) Messages response body, for capture only. Handles both a
+ * plain Messages JSON response and an SSE stream of
+ * `content_block_delta` events. Never throws — a malformed or truncated
+ * body just yields "".
  */
 function extractAssistantText(buf: Buffer, contentType: string | undefined): string {
   const text = buf.toString("utf8");
@@ -606,9 +632,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
     // user-facing toggles, and someone disabling injection (most likely
     // because they suspect it of affecting model output) must not also
     // silently lose capture with no signal that it happened.
-    const isMessagesPath = !body.capped && req.method === "POST" && upstream.path.endsWith("/messages");
-    const isMessagesShape = isMessagesPath && opts.config !== null;
-    const willInject = isMessagesShape && injectEnabled;
+    const shape: CaptureShape | null =
+      !body.capped && req.method === "POST" ? shapeOfPath(upstream.path) : null;
+    const isKnownShape = shape !== null && opts.config !== null;
+    const willInject = isKnownShape && injectEnabled;
 
     let outBody: Buffer | Readable;
     let injected = 0;
@@ -619,7 +646,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
     // what let "injection is inert in production" survive a whole
     // branch of green tests. Assigned on EVERY path below, including
     // the ones that never reach the injector.
-    let reason: InjectReason = !isMessagesPath
+    let reason: InjectReason = shape === null
       ? "not-applicable"
       : opts.config === null
         ? "no-config"
@@ -680,7 +707,8 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
         let found: RecallLookup = { memories: [], reason: "no-query" };
         try {
           const parsed: unknown = JSON.parse(body.body.toString("utf8"));
-          const query = lastUserMessageText(parsed);
+          const query =
+            shape === "responses" ? lastUserInputText(parsed) : lastUserMessageText(parsed);
           found = query.trim() === "" ? { memories: [], reason: "no-query" } : lookup(query);
         } catch {
           // The body is not JSON (or the lookup threw). Say THAT, rather
@@ -689,7 +717,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
           // from "we could not read this body".
           found = { memories: [], reason: "malformed-body" };
         }
-        const result = injectMemories(body.body, found.memories);
+        const result =
+          shape === "responses"
+            ? injectMemoriesResponses(body.body, found.memories)
+            : injectMemories(body.body, found.memories);
         outBody = result.body;
         injected = result.injected;
         // Memories in hand but nothing injected means the body could not
@@ -775,7 +806,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
         return;
       }
 
-      const willCapture = captureEnabled && isMessagesShape && originalBuffered !== null && opts.config !== null;
+      const willCapture = captureEnabled && isKnownShape && originalBuffered !== null && opts.config !== null;
       const upstreamNodeStream = Readable.fromWeb(
         upstreamResponse.body as unknown as import("node:stream/web").ReadableStream<Uint8Array>,
       );
@@ -814,18 +845,24 @@ export function createProxyServer(opts: CreateProxyServerOptions): http.Server {
       const tee = new CapturingTee();
       const config = opts.config as CloudConfig;
       const requestBody = originalBuffered as Buffer;
+      const captureShape = shape as CaptureShape;
       res.on("finish", () => {
         // Guards a SYNCHRONOUS throw from `capture` (a public injection
         // point a caller could hand us a broken implementation of), not
         // just a rejected promise — a throw here happens after the
         // response has already been delivered and must never surface.
         try {
-          const assistantText = extractAssistantText(tee.captured(), responseHeaders["content-type"]);
+          const contentType = responseHeaders["content-type"];
+          const assistantText =
+            captureShape === "responses"
+              ? extractResponsesAssistantText(tee.captured(), contentType)
+              : extractAssistantText(tee.captured(), contentType);
           void capture({
             config,
             agent: config.agentId,
             requestBody,
             assistantText,
+            shape: captureShape,
             fetchImpl: doFetch,
           }).catch(() => {
             // Best-effort by contract; a capture failure must never

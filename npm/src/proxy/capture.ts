@@ -7,24 +7,39 @@
 // attributed. The proxy sees the whole conversation, so it is the one
 // place those sessions can be captured.
 //
-// SCOPE, precisely: this reaches agents speaking Anthropic's Messages
-// API, because `server.ts` gates injection and capture on a POST whose
-// path ends `/messages`. Claude Code is the one that matters today; any
-// other harness on that API gets the same treatment. CODEX DOES NOT.
-// It is wired to the proxy, but `wire_api = "responses"`
-// (proxy/codexProxy.ts) puts its traffic on `/v1/responses`, which this
-// release forwards byte for byte. The user-facing copy was corrected
-// for exactly this; claiming "Codex and any self-built agent" here
-// promised three things Codex users do not get.
+// SCOPE, precisely: TWO wire shapes, sharing everything below the
+// point where a request is read.
+//
+//   * Anthropic's Messages API — a POST whose path ends `/messages`.
+//     Claude Code speaks it, though Claude Code no longer NEEDS this
+//     path: its hooks capture the same sessions regardless of auth
+//     mode, and under a Claude subscription its traffic never reaches a
+//     custom base URL at all.
+//   * OpenAI's Responses API — a POST whose path ends `/responses`.
+//     Codex speaks it (`wire_api = "responses"`, proxy/codexProxy.ts),
+//     and Codex has no hooks. THIS is the shape that makes the proxy
+//     worth running.
+//
+// Everything past the shape-specific read — session-id derivation, the
+// per-block cap, turn-granular truncation, the total payload cap, the
+// `/capture/transcript` contract — is identical for both, deliberately:
+// the grader on the other end reads one transcript format, and two
+// truncation policies would be two sets of bugs.
 //
 // Strictly after the response is forwarded, strictly fire-and-forget.
 
 import { createHash } from "node:crypto";
 
 import type { CloudConfig } from "../cloudConfig.js";
+import { responsesTurns } from "./responsesShape.js";
+import {
+  seedOf,
+  textOf,
+  truncateTurnContent,
+  type Turn,
+} from "./transcript.js";
 
-/** Max UTF-8 bytes per individual block (tool_use input, tool_result content). */
-const MAX_BLOCK_BYTES = 8000;
+export { renderBlock } from "./transcript.js";
 
 /** Max UTF-8 bytes for the entire serialized transcript payload (256 KB). */
 const MAX_TRANSCRIPT_BYTES = 256 * 1024;
@@ -35,8 +50,8 @@ const MAX_TRANSCRIPT_BYTES = 256 * 1024;
  */
 const MIN_FRAGMENT_BYTES = 512;
 
-/** One rendered turn of the transcript as it is sent. */
-type Turn = { role: string; content: string };
+/** The wire shape a captured request was read from. */
+export type CaptureShape = "messages" | "responses";
 
 /** What the elision marker has to say beyond the count of dropped turns. */
 type MarkerNote = "none" | "head" | "newest";
@@ -72,13 +87,34 @@ function contentOf(message: unknown): unknown {
   return (message as Record<string, unknown>)["content"];
 }
 
-/** Serialize for hashing. Never throws; unserializable input falls back. */
-function seedOf(message: unknown): string {
-  try {
-    return JSON.stringify(message) ?? "";
-  } catch {
-    return String(message);
-  }
+/**
+ * A turn plus the RAW item it came from — the common currency both wire
+ * shapes are read into, and the only thing anything below this point
+ * knows about. `raw` exists so the session id keeps being seeded from
+ * unrendered, untruncated content.
+ */
+type SourcedTurn = { raw: unknown; role: string; content: string };
+
+/** Messages-shape read: every entry of `messages`, kept as-is. */
+function messagesTurns(parsed: Record<string, unknown>): SourcedTurn[] {
+  const raw = Array.isArray(parsed["messages"]) ? (parsed["messages"] as unknown[]) : [];
+  return raw.map((m) => ({ raw: m, role: roleOf(m), content: textOf(contentOf(m)) }));
+}
+
+/**
+ * Session id from already-read turns. The Messages path's
+ * {@link conversationSessionId} is this function with its own read
+ * applied first; the Responses path reuses it directly, so both shapes
+ * get the identical stability and collision properties described below.
+ */
+function turnsSessionId(agent: string, turns: SourcedTurn[]): string | null {
+  const firstUser = turns.find((t) => t.role === "user");
+  const firstAssistant = turns.find((t) => t.role === "assistant");
+  if (firstUser === undefined || firstAssistant === undefined) return null;
+
+  const seed = seedOf(firstUser.raw) + "\n \n" + seedOf(firstAssistant.raw);
+  const hash = createHash("sha256").update(seed).digest("hex").slice(0, 16);
+  return `klio-proxy:${agent}:${hash}`;
 }
 
 /**
@@ -100,144 +136,10 @@ function seedOf(message: unknown): string {
  * The engine's richer-transcript-wins upsert then keeps the fullest version.
  */
 export function conversationSessionId(agent: string, messages: unknown[]): string | null {
-  const firstUser = messages.find((m) => roleOf(m) === "user");
-  const firstAssistant = messages.find((m) => roleOf(m) === "assistant");
-
-  // Skip capture entirely if there's no assistant turn yet (turn 1).
-  if (firstUser === undefined || firstAssistant === undefined) return null;
-
-  const seed = seedOf(firstUser) + "\n \n" + seedOf(firstAssistant);
-  const hash = createHash("sha256").update(seed).digest("hex").slice(0, 16);
-  return `klio-proxy:${agent}:${hash}`;
-}
-
-/** Marker appended to a turn whose own content had to be cut. */
-const TURN_TRUNCATED_SUFFIX = "…[turn truncated]";
-
-/** Marker appended to a single content block that had to be cut. */
-const BLOCK_TRUNCATED_SUFFIX = "…[truncated]";
-
-/** UTF-8 bytes a code point occupies as-is. */
-function utf8Width(code: number): number {
-  if (code < 0x80) return 1;
-  if (code < 0x800) return 2;
-  // A lone surrogate is re-encoded as U+FFFD, which is also 3 bytes.
-  if (code < 0x10000) return 3;
-  return 4;
-}
-
-/**
- * UTF-8 bytes a code point occupies once JSON.stringify has escaped it —
- * the only measure that agrees with what actually ships on the wire.
- * A lone surrogate costs 6 ASCII bytes (`\uXXXX`), not the 3 bytes Node
- * would spend replacing it with U+FFFD.
- */
-function jsonWidth(code: number): number {
-  if (code === 0x22 || code === 0x5c) return 2; // \" and \\
-  if (code < 0x20) {
-    // \b \t \n \f \r have two-character escapes; the rest go to \u00XX.
-    return code === 8 || code === 9 || code === 10 || code === 12 || code === 13 ? 2 : 6;
-  }
-  if (code >= 0xd800 && code <= 0xdfff) return 6; // lone surrogate -> \uXXXX
-  return utf8Width(code);
-}
-
-/**
- * Truncate to a budget by walking whole code points, so a surrogate pair
- * is never split. Returns the longest prefix whose measured width fits.
- */
-function truncateByCodePoints(
-  content: string,
-  maxUnits: number,
-  measure: (code: number) => number,
-): string {
-  if (maxUnits <= 0) return "";
-  let used = 0;
-  let end = 0;
-  while (end < content.length) {
-    const code = content.codePointAt(end) as number;
-    const width = measure(code);
-    if (used + width > maxUnits) break;
-    used += width;
-    end += code > 0xffff ? 2 : 1;
-  }
-  return content.slice(0, end);
-}
-
-/** Bytes a string costs inside a JSON document, excluding its quotes. */
-function jsonBytesOf(value: string): number {
-  return Buffer.byteLength(JSON.stringify(value), "utf8") - 2;
-}
-
-/**
- * Truncate a turn's content to a budget expressed in JSON-escaped UTF-8
- * bytes, appending the truncation marker. The returned string is
- * guaranteed to serialize into at most `maxJsonBytes` bytes, and never
- * ends mid-surrogate-pair.
- */
-function truncateTurnContent(content: string, maxJsonBytes: number): string {
-  if (jsonBytesOf(content) <= maxJsonBytes) return content;
-  const budget = maxJsonBytes - jsonBytesOf(TURN_TRUNCATED_SUFFIX);
-  // No room for even the marker: emit nothing rather than spin or overflow.
-  // (The previous loop had no lower bound and spun forever for tiny budgets.)
-  if (budget <= 0) return "";
-  return truncateByCodePoints(content, budget, jsonWidth) + TURN_TRUNCATED_SUFFIX;
-}
-
-/** Truncate a rendered block to a raw UTF-8 byte budget, surrogate-safe. */
-function truncateBlock(rendered: string): string {
-  if (Buffer.byteLength(rendered, "utf8") <= MAX_BLOCK_BYTES) return rendered;
-  const budget = MAX_BLOCK_BYTES - Buffer.byteLength(BLOCK_TRUNCATED_SUFFIX, "utf8");
-  if (budget <= 0) return "";
-  return truncateByCodePoints(rendered, budget, utf8Width) + BLOCK_TRUNCATED_SUFFIX;
-}
-
-/** Render Anthropic content (string or block array) to plain text. */
-function textOf(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((b) => renderBlock(b))
-    .filter((t): t is string => t !== "")
-    .join("\n");
-}
-
-/** Render a single content block to text. Exported for unit testing. */
-export function renderBlock(block: unknown): string {
-  if (!block || typeof block !== "object") return "";
-  const b = block as Record<string, unknown>;
-  const type = b["type"];
-
-  if (type === "text") {
-    const text = b["text"];
-    return typeof text === "string" ? text : "";
-  }
-
-  if (type === "tool_use") {
-    const name = b["name"];
-    const input = b["input"];
-    try {
-      const inputStr = JSON.stringify(input);
-      return `[tool_use: ${name}] ${truncateBlock(inputStr)}`;
-    } catch {
-      // Circular or unserializable input; render safely.
-      return `[tool_use: ${name}] [unserializable input]`;
-    }
-  }
-
-  if (type === "tool_result") {
-    const contentValue = b["content"];
-    let rendered = "";
-    if (typeof contentValue === "string") {
-      rendered = contentValue;
-    } else if (Array.isArray(contentValue)) {
-      rendered = contentValue.map((c) => renderBlock(c)).filter((t): t is string => t !== "").join("\n");
-    }
-    return `[tool_result] ${truncateBlock(rendered)}`;
-  }
-
-  // Unknown block types are skipped.
-  return "";
+  return turnsSessionId(
+    agent,
+    messages.map((m) => ({ raw: m, role: roleOf(m), content: "" })),
+  );
 }
 
 export type EmitCaptureOptions = {
@@ -245,6 +147,12 @@ export type EmitCaptureOptions = {
   agent: string;
   requestBody: Buffer;
   assistantText: string;
+  /**
+   * Which wire shape `requestBody` is. Defaults to `"messages"` so
+   * every existing caller and test keeps its behaviour unchanged;
+   * `server.ts` always passes it explicitly.
+   */
+  shape?: CaptureShape;
   fetchImpl?: typeof fetch;
 };
 
@@ -254,24 +162,25 @@ export async function emitCapture(opts: EmitCaptureOptions): Promise<void> {
     if (!opts.config.apiKey) return;
 
     const parsed = JSON.parse(opts.requestBody.toString("utf8")) as Record<string, unknown>;
-    const rawMessages = Array.isArray(parsed["messages"]) ? (parsed["messages"] as unknown[]) : [];
-    if (rawMessages.length === 0) return;
 
-    // Derive session ID from UNTRUNCATED messages (before any truncation).
-    // This ensures the ID stays stable across turns and prevents collisions.
-    const sessionId = conversationSessionId(opts.agent, rawMessages);
+    // The ONLY shape-dependent step. Both readers produce the same
+    // `{ raw, role, content }` currency: one read of the raw request,
+    // one answer for both the session id and the rendered turn, so the
+    // two can never disagree about whether a conversation has an
+    // opening user turn — the divergence that once made whole
+    // conversations silently uncapturable.
+    const turns: SourcedTurn[] =
+      opts.shape === "responses" ? responsesTurns(parsed) : messagesTurns(parsed);
+    if (turns.length === 0) return;
+
+    // Derive session ID from UNTRUNCATED, UNRENDERED turns (before any
+    // truncation). This ensures the ID stays stable across turns and
+    // prevents collisions.
+    const sessionId = turnsSessionId(opts.agent, turns);
     // Skip capture entirely if there's no assistant turn yet.
     if (sessionId === null) return;
 
-    // Render all messages. `roleOf` is the same defaulting the session
-    // id uses — no `|| "user"` fallback here, because that fallback WAS
-    // the divergence: it quietly accepted roles the id path rejected,
-    // hiding the fact that those conversations were never captured at
-    // all. One function, one answer.
-    const messages = rawMessages.map((m) => ({
-      role: roleOf(m),
-      content: textOf(contentOf(m)),
-    }));
+    const messages: Turn[] = turns.map((t) => ({ role: t.role, content: t.content }));
     if (opts.assistantText.trim() !== "") {
       messages.push({ role: "assistant", content: opts.assistantText });
     }

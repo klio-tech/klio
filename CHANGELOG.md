@@ -4,6 +4,76 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.6] — 2026-08-16
+
+### Added — the proxy now injects and captures on the OpenAI Responses API
+
+Codex was wired through the proxy but got nothing from it. Injection and
+capture both gated on a POST whose path ends `/messages`, and Codex
+speaks `wire_api = "responses"` — its traffic lands on `/v1/responses`
+and was forwarded byte for byte. Since Codex is the main agent that
+cannot use hooks, that left the proxy with no unique value at all.
+
+Both transforms now cover the Responses API alongside Anthropic's
+Messages API:
+
+- **Injection** appends recalled memories to `instructions`, the
+  Responses API's system-level guidance field. Exactly one field is
+  touched and only ever appended to, with the original text first. The
+  conversation (`input`), `tools`, `tool_choice` and every `call_id`
+  are never read for mutation and never rewritten — an orphaned or
+  reordered `call_id` is rejected outright by the API. The same
+  byte-stability guard applies: if the original body does not
+  round-trip through JSON unchanged, the original bytes are forwarded.
+  Any unrecognised `instructions` shape forwards unchanged rather than
+  guessing.
+- **Capture** reads `input` into the same transcript the Messages path
+  produces — `message` items by role, `function_call` as an assistant
+  `[tool_use: …]` turn, `function_call_output` as a user
+  `[tool_result] …` turn — and sends it through the identical
+  `/capture/transcript` contract, session-id derivation, per-block cap
+  and turn-granular truncation. Assistant text is read from
+  `response.output_text.delta` events (whose `delta` is a string, not
+  the object the Anthropic stream uses) or from `output` on a
+  non-streamed reply.
+
+`x-klio-injected` and `x-klio-injected-reason` report the new path in
+the existing vocabulary, and `klio proxy inject off` / `klio proxy
+capture off` apply to it identically.
+
+Verified against a real `/v1/responses` endpoint with real Codex
+(codex-cli 0.39.0) driving it, not a mock: injection fired
+(`x-klio-injected: 2`), only `instructions` differed between the
+received and forwarded bytes, the model's answer contained content that
+existed only in the injected memories, and the conversation was
+captured with tool calls and results attributed to the right sides.
+
+### Changed — init now tells the truth about what the proxy is for
+
+The init prompt and the trade-offs block presented the proxy as how
+Claude Code receives team context. It is not. Claude Code is already
+covered end to end by Klio's hooks — injection on `SessionStart`,
+capture on `PostToolUse`/`UserPromptSubmit` — and hooks work regardless
+of how Claude Code authenticates. Under a Claude **subscription** (no
+`ANTHROPIC_API_KEY`), Claude Code does not send traffic to a custom base
+URL at all, so enabling the proxy changes nothing for it. Measured on a
+real machine: a healthy `inject+capture` proxy on `ANTHROPIC_BASE_URL`
+received zero connections over fifteen minutes, while the hook path
+wrote 64 memories in the same window.
+
+The copy now says plainly that Claude Code does not need the proxy, and
+that the proxy exists for agents without hook support — Codex, and any
+self-built agent with a base-URL override. Every warning that is still
+true is kept: Remote Control incompatibility, MCP Tool Search needing
+`ENABLE_TOOL_SEARCH=true`, and a dead proxy blocking the agents that do
+route through it.
+
+The MCP wiring line (`✓ claude-code + cursor + codex + … connected`) now
+says `— Klio MCP server connected`. Printed directly above the proxy
+offer, the old wording read as though every listed agent was about to be
+routed through the proxy; they are two different integrations with two
+different reaches.
+
 ## [0.9.5] — 2026-08-15
 
 ### Changed — the local proxy prompt now defaults to yes
