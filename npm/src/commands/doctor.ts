@@ -19,8 +19,12 @@
 // real request and reports what came back.
 //
 // Deliberately NOT a check: whether compression is saving tokens. This
-// release is pass-through only, and doctor should not imply otherwise.
+// release injects and captures but does not compress, and doctor should
+// not imply otherwise.
 
+import { resolve } from "node:path";
+
+import { readCloudConfig } from "../cloudConfig.js";
 import { runtimeDir } from "../compose.js";
 import { composeUpService, resolveComposeBin } from "../docker.js";
 import { readProxyEnv, applyProxyEnv } from "../proxy/claudeCodeProxy.js";
@@ -32,6 +36,7 @@ import {
   PROXY_SERVICE,
   claudeProxyEnv,
 } from "../proxy/constants.js";
+import { spawnProxy } from "../proxy/processSupervisor.js";
 import { detectSupervisor, probeProxy, supervisorPaths } from "../proxy/supervisor.js";
 import { existsSync } from "node:fs";
 
@@ -49,6 +54,20 @@ export type DoctorOptions = {
   skipEndToEnd?: boolean;
   /** Do not modify anything — report only. */
   dryRun?: boolean;
+  /**
+   * Injection seams. Production leaves every one undefined and gets the
+   * real implementation; the unit suite substitutes recorders so it
+   * never probes the real port, spawns a process, or shells out to
+   * Docker.
+   */
+  readCloudConfigFn?: typeof readCloudConfig;
+  probeProxyFn?: typeof probeProxy;
+  spawnProxyFn?: typeof spawnProxy;
+  resolveComposeBinFn?: typeof resolveComposeBin;
+  composeUpServiceFn?: typeof composeUpService;
+  sleepFn?: (ms: number) => Promise<void>;
+  /** Absolute path to the CLI entrypoint, used when spawning `proxy serve`. */
+  cliPath?: string;
 };
 
 export async function doctor(opts: DoctorOptions = {}): Promise<number> {
@@ -63,7 +82,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   const codexCheck = checkCodex();
   if (codexCheck) checks.push(codexCheck);
   checks.push(checkSupervisor());
-  checks.push(await checkProxyAlive(opts.dryRun ?? false, log));
+  checks.push(await checkProxyAlive(opts, log));
 
   if (!opts.skipEndToEnd) {
     checks.push(await checkEndToEnd(checks));
@@ -82,7 +101,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     log(`  Repaired ${healed.length} problem(s).`);
   }
   if (failed.length === 0) {
-    log("  Everything checks out. (Pass-through only — no compression yet.)");
+    log("  Everything checks out. (Injection and capture only — no compression yet.)");
     log("");
     return 0;
   }
@@ -200,21 +219,44 @@ function checkSupervisor(): Check {
   };
 }
 
-/** Check 3 — is the proxy answering, and can we bring it back if not. */
-async function checkProxyAlive(dryRun: boolean, log: (line: string) => void): Promise<Check> {
-  const first = await probeProxy();
+/**
+ * Check 3 — is the proxy answering, and can we bring it back if not.
+ *
+ * How it is brought back depends on how it RUNS, and the two ways have
+ * nothing in common. `ensure()` (commands/proxy.ts) already branches on
+ * exactly this signal — cloud init writes ~/.klio/config.json, local
+ * init never does — and doctor has to branch the same way. It did not:
+ * it went straight to `resolveComposeBin()`, so on a Docker-free cloud
+ * machine the documented recovery ("`klio doctor` checks and heals", in
+ * the consent text at wiring.ts) was impossible, and the user was told
+ * their problem was Docker while ANTHROPIC_BASE_URL pointed at a dead
+ * port and their agent could not reach a model at all.
+ */
+async function checkProxyAlive(opts: DoctorOptions, log: (line: string) => void): Promise<Check> {
+  const probe = opts.probeProxyFn ?? probeProxy;
+  const sleepFn = opts.sleepFn ?? sleep;
+  const cloudMode = (opts.readCloudConfigFn ?? readCloudConfig)() !== null;
+
+  const first = await probe();
   if (first.alive) {
     return { name: "Proxy process", status: "ok", detail: `${PROXY_PROBE_URL} — ${first.detail}` };
   }
 
-  if (dryRun) {
+  if (opts.dryRun) {
     return { name: "Proxy process", status: "fail", detail: `down (${first.detail})` };
   }
 
   log(`  … proxy not answering (${first.detail}), restarting`);
   try {
-    const bin = await resolveComposeBin();
-    await composeUpService(bin, runtimeDir(), PROXY_SERVICE);
+    if (cloudMode) {
+      // Same revival as `ensure`'s cloud path: spawn our own detached
+      // `proxy serve`. No daemon, no compose file, nothing to install.
+      const spawn = opts.spawnProxyFn ?? spawnProxy;
+      spawn({ cliPath: opts.cliPath ?? resolve(process.argv[1] ?? "") });
+    } else {
+      const bin = await (opts.resolveComposeBinFn ?? resolveComposeBin)();
+      await (opts.composeUpServiceFn ?? composeUpService)(bin, runtimeDir(), PROXY_SERVICE);
+    }
   } catch (err) {
     return {
       name: "Proxy process",
@@ -222,22 +264,28 @@ async function checkProxyAlive(dryRun: boolean, log: (line: string) => void): Pr
       detail:
         `down and could not be restarted: ` +
         `${err instanceof Error ? err.message : String(err)}. ` +
-        `Is Docker running? Your agent cannot reach a model until this is fixed — ` +
+        (cloudMode
+          ? `Run \`klio proxy serve\` in a terminal to see why it will not start. `
+          : `Is Docker running? `) +
+        `Your agent cannot reach a model until this is fixed — ` +
         `\`klio uninit\` is the escape hatch.`,
     };
   }
 
   for (let attempt = 0; attempt < 10; attempt++) {
-    await sleep(500);
-    const probe = await probeProxy();
-    if (probe.alive) {
-      return { name: "Proxy process", status: "healed", detail: `restarted — ${probe.detail}` };
+    await sleepFn(500);
+    const again = await probe();
+    if (again.alive) {
+      return { name: "Proxy process", status: "healed", detail: `restarted — ${again.detail}` };
     }
   }
   return {
     name: "Proxy process",
     status: "fail",
-    detail: "restarted but still not answering — check `docker logs klio-proxy`",
+    detail: cloudMode
+      ? "restarted but still not answering — run `klio proxy serve` to see the error, " +
+        "or `klio uninit` to remove the wiring"
+      : "restarted but still not answering — check `docker logs klio-proxy`",
   };
 }
 

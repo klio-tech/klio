@@ -1,6 +1,6 @@
 {
   "name": "@klio-tech/klio",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Persistent memory for your AI coding agents \u2014 local-first, encrypted, MCP-native. One-command onboarding via Docker.",
   "keywords": [
     "klio",

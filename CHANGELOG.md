@@ -4,6 +4,82 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.4] — 2026-08-14
+
+### Added — the local proxy: injection + capture for any agent (cloud, opt-in)
+
+Cloud `klio init` now offers a local proxy on `127.0.0.1:8787`,
+**defaulting to no**. On Anthropic's Messages API it appends your team's
+Klio memories to the request's `system` field and captures the
+conversation as grading evidence — so an agent with no hook surface
+still both receives context and contributes evidence. `messages`,
+`tools`, `tool_choice` and `tool_reference` blocks are forwarded byte
+for byte, and every failure path forwards the original bytes unchanged.
+Codex is wired but pass-through for now (it uses `/v1/responses`).
+
+Two kill switches, both **on** by default when a cloud key is present.
+`klio proxy inject off` and `klio proxy capture off` save the choice in
+`~/.klio/config.json`, so it survives a restart, a reboot and a re-run
+of `klio init`, and both commands restart a running proxy so the change
+applies immediately. `KLIO_PROXY_INJECT=off` / `KLIO_PROXY_CAPTURE=off`
+still override the saved setting, but only for a process your own shell
+starts — the supervised proxy is launchd's or systemd's child and never
+sees your shell, so the env var alone was not a durable opt-out.
+`klio proxy status` now prints both settings and where each came from.
+
+New: `klio proxy serve|stop|status|ensure|inject|capture`.
+`/__klio/health` now reports `mode`, `runtime`, `pid` and a
+non-reversible fingerprint of the active config, which is what lets
+`klio proxy stop` prove a process is ours before signalling it and lets
+`klio init` detect a proxy left over from an earlier run holding rotated
+credentials. A responder on the port that is *not* a Klio proxy is now
+named as such — with a read-only `lsof` diagnostic, never a kill command
+— instead of being reported as "not running". `klio doctor`, `klio
+down`, `klio uninit` and `klio uninstall` all handle the Docker-free
+cloud machine; `uninstall` un-wires the agents, removes the supervisor
+and stops the proxy before it goes anywhere near Docker.
+
+Recall is **warmed in the background**, never fetched on the request
+path. Production recall measured 5.9–6.5 s against the 300 ms in-request
+budget the proxy originally used, so every request timed out and
+injected nothing, forever — and fail-open made that indistinguishable
+from "no relevant memories". The proxy now reads a warm cache and fills
+it out of band: a broad team-context set at startup and every 5 minutes,
+plus a single-flighted per-question recall started on each miss. A stale
+entry is served while it refreshes rather than dropped. Measured live
+against the production engine: turns complete in 1.5–2.4 s (the same as
+no proxy at all) while injecting 8–13 memories from recalls that took
+6.5–9.9 s.
+
+Every response now also carries `x-klio-injected-reason`, so
+`x-klio-injected: 0` can no longer mean five different things —
+`hit`, `ambient`, `cold`, `empty`, `error`, `no-query`, `disabled`,
+`no-config`, `not-applicable` or `not-injectable`. A failed background
+recall additionally logs one throttled line, carrying no query text, no
+memory content and no credentials.
+
+`klio proxy serve` gained `--port`, `--host` and `--upstream` (and
+`KLIO_PROXY_PORT` / `KLIO_PROXY_HOST` / `KLIO_PROXY_UPSTREAM`), so the
+proxy can be verified in place instead of by patching literals in a copy
+of the compiled build.
+
+Known limitation: a >10 MB request cancelled mid-upload keeps relaying
+to the upstream until the body ends (see README).
+
+## [0.9.3] — 2026-08-14
+
+### Fixed — `session_id` on SessionStart recall
+
+Ships the fix merged in #2, which never reached npm: the publish
+workflow is version-gated, so a change under `npm/src` without a
+`package.json` bump ran, compared 0.9.2 to 0.9.2, and reported success
+having published nothing. The fix looked shipped while every `npx` kept
+pulling the old build.
+
+Also closes that trap: when `npm/src` changes in a push and the local
+version is already on npm, the workflow now fails with an explicit
+error instead of a silent green skip.
+
 ## [0.9.2] — 2026-05-29
 
 ### Added — PostToolUse capture (fuller session capture)

@@ -154,7 +154,7 @@ function parseUninitArgs(rest: string[]): { keepRunning?: boolean } {
           "Removes the compression-proxy wiring from your agents' configs and\n" +
           "stops the proxy. Your memory, MCP server and hooks are untouched —\n" +
           "use `klio uninstall` for those.\n\n" +
-          "  --keep-running   leave the proxy container up; only undo the config\n",
+          "  --keep-running   leave the proxy running; only undo the config\n",
       );
       process.exit(0);
     } else {
@@ -215,7 +215,9 @@ commands:
   configure   Tweak runtime settings (auto-update mode, claim email, etc.)
   doctor      Check the compression proxy end to end, and repair what it can
   uninit      Remove the compression-proxy wiring (memory + MCP are untouched)
-  proxy       Proxy liveness: \`klio proxy status\` / \`klio proxy ensure\`
+  proxy       Proxy control: \`klio proxy status|serve|stop|ensure\`.
+              Kill switches, saved and applied at once:
+              \`klio proxy inject off\`, \`klio proxy capture off\`
   down        Stop the stack (data is preserved)
   uninstall   Stop and delete all data; restore agent configs from backup
   version     Print the package version

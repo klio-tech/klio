@@ -29,7 +29,7 @@ import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 
-import { PROXY_HEALTH_PATH, PROXY_PROBE_URL } from "./constants.js";
+import { PROXY_HEALTH_PATH, PROXY_PROBE_URL, type ProxyHealth } from "./constants.js";
 
 /** Reverse-DNS label — launchd's convention, and the plist's filename. */
 export const LAUNCHD_LABEL = "tech.klio.proxy";
@@ -331,6 +331,44 @@ export async function uninstallSupervisor(
 }
 
 /**
+ * What a health probe learned. `health` is present only when something
+ * answered `{ "status": "ok" }`, and is deliberately PARTIAL: the
+ * responder may be an older Klio proxy, the Python container, or some
+ * unrelated listener that happens to serve that shape, so every field
+ * has to be treated as absent until checked.
+ */
+export type ProbeResult = {
+  alive: boolean;
+  /**
+   * Did ANYTHING answer on the port — an HTTP response of any status,
+   * with a body of any shape?
+   *
+   * Separate from `alive` because "the proxy is healthy" and "the port
+   * is occupied" are different questions, and conflating them lost the
+   * second one entirely. With only `alive`, a dev server squatting on
+   * 8787 was indistinguishable from a free port: `klio proxy stop` said
+   * "not running" and exited 0, `klio down` printed "— not running",
+   * and the next `klio init` lost the EADDRINUSE race to a listener
+   * nobody had been told about. Callers that need "is the proxy
+   * working" keep reading `alive`; callers that need "is this port
+   * free" read `responded`.
+   */
+  responded: boolean;
+  detail: string;
+  /**
+   * The parsed health body, whenever one parsed — INCLUDING when it is
+   * not ours. Telling a container apart from a host process, or an
+   * older Klio proxy apart from a stranger, is only possible with the
+   * body in hand, and every such caller has to check the discriminating
+   * fields itself.
+   *
+   * Extra keys are typed in on purpose: the responder may be the PYTHON
+   * proxy, whose body carries `upstream`/`upstreams` and no `runtime`.
+   */
+  health?: Partial<ProxyHealth> & Record<string, unknown>;
+};
+
+/**
  * Is the proxy answering?
  *
  * Deliberately dials the IPv4 literal rather than `localhost`: Docker
@@ -342,23 +380,51 @@ export async function uninstallSupervisor(
 export async function probeProxy(
   timeoutMs = 3000,
   url = `${PROXY_PROBE_URL}${PROXY_HEALTH_PATH}`,
-): Promise<{ alive: boolean; detail: string }> {
+): Promise<ProbeResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // Flipped the instant headers arrive, so a body that fails to read or
+  // parse still counts as "the port is occupied" — which is the whole
+  // point of tracking it separately from `alive`.
+  let responded = false;
   try {
     const response = await fetch(url, { signal: controller.signal });
+    responded = true;
     if (!response.ok) {
-      return { alive: false, detail: `health endpoint returned ${response.status}` };
+      return {
+        alive: false,
+        responded: true,
+        detail: `health endpoint returned ${response.status}`,
+      };
     }
-    const body = (await response.json()) as { status?: string; mode?: string };
+
+    let body: (Partial<ProxyHealth> & Record<string, unknown>) | null;
+    try {
+      body = (await response.json()) as (Partial<ProxyHealth> & Record<string, unknown>) | null;
+    } catch {
+      // A 200 that is not JSON: a dev server's index.html is the common
+      // case. Occupied, definitively not ours.
+      return { alive: false, responded: true, detail: "answered, but not with a JSON body" };
+    }
+
+    const alive = body?.status === "ok";
     return {
-      alive: body.status === "ok",
-      detail: body.status === "ok" ? `alive (${body.mode ?? "unknown mode"})` : "unhealthy",
+      alive,
+      responded: true,
+      detail: alive ? `alive (${body?.mode ?? "unknown mode"})` : "answered, but not as a Klio proxy",
+      // Handed back verbatim so callers that need to know WHICH
+      // responder answered — `klio proxy stop` before it signals
+      // anything, `klio init` checking for a survivor holding stale
+      // credentials — do not have to re-probe and race with whatever
+      // changed in between. Present for UNHEALTHY bodies too: that is
+      // exactly the case where "who is this?" matters most.
+      health: body ?? undefined,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
       alive: false,
+      responded,
       detail: message.includes("abort") ? `no response within ${timeoutMs}ms` : message,
     };
   } finally {

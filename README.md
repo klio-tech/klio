@@ -321,9 +321,13 @@ To uninstall fully:
 npx @klio-tech/klio uninstall
 ```
 
-This walks the same six adapters in reverse, restoring the timestamped
-backup each one wrote at install time — your agent configs return to
-their pre-Klio state byte-for-byte.
+This un-wires the local proxy, removes its supervisor, stops the proxy,
+and then walks the same six adapters in reverse, restoring the
+timestamped backup each one wrote at install time — your agent configs
+return to their pre-Klio state byte-for-byte. Only the last step
+(removing containers and volumes) needs Docker, and it is skipped
+entirely on a Klio Cloud machine, so uninstall works on a host that has
+never had Docker installed.
 
 To stop the stack without uninstalling: `docker compose down`.
 
@@ -380,6 +384,132 @@ durably persisted in Postgres so a restart never re-processes the same
 window. Off-by-default in earlier versions, **on by default from 0.5.0
 onward** — the `klio init` flow now includes a one-keypress prompt to
 confirm. Tune later via `klio update curator`.
+
+### The local proxy (Klio Cloud, opt-in)
+
+Hooks only reach agents whose harness has a hook surface — in practice
+Claude Code. Every other agent writes memory through MCP tool calls and
+contributes no evidence at all. The **local proxy** closes that gap from
+the other side: it sits on `127.0.0.1:8787` between your agent and the
+model API, and any agent that lets you override its base URL gets team
+memory with no agent-side code whatsoever.
+
+`klio init` (cloud mode) offers it **after** wiring your agents, and
+**defaults to no** — pointing `ANTHROPIC_BASE_URL` at localhost is the
+most invasive thing this tool does to a machine. Accepting it points
+Claude Code and Codex at the proxy, installs a launchd/systemd
+supervisor that re-checks every 60s, and starts the proxy.
+
+**What it does to a request.** On a `POST` whose path ends `/messages`
+(Anthropic's Messages API) it appends one block of your team's Klio
+memories to the request's `system` field, and after the response has
+been fully forwarded it sends the conversation to Klio as grading
+evidence. That is all. `messages`, `tools`, `tool_choice` and every
+`tool_reference` block are forwarded byte for byte — breaking
+`tool_reference` would silently cost ~85% on tool schemas, which is why
+`klio init` also sets `ENABLE_TOOL_SEARCH=true`. Every other request,
+every other path, and every other method is forwarded unmodified.
+Codex is wired to the proxy but talks the `/v1/responses` API, so its
+traffic is pass-through today.
+
+**Fail open, always.** A failed recall, an unparseable body, a broken
+capture endpoint, a body over 10 MB, an unexpected shape — every one of
+them degrades to "forward the original bytes". The only response the
+proxy ever authors is a `502` (in Anthropic's error envelope, with an
+`x-klio-proxy-error` header) when the upstream is genuinely
+unreachable.
+
+**Your request never waits on Klio.** Recall happens in the background,
+not in the request path: the proxy keeps a warm cache and reads it, so
+forwarding is never delayed by however long the engine takes. A broad
+team-context set is fetched at startup and refreshed every few minutes,
+which is what lets even the first turn of a session inject something;
+a question the cache has not seen is answered immediately from that set
+(or from nothing) while a recall for it fills the cache behind you, so
+the next turn on the same topic is warm. Repeat questions collapse to
+one recall, never one per turn.
+
+Every response carries two headers, so you can see what it did without
+reading logs:
+
+```
+x-klio-injected: 11
+x-klio-injected-reason: hit
+```
+
+`x-klio-injected` is how many memories were added. The reason says why
+that number is what it is — `hit` (this question's own cache),
+`ambient` (the broad team-context set), `cold` (first sight of this
+question; a recall is now running), `empty` (nothing relevant),
+`error` (recall failed or timed out — also one line on stderr),
+`disabled`, `no-config`, `no-query`, `not-applicable`, or
+`not-injectable`. A `0` with no reason to explain it is exactly how
+"injection quietly does nothing" used to hide.
+
+**Turning it off.** Two independent kill switches, no uninstall needed:
+
+```bash
+klio proxy capture off   # stop sending conversations to Klio
+klio proxy inject off    # stop appending memories to `system`
+klio proxy capture       # what is it set to, and where did that come from
+```
+
+Both are **on** by default whenever `~/.klio/config.json` holds a cloud
+key. The choice is **saved in that same file** and survives a proxy
+restart, a reboot, and a re-run of `klio init`; the command also
+restarts a running proxy, so it takes effect immediately rather than
+"at the next start".
+
+`KLIO_PROXY_INJECT` and `KLIO_PROXY_CAPTURE` still work
+(`off`/`false`/`0`/`no`) and override the saved setting — but **only for
+a process your own shell starts**. That is the whole reason they are not
+the durable switch: after `klio init` the proxy is started by launchd or
+systemd, whose child inherits the *supervisor's* environment and never
+sees your shell, so an exported variable was silently forgotten at every
+restart. Use them for a one-off (`KLIO_PROXY_CAPTURE=off klio proxy
+serve`); use `klio proxy capture off` for a decision.
+
+**Commands.**
+
+```bash
+klio proxy status         # is it answering, what is it doing, and what is it set to
+klio proxy serve          # run it in the foreground (this is how you see errors)
+                          #   --port / --host / --upstream, or KLIO_PROXY_PORT /
+                          #   KLIO_PROXY_HOST / KLIO_PROXY_UPSTREAM, to run a
+                          #   second instance somewhere else while testing.
+                          #   Precedence: flag > environment > default. These
+                          #   affect `serve` only — status/ensure/stop/doctor
+                          #   probe 8787, the port your agents are pointed at.
+klio proxy stop           # stop it
+klio proxy ensure         # what the supervisor runs every 60s: probe, revive if dead
+klio proxy capture on|off # save and apply the capture kill switch
+klio proxy inject on|off  # save and apply the injection kill switch
+klio doctor               # check the whole wiring end to end, and repair what it can
+klio uninit               # remove the wiring and stop the proxy — the escape hatch
+```
+
+If something *other than* Klio is listening on 8787, `klio proxy stop`
+and `klio down` say so and leave it alone — they will never signal a
+process they cannot prove is ours. `lsof -nP -iTCP:8787 -sTCP:LISTEN`
+names the listener; deciding what to do with it is yours, because
+selecting processes by port alone catches connected clients (your coding
+agent among them), not just the listener.
+
+`klio uninit` is the escape hatch and is designed to work when nothing
+else does: it does not need Docker, does not need the proxy to be
+reachable, and puts your agents straight back on `api.anthropic.com`.
+
+**Known limitation.** A request body over 10 MB is forwarded raw and
+unbuffered (never injected, never captured). If the CLIENT disappears
+mid-upload of such a request, the proxy does not detect it and keeps
+relaying the remaining body upstream — measured at up to ~30s and
+~12.5 MB of wasted upstream traffic against a slow consumer. It costs
+wasted bytes on a cancelled >10 MB upload, never a wrong response or a
+hung client, and it matches the behaviour of the proxy that shipped
+before this path existed. Three fixes were built and measured; two of
+them broke healthy traffic (slow first-byte responses, long SSE gaps,
+and backpressured uploads), so the leak ships documented rather than
+traded for an outage.
 
 ### Architecture at a glance
 
