@@ -9,7 +9,7 @@ import {
   readProxyEnv,
   removeProxyEnv,
 } from "../src/proxy/claudeCodeProxy.js";
-import { describeTradeoffs } from "../src/proxy/wiring.js";
+import { describeTradeoffs, wireProxy } from "../src/proxy/wiring.js";
 import { readWiringState } from "../src/proxy/state.js";
 import { PROXY_BASE_URL } from "../src/proxy/constants.js";
 
@@ -285,6 +285,57 @@ test("readProxyEnv does not throw on malformed JSON", () => {
   assert.equal(current.ANTHROPIC_BASE_URL, null);
 });
 
+// ---------------------------------------------------------------------
+// wireProxy — who actually gets wired
+// ---------------------------------------------------------------------
+//
+// 0.9.6 wired Claude Code whenever it was installed. It should never
+// have: hooks already cover Claude Code end to end, a Claude
+// subscription never routes to a custom base URL at all, and the cost —
+// Remote Control stops working, permanently, with no flag to bring it
+// back — is paid in exchange for nothing. 0.9.7 wires the agents that
+// have no hooks, and undoes what the older versions did.
+
+test("wireProxy does not point Claude Code at the proxy", () => {
+  const { settings, state } = scratch();
+  const codexConfig = join(settings, "..", "codex-config.toml");
+  write(settings, { theme: "dark" });
+
+  const result = wireProxy({ log: () => {}, claudeSettings: settings, codexConfig, statePath: state });
+
+  const after = read(settings);
+  assert.equal(
+    after.env,
+    undefined,
+    `Claude Code must not be wired to the proxy:\n${JSON.stringify(after)}`,
+  );
+  assert.equal(result.errors.length, 0);
+  assert.ok(result.codex, "Codex — which has no hooks — must still be wired");
+  assert.match(readFileSync(codexConfig, "utf8"), /klio-proxy/);
+});
+
+test("wireProxy restores what an older Klio wrote into Claude Code's settings", () => {
+  const { settings, state } = scratch();
+  const codexConfig = join(settings, "..", "codex-config.toml");
+  write(settings, { theme: "dark" });
+  applyProxyEnv({ settingsPath: settings, statePath: state }); // 0.9.6's doing
+
+  const result = wireProxy({ log: () => {}, claudeSettings: settings, codexConfig, statePath: state });
+
+  assert.equal(read(settings).env, undefined, "the migration must undo it");
+  assert.equal(result.claudeCodeMigration?.outcome, "restored");
+});
+
+test("wireProxy leaves a Claude Code value Klio cannot prove it wrote", () => {
+  const { settings, state } = scratch();
+  const codexConfig = join(settings, "..", "codex-config.toml");
+  write(settings, { env: { ANTHROPIC_BASE_URL: "https://gateway.corp" } });
+
+  wireProxy({ log: () => {}, claudeSettings: settings, codexConfig, statePath: state });
+
+  assert.equal(read(settings).env.ANTHROPIC_BASE_URL, "https://gateway.corp");
+});
+
 // --- the consent surface has to be TRUE -------------------------------
 //
 // `describeTradeoffs` is the informed-consent block: it is what the user
@@ -364,9 +415,54 @@ test("the trade-offs block keeps every warning that is still true", () => {
   describeTradeoffs((l) => lines.push(l));
   const text = lines.join("\n");
 
-  assert.match(text, /Remote Control/i, "Remote Control incompatibility still applies");
-  assert.match(text, /ENABLE_TOOL_SEARCH=true/, "MCP Tool Search flag still applies");
   assert.match(text, /dead proxy/i, "a dead proxy still blocks agents that DO use it");
   assert.match(text, /klio proxy capture off/);
   assert.match(text, /klio proxy inject off/);
+});
+
+// A warning that no longer applies is not a harmless leftover. Both of
+// these were consequences of ONE thing — Klio pointing Claude Code's
+// ANTHROPIC_BASE_URL at the proxy — which 0.9.7 stopped doing. Left in
+// place, the Remote Control bullet tells a user that saying yes costs
+// them a feature it no longer costs them, which is a reason to decline
+// an integration that would have served their Codex sessions.
+
+test("the trade-offs block no longer says yes costs you Remote Control", () => {
+  const lines: string[] = [];
+  describeTradeoffs((l) => lines.push(l));
+  const text = lines.join("\n");
+
+  // It may — and should — still MENTION Remote Control, to tell someone
+  // on 0.9.4–0.9.6 that they are getting it back. What it must not do
+  // is present it as a cost of enabling the proxy.
+  assert.doesNotMatch(
+    text,
+    /Remote Control[\s\S]{0,200}(run `klio uninit` to undo|does NOT work with a)/i,
+    `Remote Control is no longer a cost of saying yes:\n${text}`,
+  );
+  assert.match(text, /Remote Control[\s\S]{0,300}(back|restore|no longer)/i);
+});
+
+test("the trade-offs block does not ask the user to keep a flag Klio no longer sets", () => {
+  const lines: string[] = [];
+  describeTradeoffs((l) => lines.push(l));
+  const text = lines.join("\n");
+
+  assert.doesNotMatch(
+    text,
+    /We set ENABLE_TOOL_SEARCH=true|leave it in place/i,
+    `Klio no longer writes ENABLE_TOOL_SEARCH into Claude Code:\n${text}`,
+  );
+});
+
+test("the trade-offs block says Klio does not touch Claude Code's settings", () => {
+  const lines: string[] = [];
+  describeTradeoffs((l) => lines.push(l));
+  const text = lines.join("\n");
+
+  assert.match(
+    text,
+    /(does not|never|no longer)[\s\S]{0,120}(settings\.json|Claude Code's settings|wire Claude Code)/i,
+    `must say Claude Code is not wired:\n${text}`,
+  );
 });

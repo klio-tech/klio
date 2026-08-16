@@ -4,6 +4,82 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.7] — 2026-08-16
+
+### Changed — Klio no longer wires Claude Code to the proxy, and undoes what it did
+
+`klio init` pointed Claude Code's `ANTHROPIC_BASE_URL` at the local
+proxy (and set `ENABLE_TOOL_SEARCH=true` to compensate) whenever Claude
+Code was installed. It should never have. 0.9.6 already said, in the
+init copy, that Claude Code does not need the proxy — hooks cover it end
+to end regardless of auth mode, and under a Claude subscription its
+traffic never reaches a custom base URL at all — while the code went on
+wiring it anyway. The cost is not theoretical: a custom base URL
+disables Remote Control (Claude Code v2.1.196+) and no flag brings it
+back. Users were paying a real, permanent price for a benefit measured
+at zero.
+
+- **Claude Code is no longer wired.** `wireProxy` wires the agents that
+  have no hook surface — Codex today, and anything self-built that can
+  point at a base URL. Nothing writes to `~/.claude/settings.json`.
+- **Existing installs are repaired.** `klio init` (both modes) and
+  `klio doctor` restore what 0.9.4–0.9.6 applied, using the record
+  Klio wrote in `~/.klio/proxy-wiring.json`. Remote Control works
+  again without the user knowing anything was wrong.
+- **The repair never guesses.** A key is restored only when Klio's own
+  record covers that settings file and that key, AND the value on disk
+  is still exactly what Klio writes. A value someone else changed, a
+  missing record, a record naming a different settings file, a key the
+  record does not mention, and a `settings.json` that does not parse
+  are all left untouched and reported in words. `klio init` cannot fail
+  because of this step.
+- **The init copy matches the behaviour.** The Remote Control and
+  `ENABLE_TOOL_SEARCH` bullets described costs that only existed
+  because Claude Code was wired; they no longer present those as the
+  price of saying yes. The proxy prompt is about Codex and other
+  hookless agents.
+- `klio uninit` still un-wires Claude Code, deliberately: it is the
+  escape hatch and must clean a machine the migration never reached.
+  Unlike the migration it may act without a state record — there, the
+  user asked.
+
+### Fixed — the Responses path truncated plain message text; the Messages path did not
+
+`capture.ts` states that everything past the shape-specific read — the
+per-block cap, turn-granular truncation, the payload cap — is identical
+for both wire shapes, deliberately. It was not. The Responses reader
+applied the 8 KB per-block cap to a whole message's text, where the
+Messages path applies it to tool blocks only. Measured side by side on
+one 50 KB user message: Responses produced 7998 characters and a
+truncation marker, Messages produced 50000 and none — inside a 256 KB
+payload cap with room to spare. A Codex user pasting a stack trace lost
+most of it as evidence.
+
+The cap now applies to tool blocks alone, matching `renderBlock`, so the
+two paths genuinely behave the same. Turn-granular truncation and the
+total payload cap are unchanged and still govern oversized
+conversations.
+
+### Fixed — `klio proxy inject` described a field half its traffic does not have
+
+`PROXY_TOGGLE_DESCRIPTION.inject` said injection appends memories "to
+the request's `system` field", which is true only of Anthropic's
+Messages API; on the Responses API it is `instructions`. Printed by
+`klio proxy status` and by the toggle commands, so a Codex user asking
+what the proxy does to their traffic was told about a field their
+requests do not contain. It now names both.
+
+### Fixed — the test suite could rewrite the developer's own agent config
+
+One `wireProxyStack` test omitted the `wireProxyFn` seam, so the REAL
+wiring ran against the real `~/.claude/settings.json` and
+`~/.klio/proxy-wiring.json` — with the suite green. (An earlier test in
+the same file had already done this to the developer's launchd agent.)
+The seam is now supplied, and `npm test` runs the whole suite inside a
+throwaway `HOME` (`tests/run.mjs`), which child processes inherit, so
+the next forgotten seam scribbles on scratch instead of someone's home
+directory.
+
 ## [0.9.6] — 2026-08-16
 
 ### Added — the proxy now injects and captures on the OpenAI Responses API

@@ -26,6 +26,7 @@ import {
   verifyCloudKey,
 } from "../cloud.js";
 import { configFingerprint, writeCloudConfig, type CloudConfig } from "../cloudConfig.js";
+import { migrateClaudeCodeProxyEnv } from "../proxy/claudeCodeMigration.js";
 import { PROXY_PROBE_URL } from "../proxy/constants.js";
 import { spawnProxy, type SpawnProxyOptions } from "../proxy/processSupervisor.js";
 import { stopProxy, type StopProxyResult } from "../proxy/stop.js";
@@ -37,6 +38,7 @@ import {
   type ProbeResult,
 } from "../proxy/supervisor.js";
 import {
+  describeClaudeCodeMigration,
   describeTradeoffs,
   describeWiring,
   unwireProxy,
@@ -185,11 +187,19 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   const anyProxyableAgent =
     detectedNames.has("claude-code") || detectedNames.has("codex");
 
-  // The trade-offs (MCP Tool Search, Remote Control) are only relevant
-  // when we are about to ask — printed BEFORE the prompt so the user
-  // decides with the costs in front of them, not after. Guarded on
-  // `anyProxyableAgent` so a machine with nothing to offer the proxy to
-  // sees no extra output, same as before this feature existed.
+  // Undo, unconditionally and BEFORE the offer, what 0.9.4–0.9.6 wrote
+  // into ~/.claude/settings.json. Unconditionally because the repair
+  // has nothing to do with whether this user wants a proxy now: someone
+  // who says "no" here is exactly the person most likely to have been
+  // wired by an older version and to want Remote Control back. Doing it
+  // inside `wireProxy` alone would repair only the machines that opt in.
+  describeClaudeCodeMigration(migrateClaudeCodeProxyEnv(), log);
+
+  // The trade-offs are only relevant when we are about to ask — printed
+  // BEFORE the prompt so the user decides with the costs in front of
+  // them, not after. Guarded on `anyProxyableAgent` so a machine with
+  // nothing to offer the proxy to sees no extra output, same as before
+  // this feature existed.
   if (anyProxyableAgent) {
     describeTradeoffs(log);
   }

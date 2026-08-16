@@ -539,3 +539,135 @@ test("proxy: an upstream error on the responses path is relayed, never authored"
     () => ({ status: 429, body: JSON.stringify({ error: "rate limited" }) }),
   );
 });
+
+// ---- truncation parity with the Messages path -------------------------
+//
+// capture.ts states, as a design commitment, that everything past the
+// shape-specific read — "the per-block cap, turn-granular truncation,
+// the total payload cap" — is identical for both shapes, deliberately,
+// because the grader reads one transcript format and two truncation
+// policies would be two sets of bugs.
+//
+// It was not identical. `toTurn` applied `truncateBlock` to a MESSAGE's
+// whole text, where the Messages path's `renderBlock` applies it only to
+// tool_use / tool_result blocks and passes `text` through untouched. So
+// a 50 KB paste — a stack trace, a log, a diff — arrived whole through
+// Claude Code and came out of Codex at 7998 characters with a
+// truncation marker, while sitting well inside the 256 KB payload cap
+// that is supposed to be the only thing deciding what survives.
+
+/** The same 50 KB user paste, in each wire shape. */
+const BIG_PASTE = "E".repeat(50_000);
+
+function messagesBodyWith(text: string): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      model: "claude-sonnet-4",
+      messages: [
+        { role: "user", content: [{ type: "text", text }] },
+        { role: "assistant", content: [{ type: "text", text: "ack" }] },
+      ],
+    }),
+  );
+}
+
+function responsesBodyWith(text: string): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      model: "gpt-5-codex",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "ack" }] },
+      ],
+    }),
+  );
+}
+
+async function capturedUserTurn(body: Buffer, shape: "messages" | "responses"): Promise<string> {
+  let captured = "";
+  await emitCapture({
+    config: CONFIG,
+    agent: "a",
+    requestBody: body,
+    assistantText: "",
+    shape,
+    fetchImpl: (async (_u: string, init: RequestInit) => {
+      const payload = JSON.parse(String(init.body)) as {
+        messages: { role: string; content: string }[];
+      };
+      captured = payload.messages[0].content;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+  return captured;
+}
+
+test("responses: a large plain message is not capped where the messages path leaves it whole", async () => {
+  const viaResponses = await capturedUserTurn(responsesBodyWith(BIG_PASTE), "responses");
+  const viaMessages = await capturedUserTurn(messagesBodyWith(BIG_PASTE), "messages");
+
+  assert.equal(
+    viaResponses,
+    viaMessages,
+    `the two paths must render the same paste identically ` +
+      `(responses ${viaResponses.length} chars, messages ${viaMessages.length})`,
+  );
+  assert.equal(viaResponses.length, BIG_PASTE.length);
+  assert.doesNotMatch(viaResponses, /\[truncated\]/);
+});
+
+test("responses: tool blocks are still capped, exactly as renderBlock caps them", async () => {
+  const body = Buffer.from(
+    JSON.stringify({
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "go" }] },
+        {
+          type: "function_call",
+          name: "shell",
+          arguments: JSON.stringify({ blob: "F".repeat(50_000) }),
+          call_id: "call_1",
+        },
+        { type: "function_call_output", call_id: "call_1", output: "G".repeat(50_000) },
+      ],
+    }),
+  );
+
+  const turns = responsesTurns(JSON.parse(body.toString("utf8")));
+  assert.ok(turns[1].content.length < 9000, "a tool_use input is still capped at 8 KB");
+  assert.match(turns[1].content, /\[truncated\]$/);
+  assert.ok(turns[2].content.length < 9000, "a tool_result is still capped at 8 KB");
+  assert.match(turns[2].content, /\[truncated\]$/);
+});
+
+test("responses: the total payload cap still governs an oversized conversation", async () => {
+  // Two 200 KB pastes cannot both fit under the 256 KB payload cap, so
+  // turn-granular truncation must still do its job on this path.
+  const body = Buffer.from(
+    JSON.stringify({
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "H".repeat(200_000) }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "ack" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "I".repeat(200_000) }] },
+      ],
+    }),
+  );
+
+  let bytes = 0;
+  let text = "";
+  await emitCapture({
+    config: CONFIG,
+    agent: "a",
+    requestBody: body,
+    assistantText: "",
+    shape: "responses",
+    fetchImpl: (async (_u: string, init: RequestInit) => {
+      bytes = Buffer.byteLength(String(init.body), "utf8");
+      text = String(init.body);
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+
+  assert.ok(bytes > 0, "something must still be captured");
+  assert.ok(bytes <= 256 * 1024, `payload must stay under the cap, got ${bytes}`);
+  assert.match(text, /turn truncated|turns? elided/, "and must say what it dropped");
+});

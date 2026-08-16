@@ -398,16 +398,29 @@ memory with no agent-side code whatsoever.
 of 0.9.5 **defaults to yes** — a bare Enter accepts. It's the only
 integration point that needs nothing from the agent, so leaving it off
 by default meant most users never got the strongest version of the
-product. Pointing `ANTHROPIC_BASE_URL` at localhost is still the most
-invasive thing this tool does to a machine, which is why the trade-offs
-print before the prompt every time — but the proxy fails open, is
-revived by the supervisor every 60s, is healed by `klio doctor`, and
-comes with kill switches (below) and a one-command escape hatch
-(`klio uninit`), so accepting is no longer the riskier default. Type
-`n` (or `no`) to decline, or run `klio init` again later once you're
-ready. Accepting points Claude Code and Codex at the proxy, installs a
-launchd/systemd supervisor that re-checks every 60s, and starts the
-proxy.
+product. Rerouting an agent's model calls is still the most invasive
+thing this tool does to a machine, which is why the trade-offs print
+before the prompt every time — but the proxy fails open, is revived by
+the supervisor every 60s, is healed by `klio doctor`, and comes with
+kill switches (below) and a one-command escape hatch (`klio uninit`),
+so accepting is no longer the riskier default. Type `n` (or `no`) to
+decline, or run `klio init` again later once you're ready. Accepting
+points **Codex** at the proxy, installs a launchd/systemd supervisor
+that re-checks every 60s, and starts the proxy.
+
+**Claude Code is not wired to the proxy, and saying yes does not touch
+`~/.claude/settings.json`.** Klio's hooks already cover it end to end —
+injection on `SessionStart`, capture from `UserPromptSubmit`,
+`PostToolUse` and `Stop` — regardless of how Claude Code authenticates.
+On a Claude **subscription** it does not route to a custom base URL at
+all, so the proxy would never even be contacted. Klio 0.9.4–0.9.6 wired
+it anyway, which cost Remote Control (v2.1.196+ is incompatible with a
+custom base URL, and no flag re-enables it) for nothing in return. As of
+**0.9.7**, `klio init` and `klio doctor` take that back: they restore
+the values recorded in `~/.klio/proxy-wiring.json` when Klio applied
+them, so Remote Control works again. Only values Klio's own record says
+Klio wrote are touched — anything you set yourself, or that no longer
+matches what Klio writes, is left exactly as it is and reported.
 
 **Non-interactive sessions always decline.** If stdin isn't a TTY
 (CI, `npx @klio-tech/klio init < /dev/null`, any piped script) the
@@ -418,15 +431,21 @@ never resolve on its own just because nothing was there to answer it.
 
 **What it does to a request.** On a `POST` whose path ends `/messages`
 (Anthropic's Messages API) it appends one block of your team's Klio
-memories to the request's `system` field, and after the response has
-been fully forwarded it sends the conversation to Klio as grading
-evidence. That is all. `messages`, `tools`, `tool_choice` and every
-`tool_reference` block are forwarded byte for byte — breaking
-`tool_reference` would silently cost ~85% on tool schemas, which is why
-`klio init` also sets `ENABLE_TOOL_SEARCH=true`. Every other request,
-every other path, and every other method is forwarded unmodified.
-Codex is wired to the proxy but talks the `/v1/responses` API, so its
-traffic is pass-through today.
+memories to the request's `system` field; on a `POST` whose path ends
+`/responses` (OpenAI's Responses API — what Codex speaks) it appends
+the same block to `instructions`. Either way, after the response has
+been fully forwarded, it sends the conversation to Klio as grading
+evidence. That is all. `messages`, `input`, `tools`, `tool_choice`,
+every `tool_reference` block and every tool-call id are forwarded byte
+for byte. Every other request, every other path, and every other method
+is forwarded unmodified.
+
+Both shapes are captured under one transcript policy: tool blocks are
+capped at 8 KB each, whole turns are dropped or truncated only to fit
+the 256 KB payload cap, and plain message text is never cut on one path
+and kept on the other. (Through 0.9.6 the Responses path capped message
+text at 8 KB, so a 20 KB paste survived through Claude Code and arrived
+at the grader gutted from Codex. Fixed in 0.9.7.)
 
 **Fail open, always.** A failed recall, an unparseable body, a broken
 capture endpoint, a body over 10 MB, an unexpected shape — every one of
@@ -466,7 +485,7 @@ question; a recall is now running), `empty` (nothing relevant),
 
 ```bash
 klio proxy capture off   # stop sending conversations to Klio
-klio proxy inject off    # stop appending memories to `system`
+klio proxy inject off    # stop appending memories to the system prompt
 klio proxy capture       # what is it set to, and where did that come from
 ```
 

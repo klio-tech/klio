@@ -47,9 +47,21 @@ export const PROXY_TOGGLE_ENV: Readonly<Record<ProxyToggleName, string>> = {
   capture: "KLIO_PROXY_CAPTURE",
 };
 
-/** One-line description of each half, for the CLI and for `--help`. */
+/**
+ * One-line description of each half, for the CLI and for `--help`.
+ *
+ * `inject` has to be true of BOTH wire shapes the proxy serves. It said
+ * "the request's `system` field", which is Anthropic's Messages API
+ * only; on OpenAI's Responses API — what Codex speaks, and the reason
+ * the proxy is worth running — injection appends to `instructions`
+ * (proxy/inject.ts). Printed by `klio proxy status` and by the toggle
+ * commands, so a Codex user asking what the proxy does to their traffic
+ * was told about a field their requests do not have.
+ */
 export const PROXY_TOGGLE_DESCRIPTION: Readonly<Record<ProxyToggleName, string>> = {
-  inject: "appending your team's Klio memories to the request's `system` field",
+  inject:
+    "appending your team's Klio memories to the request's system prompt " +
+    "(`system` on Anthropic's Messages API, `instructions` on OpenAI's Responses API)",
   capture: "sending conversations to Klio as grading evidence",
 };
 

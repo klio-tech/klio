@@ -31,12 +31,7 @@
 // part array. Both are handled; anything else is skipped rather than
 // guessed at.
 
-import {
-  renderToolResult,
-  renderToolUse,
-  seedOf,
-  truncateBlock,
-} from "./transcript.js";
+import { renderToolResult, renderToolUse, seedOf } from "./transcript.js";
 
 /**
  * One input item, normalised. `raw` is kept because the session id is
@@ -135,9 +130,21 @@ function toTurn(item: unknown): ResponsesTurn | null {
   }
 
   // A `message` item, or the simplified form with a role and no type.
+  //
+  // The message's TEXT is passed through uncapped, on purpose. The
+  // 8 KB per-block cap belongs to tool blocks — `renderToolUse` and
+  // `renderToolResult` apply it, exactly as `renderBlock` does on the
+  // Messages path, where a `text` block is returned untouched. Applying
+  // it here too made this path silently lossier than the one capture.ts
+  // promises it matches: a 50 KB paste (a stack trace, a log, a diff)
+  // arrived whole through Claude Code and came out of Codex at 7998
+  // characters with a truncation marker, while sitting well inside the
+  // 256 KB payload cap that is supposed to be the only thing deciding
+  // what survives. Turn-granular truncation and the total payload cap
+  // (capture.ts) still govern the whole transcript.
   if (type === "message" || (type === undefined && it["role"] !== undefined)) {
     const role = String(it["role"] ?? "user").trim() || "user";
-    const content = truncateBlock(messageText(it["content"]));
+    const content = messageText(it["content"]);
     if (content === "") return null;
     return { raw: item, role, content };
   }

@@ -3,10 +3,12 @@
 // Four checks, in dependency order, because a later check failing is
 // only meaningful once the earlier ones pass:
 //
-//   1. Settings entry present in ~/.claude/settings.json (and Codex's
-//      config, when Codex is installed). Re-applied if another writer
-//      removed it — the design anticipates exactly this, since the file
-//      has several writers and none of them coordinate.
+//   1. Agent settings. Codex's config, re-applied if another writer
+//      removed it — the design anticipates exactly this, since these
+//      files have several writers and none of them coordinate. And
+//      Claude Code's settings.json, which is checked for the OPPOSITE
+//      reason: 0.9.4–0.9.6 wired it to the proxy for no benefit and at
+//      the cost of Remote Control, so doctor takes that back.
 //   2. Supervisor installed, so the proxy survives a reboot.
 //   3. Proxy alive — and restarted if not.
 //   4. An END-TO-END request actually succeeds through the proxy.
@@ -27,11 +29,11 @@ import { resolve } from "node:path";
 import { readCloudConfig } from "../cloudConfig.js";
 import { runtimeDir } from "../compose.js";
 import { composeUpService, resolveComposeBin } from "../docker.js";
-import { readProxyEnv, applyProxyEnv } from "../proxy/claudeCodeProxy.js";
+import { migrateClaudeCodeProxyEnv } from "../proxy/claudeCodeMigration.js";
+import { readProxyEnv } from "../proxy/claudeCodeProxy.js";
 import { CODEX_BASE_URL, codexInstalled, readCodexProxy } from "../proxy/codexProxy.js";
 import {
   CLAUDE_ENV_KEYS,
-  PROXY_BASE_URL,
   PROXY_PROBE_URL,
   PROXY_SERVICE,
   claudeProxyEnv,
@@ -116,50 +118,52 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
 }
 
 /**
- * Check 1 — the settings entry, re-applied if missing.
+ * Check 1 — Claude Code's settings, which Klio should NOT be in.
  *
- * The design calls this out explicitly: settings.json has more than one
- * writer, and any of them can drop our keys. Re-applying is not
- * optional, because the failure mode of a missing ANTHROPIC_BASE_URL is
- * benign (traffic goes straight to Anthropic) while the failure mode of
- * a missing ENABLE_TOOL_SEARCH is not — it is a silent ~85% regression
- * on tool schemas that nobody notices.
+ * This check used to re-APPLY the proxy env whenever it was missing,
+ * and re-applying was described as not optional. Both halves of that
+ * reasoning are now known to be wrong: Klio's hooks cover Claude Code
+ * regardless of auth mode, and a Claude subscription never routes to a
+ * custom base URL at all — so the entry bought nothing and cost Remote
+ * Control. `klio init` stopped writing it in 0.9.7, and doctor is the
+ * second place a 0.9.4–0.9.6 user is likely to run before they run
+ * init, so it undoes it too.
+ *
+ * Only values Klio's own record claims are restored; anything else is
+ * reported and left exactly where it is (proxy/claudeCodeMigration.ts).
  */
 function checkClaudeSettings(dryRun: boolean): Check {
+  const name = "Claude Code settings";
   const current = readProxyEnv();
-  const desired = claudeProxyEnv();
-  const wrong = CLAUDE_ENV_KEYS.filter((k) => current[k] !== desired[k]);
+  const ours = claudeProxyEnv();
+  const wired = CLAUDE_ENV_KEYS.filter((k) => current[k] === ours[k]);
 
-  if (wrong.length === 0) {
+  if (wired.length === 0) {
     return {
-      name: "Claude Code settings",
+      name,
       status: "ok",
-      detail: `ANTHROPIC_BASE_URL=${PROXY_BASE_URL}, ENABLE_TOOL_SEARCH=true`,
+      detail: "not wired to the proxy — Klio's hooks cover Claude Code",
     };
   }
 
   if (dryRun) {
     return {
-      name: "Claude Code settings",
+      name,
       status: "warn",
-      detail: `${wrong.join(", ")} missing or wrong (not fixed: --dry-run)`,
+      detail:
+        `${wired.join(", ")} still points at the proxy from an older Klio ` +
+        `(not fixed: --dry-run)`,
     };
   }
 
-  try {
-    const result = applyProxyEnv();
-    return {
-      name: "Claude Code settings",
-      status: "healed",
-      detail: `re-applied ${result.changes.map((c) => c.key).join(", ")} in ${result.settingsPath}`,
-    };
-  } catch (err) {
-    return {
-      name: "Claude Code settings",
-      status: "fail",
-      detail: `could not write settings: ${err instanceof Error ? err.message : String(err)}`,
-    };
+  const result = migrateClaudeCodeProxyEnv();
+  if (result.outcome === "restored") {
+    return { name, status: "healed", detail: result.detail };
   }
+  // Everything else is a deliberate leave-alone: never a failure, but
+  // never silent either, since we are the likeliest reason the value is
+  // there at all.
+  return { name, status: "warn", detail: result.detail };
 }
 
 /** Check 1b — Codex, only when Codex is actually installed. */

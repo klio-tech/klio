@@ -1,30 +1,37 @@
 // Orchestrates proxy wiring across every agent, and says what it cost.
 //
-// "Print what changed and what it costs" is a requirement, not polish.
-// Pointing ANTHROPIC_BASE_URL at a non-Anthropic host has two
-// consequences the user will otherwise discover the hard way:
+// WHO GETS WIRED, and why it is not everyone.
 //
-//   1. MCP Tool Search is disabled by default. We re-enable it with
-//      ENABLE_TOOL_SEARCH=true — without which routing through the
-//      proxy is a NET TOKEN LOSS (~85% on tool schemas, against ~20%
-//      saved on prose), invisible to the user.
-//   2. Remote Control (Claude Code v2.1.196+) is disabled, and there is
-//      no flag that brings it back.
+// Through 0.9.6 this wired Claude Code whenever it was installed:
+// ANTHROPIC_BASE_URL and ENABLE_TOOL_SEARCH merged into
+// ~/.claude/settings.json. It should never have. The benefit is zero —
+// Klio's HOOKS already cover Claude Code end to end (SessionStart
+// injection; UserPromptSubmit / PostToolUse / Stop capture) regardless
+// of how it authenticates, measured at 64 memories in 15 minutes — and
+// on a Claude SUBSCRIPTION the proxy is not even contacted: Claude Code
+// on OAuth does not route to a custom base URL at all, measured at zero
+// connections against a healthy proxy. Meanwhile the cost is real:
+// Remote Control (Claude Code v2.1.196+) does not work with a custom
+// base URL and no flag brings it back.
 //
-// The second one has no mitigation, so the only honest thing to do is
-// say it at init time rather than let someone spend an evening working
-// out why their phone stopped controlling their session.
-
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+// So 0.9.7 wires the agents that have NO hooks — Codex above all, and
+// anything self-built that can point at a base URL — and undoes, on
+// every `klio init` and `klio doctor`, what the older versions did to
+// Claude Code (proxy/claudeCodeMigration.ts).
+//
+// "Print what changed and what it costs" remains a requirement rather
+// than polish: everything the proxy does to a request is invisible
+// otherwise.
 
 import {
-  applyProxyEnv,
   claudeSettingsPath,
   removeProxyEnv,
   type ClaudeProxyResult,
 } from "./claudeCodeProxy.js";
+import {
+  migrateClaudeCodeProxyEnv,
+  type ClaudeCodeMigration,
+} from "./claudeCodeMigration.js";
 import {
   applyCodexProxy,
   codexInstalled,
@@ -34,7 +41,10 @@ import {
 import { PROXY_BASE_URL } from "./constants.js";
 
 export type WireProxyResult = {
+  /** Only ever set by `unwireProxy` — nothing wires Claude Code any more. */
   claudeCode?: ClaudeProxyResult;
+  /** What `wireProxy` undid (or declined to undo) of an older Klio's doing. */
+  claudeCodeMigration?: ClaudeCodeMigration;
   codex?: CodexProxyResult;
   /** Agents that were not found on this machine, so were skipped. */
   skipped: string[];
@@ -50,13 +60,9 @@ export type WireProxyOptions = {
   statePath?: string;
 };
 
-/** Claude Code is detected the same way the MCP adapter detects it. */
-function claudeCodeInstalled(settingsPath: string): boolean {
-  return existsSync(settingsPath) || existsSync(join(homedir(), ".claude"));
-}
-
 /**
- * Wire every installed agent to the proxy.
+ * Wire every installed HOOKLESS agent to the proxy, and undo any
+ * Claude Code wiring an older Klio left behind.
  *
  * Per-agent failures are collected rather than thrown: one agent's
  * broken config file must not stop the other from being wired, and
@@ -66,17 +72,17 @@ export function wireProxy(opts: WireProxyOptions): WireProxyResult {
   const result: WireProxyResult = { skipped: [], errors: [] };
   const settingsPath = opts.claudeSettings ?? claudeSettingsPath();
 
-  if (claudeCodeInstalled(settingsPath)) {
-    try {
-      result.claudeCode = applyProxyEnv({
-        settingsPath,
-        statePath: opts.statePath,
-      });
-    } catch (err) {
-      result.errors.push({ agent: "claude-code", message: messageOf(err) });
-    }
-  } else {
-    result.skipped.push("claude-code");
+  // Claude Code is deliberately NOT wired (see the module docblock).
+  // The only thing done to its settings is taking BACK what 0.9.4–0.9.6
+  // put there. `migrateClaudeCodeProxyEnv` never throws; the guard is
+  // belt-and-braces, because nothing here may fail `klio init`.
+  try {
+    result.claudeCodeMigration = migrateClaudeCodeProxyEnv({
+      settingsPath,
+      statePath: opts.statePath,
+    });
+  } catch (err) {
+    result.errors.push({ agent: "claude-code", message: messageOf(err) });
   }
 
   if (opts.codexConfig !== undefined || codexInstalled()) {
@@ -95,7 +101,16 @@ export function wireProxy(opts: WireProxyOptions): WireProxyResult {
   return result;
 }
 
-/** Undo `wireProxy` for every agent. Same per-agent isolation. */
+/**
+ * Undo `wireProxy` for every agent. Same per-agent isolation.
+ *
+ * Claude Code is still cleaned here even though nothing wires it any
+ * more: `klio uninit` is the escape hatch, and it has to remove an
+ * older Klio's entries from a machine where — for any reason at all —
+ * the init-time migration did not run or could not finish. Unlike the
+ * migration, `removeProxyEnv` may act without a state record: the user
+ * asked for our wiring to go away, in so many words.
+ */
 export function unwireProxy(opts: WireProxyOptions): WireProxyResult {
   const result: WireProxyResult = { skipped: [], errors: [] };
   const settingsPath = opts.claudeSettings ?? claudeSettingsPath();
@@ -122,10 +137,12 @@ export function unwireProxy(opts: WireProxyOptions): WireProxyResult {
  * Report what wiring changed and what it costs, in that order.
  *
  * The trade-offs are printed even when nothing changed (a re-run), so a
- * user who forgot why Remote Control stopped working can re-run init
+ * user who forgot what the proxy does to their traffic can re-run init
  * and be told.
  */
 export function describeWiring(result: WireProxyResult, log: (line: string) => void): void {
+  describeClaudeCodeMigration(result.claudeCodeMigration, log);
+
   const cc = result.claudeCode;
   if (cc) {
     if (cc.changes.length === 0) {
@@ -156,8 +173,45 @@ export function describeWiring(result: WireProxyResult, log: (line: string) => v
   for (const skipped of result.skipped) {
     log(`    — ${skipped} not found on this machine, skipped`);
   }
+  log("    — Claude Code is covered by Klio's hooks, so it is NOT wired to");
+  log("      the proxy and its settings.json is left as it is.");
   for (const error of result.errors) {
     log(`    ✗ ${error.agent}: ${error.message}`);
+  }
+}
+
+/**
+ * Say what the Claude Code migration did — and, just as importantly,
+ * what it declined to do.
+ *
+ * Silence is not an option in either direction. A user whose Remote
+ * Control has been broken since 0.9.4 needs to see it come back, or
+ * they will not know to try it again; and a user whose ANTHROPIC_BASE_URL
+ * we left alone needs to know it is still there, since we are the
+ * likeliest reason it is.
+ */
+export function describeClaudeCodeMigration(
+  migration: ClaudeCodeMigration | undefined,
+  log: (line: string) => void,
+): void {
+  if (migration === undefined) return;
+  if (migration.outcome === "restored") {
+    log(`    ✓ Undid an earlier Klio's proxy wiring in ${migration.settingsPath}`);
+    for (const change of migration.changes) {
+      log(
+        change.to === null
+          ? `        removed ${change.key}`
+          : `        restored ${change.key} = ${change.to}`,
+      );
+    }
+    log("      Claude Code's Remote Control works again. Klio's hooks were");
+    log("      always doing the real work there.");
+  }
+  for (const skip of migration.skipped) {
+    log(`    ! Left ${skip.key} = ${skip.value} alone in ${migration.settingsPath}`);
+  }
+  if (migration.outcome === "left-alone" || migration.outcome === "unreadable") {
+    log(`      ${migration.detail}`);
   }
 }
 
@@ -201,15 +255,16 @@ export function describeTradeoffs(log: (line: string) => void): void {
   log("");
   log("    What this changes, and what it costs:");
   log("");
-  log("      • Claude Code does NOT need this. Klio's hooks already cover");
-  log("        it end to end — team context is injected at SessionStart,");
-  log("        and your sessions are captured from PostToolUse and");
+  log("      • Claude Code is NOT wired to the proxy. Saying yes never");
+  log("        touches its settings.json. Klio's hooks already cover it");
+  log("        end to end — team context is injected at SessionStart, and");
+  log("        your sessions are captured from PostToolUse and");
   log("        UserPromptSubmit — and hooks work no matter how Claude Code");
   log("        authenticates. The proxy adds nothing for it.");
   log("        In fact, if you are on a Claude subscription (rather than an");
   log("        ANTHROPIC_API_KEY), Claude Code will not send traffic to a");
-  log("        custom base URL at all, so turning the proxy on changes");
-  log("        nothing whatsoever for it. Measured, not theorised.");
+  log("        custom base URL at all, so it would change nothing whatsoever");
+  log("        for it. Measured, not theorised.");
   log("");
   log("      • The proxy exists for agents WITHOUT hook support: Codex,");
   log("        and anything you build yourself that can point at a base");
@@ -236,14 +291,13 @@ export function describeTradeoffs(log: (line: string) => void): void {
   log("        why they are not the durable switch.)");
   log("        There is no compression yet, so no token savings yet.");
   log("");
-  log("      • MCP Tool Search is disabled by default when the base URL");
-  log("        is not Anthropic's. We set ENABLE_TOOL_SEARCH=true to turn");
-  log("        it back on. Without that flag you would lose ~85% on tool");
-  log("        schemas, so leave it in place.");
-  log("");
-  log("      • Remote Control (Claude Code v2.1.196+) does NOT work with a");
-  log("        custom base URL, and there is no flag that re-enables it.");
-  log("        If you use it, run `klio uninit` to undo this wiring.");
+  log("      • Klio 0.9.4–0.9.6 DID point Claude Code at the proxy, which");
+  log("        disabled Remote Control — v2.1.196+ is incompatible with a");
+  log("        custom base URL and no flag re-enables it. 0.9.7 takes that");
+  log("        back: `klio init` and `klio doctor` restore whatever those");
+  log("        versions recorded, so Remote Control works again.");
+  log("        Only values Klio's own record says Klio set are touched —");
+  log("        anything you set yourself is left exactly where it is.");
   log("");
   log("      • A dead proxy means any agent that DOES route through it");
   log("        cannot reach a model at all — Codex, and anything else you");

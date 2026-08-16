@@ -413,6 +413,15 @@ test(
         wire: () =>
           wireProxyStack({
             log: () => {},
+            // Stubbed for the same reason `installSupervisorFn` below
+            // is, and it was missing: the REAL `wireProxy` reaches for
+            // ~/.claude/settings.json and ~/.klio/proxy-wiring.json
+            // through their production defaults, which this test passes
+            // no override for. It therefore rewrote the DEVELOPER'S own
+            // agent config — silently, with the suite green. Step 1 has
+            // its own tests (proxyWiring.test.ts) against temp files;
+            // the step under test here is step 3 (spawn + probe).
+            wireProxyFn: () => ({ skipped: [], errors: [] }),
             unwireProxyFn: () => {
               unwireCalled = true;
               return { skipped: [], errors: [] };

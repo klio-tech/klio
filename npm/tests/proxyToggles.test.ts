@@ -332,3 +332,26 @@ test(
     }
   },
 );
+
+// ---- what the toggle SAYS it does -------------------------------------
+//
+// `klio proxy status` and `klio proxy inject` both print this string
+// (commands/proxy.ts). It said injection appends memories "to the
+// request's `system` field", which is true only of Anthropic's Messages
+// API. On the Responses API — the one Codex speaks, and the reason the
+// proxy is worth running at all — injection appends to `instructions`.
+// A user checking what the proxy does to their Codex traffic was told
+// about a field their requests do not have.
+
+test("the inject description is true of both wire shapes", async () => {
+  const { PROXY_TOGGLE_DESCRIPTION } = await import("../src/proxy/toggles.js");
+  const inject = PROXY_TOGGLE_DESCRIPTION.inject;
+
+  assert.match(inject, /instructions/, "must name the Responses API field");
+  assert.match(inject, /system/, "must name the Messages API field");
+  assert.doesNotMatch(
+    inject,
+    /^appending your team's Klio memories to the request's `system` field$/,
+    "the Anthropic-only wording is what was wrong",
+  );
+});
