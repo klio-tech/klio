@@ -167,13 +167,27 @@ export function describeWiring(result: WireProxyResult, log: (line: string) => v
  *
  * This block is the informed-consent surface — the last thing a user
  * reads before agreeing to route every model call through a process we
- * installed — so its accuracy is functional, not cosmetic. It used to
- * say "This release is PASS-THROUGH ONLY — it forwards traffic
- * unchanged", which was true of the PYTHON proxy (proxy/, still the
- * local stack's) and is false of this one: on Anthropic's messages path
- * it appends to `system` and captures the conversation. Anything added
- * here must describe what the code does today, not what an earlier
- * stage did.
+ * installed — so its accuracy is functional, not cosmetic. Two
+ * corrections are baked in, and neither may be undone:
+ *
+ *   1. It once said "This release is PASS-THROUGH ONLY — it forwards
+ *      traffic unchanged", which was true of the PYTHON proxy (proxy/,
+ *      still the local stack's) and false of this one.
+ *   2. It then presented the proxy as how CLAUDE CODE receives team
+ *      context. Measured on a real machine on 2026-08-15:
+ *      ANTHROPIC_BASE_URL pointed at a healthy inject+capture proxy,
+ *      Claude Code restarted and used — and ZERO connections ever
+ *      reached the proxy, because Claude Code authenticates by
+ *      subscription OAuth and does not route to a custom base URL under
+ *      it. Over the same fifteen minutes the HOOK path wrote 64
+ *      memories and injected on SessionStart. So for Claude Code the
+ *      proxy is, at best, redundant with hooks and, on a subscription,
+ *      a complete no-op. Selling it as the Claude Code integration was
+ *      selling nothing.
+ *
+ * What the proxy is genuinely for is agents that CANNOT do hooks —
+ * Codex above all, and any self-built agent with a base-URL override.
+ * That is what this block now says.
  *
  * It also has to describe controls that WORK. "Turn either half off at
  * any time" pointed only at `KLIO_PROXY_CAPTURE=off`, which the
@@ -187,13 +201,32 @@ export function describeTradeoffs(log: (line: string) => void): void {
   log("");
   log("    What this changes, and what it costs:");
   log("");
-  log("      • Every model call now goes through the local proxy first.");
-  log("        On Anthropic's messages endpoint it APPENDS your team's");
-  log("        Klio memories to the request's `system` field, and sends");
-  log("        the conversation to Klio afterwards as grading evidence.");
-  log("        Nothing else is touched: `messages`, `tools`, `tool_choice`");
-  log("        and `tool_reference` blocks are forwarded byte for byte,");
-  log("        and any doubt forwards your original bytes unmodified.");
+  log("      • Claude Code does NOT need this. Klio's hooks already cover");
+  log("        it end to end — team context is injected at SessionStart,");
+  log("        and your sessions are captured from PostToolUse and");
+  log("        UserPromptSubmit — and hooks work no matter how Claude Code");
+  log("        authenticates. The proxy adds nothing for it.");
+  log("        In fact, if you are on a Claude subscription (rather than an");
+  log("        ANTHROPIC_API_KEY), Claude Code will not send traffic to a");
+  log("        custom base URL at all, so turning the proxy on changes");
+  log("        nothing whatsoever for it. Measured, not theorised.");
+  log("");
+  log("      • The proxy exists for agents WITHOUT hook support: Codex,");
+  log("        and anything you build yourself that can point at a base");
+  log("        URL. Those agents have no other way to receive your team's");
+  log("        memories or to send sessions back as grading evidence.");
+  log("        That is the whole reason to say yes.");
+  log("");
+  log("      • What it does to a request. On Anthropic's /v1/messages it");
+  log("        APPENDS your Klio memories to the request's `system` field;");
+  log("        on OpenAI's /v1/responses — the API Codex speaks — it");
+  log("        appends them to `instructions`. Either way it then sends");
+  log("        the conversation to Klio as grading evidence.");
+  log("        Exactly ONE field is touched, and only ever appended to.");
+  log("        Nothing else: `messages`, `input`, `tools`, `tool_choice`,");
+  log("        `tool_reference` blocks and every tool-call id are");
+  log("        forwarded byte for byte, and any doubt forwards your");
+  log("        original bytes unmodified.");
   log("        Turn either half off at any time, without uninstalling:");
   log("        `klio proxy capture off` and `klio proxy inject off`.");
   log("        The choice is saved in ~/.klio/config.json and survives");
@@ -202,11 +235,6 @@ export function describeTradeoffs(log: (line: string) => void): void {
   log("        one process — but only a process YOUR shell starts, which is");
   log("        why they are not the durable switch.)");
   log("        There is no compression yet, so no token savings yet.");
-  log("");
-  log("      • Codex is wired through the proxy too, but as PASS-THROUGH");
-  log("        for now: Codex talks the /v1/responses API, and this");
-  log("        release only transforms the Anthropic messages path. Its");
-  log("        traffic is forwarded unchanged — no injection, no capture.");
   log("");
   log("      • MCP Tool Search is disabled by default when the base URL");
   log("        is not Anthropic's. We set ENABLE_TOOL_SEARCH=true to turn");
@@ -217,8 +245,10 @@ export function describeTradeoffs(log: (line: string) => void): void {
   log("        custom base URL, and there is no flag that re-enables it.");
   log("        If you use it, run `klio uninit` to undo this wiring.");
   log("");
-  log("      • A dead proxy means your agent cannot reach a model at all.");
-  log("        A supervisor keeps it alive; `klio doctor` checks and heals.");
+  log("      • A dead proxy means any agent that DOES route through it");
+  log("        cannot reach a model at all — Codex, and anything else you");
+  log("        pointed at it. A supervisor keeps it alive; `klio doctor`");
+  log("        checks and heals it.");
   log("");
 }
 

@@ -312,10 +312,61 @@ test("the trade-offs block does not claim pass-through only", () => {
   assert.match(text, /KLIO_PROXY_CAPTURE/);
 });
 
-test("the trade-offs block is honest that Codex gets pass-through today", () => {
+test("the trade-offs block names Codex and the API it actually uses", () => {
   const lines: string[] = [];
   describeTradeoffs((l) => lines.push(l));
   const text = lines.join("\n");
   assert.match(text, /codex/i);
   assert.match(text, /responses/i, "must name the API Codex actually uses");
+  assert.doesNotMatch(
+    text,
+    /codex[\s\S]{0,200}pass-?through/i,
+    `Codex is no longer pass-through:\n${text}`,
+  );
+});
+
+// --- what the proxy is FOR ---------------------------------------------
+//
+// Measured on a real machine, 2026-08-15: ANTHROPIC_BASE_URL set to the
+// proxy, proxy healthy in inject+capture, Claude Code restarted — and
+// ZERO connections ever reached the proxy, because Claude Code
+// authenticates by subscription OAuth and does not route to a custom
+// base URL under it. Over the same window the HOOK path wrote 64
+// memories and injected on SessionStart. So the proxy adds nothing for
+// Claude Code, and this block used to present it as the way Claude Code
+// gets team context. Copy that sells a no-op is worse than no copy.
+
+test("the trade-offs block says hooks already cover Claude Code", () => {
+  const lines: string[] = [];
+  describeTradeoffs((l) => lines.push(l));
+  const text = lines.join("\n");
+
+  assert.match(text, /hook/i, "must name the hooks that already do this");
+  assert.match(
+    text,
+    /claude code[\s\S]{0,400}(already|not needed|no need)/i,
+    `must say Claude Code is already covered:\n${text}`,
+  );
+  assert.match(
+    text,
+    /subscription/i,
+    "must warn that a Claude subscription never routes to a custom base URL",
+  );
+  assert.match(
+    text,
+    /without hook|no hook|cannot do hook|can't do hook/i,
+    "must say who the proxy is actually for",
+  );
+});
+
+test("the trade-offs block keeps every warning that is still true", () => {
+  const lines: string[] = [];
+  describeTradeoffs((l) => lines.push(l));
+  const text = lines.join("\n");
+
+  assert.match(text, /Remote Control/i, "Remote Control incompatibility still applies");
+  assert.match(text, /ENABLE_TOOL_SEARCH=true/, "MCP Tool Search flag still applies");
+  assert.match(text, /dead proxy/i, "a dead proxy still blocks agents that DO use it");
+  assert.match(text, /klio proxy capture off/);
+  assert.match(text, /klio proxy inject off/);
 });

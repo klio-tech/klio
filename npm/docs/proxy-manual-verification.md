@@ -548,9 +548,14 @@ for why there is deliberately no idle timer, probe, or abort.
 * **Anthropic itself was never contacted.** Rate-limit headers
   (`anthropic-ratelimit-*`), `anthropic-beta` handling, overloaded/529
   behaviour, and Anthropic's own SSE ping cadence are unobserved.
-* **Codex / `/v1/responses` is untested live.** By design it is forwarded byte
-  for byte with no injection or capture (`upstream.path.endsWith("/messages")`
-  gates both), but no real `/v1/responses` request was sent.
+* ~~**Codex / `/v1/responses` is untested live.**~~ **CLOSED in 0.9.6.** The
+  Responses API now gets injection and capture too, and it was verified live on
+  2026-08-16 against `https://litellm.oppla.dev/v1/responses` with real
+  codex-cli 0.39.0 driving the real proxy — see
+  `.superpowers/sdd/2026-08-14-cloud-proxy/responses-api-report.md` for the
+  transcript. What remains untested there is the same list as for
+  `/v1/messages`: OpenAI's own endpoint was never contacted directly, only the
+  LiteLLM gateway in front of it.
 * **The >10 MB over-cap path itself** was not exercised against this real
   upstream at all — no >10 MB body was sent.
 * **The launchd supervisor was not exercised.** Check 6 drove `klio proxy

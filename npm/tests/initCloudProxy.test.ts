@@ -741,3 +741,39 @@ test("no test in this file wrote the developer's real supervisor unit", () => {
     );
   }
 });
+
+// ---------------------------------------------------------------------
+// The offer's own copy has to be true.
+//
+// It presented the proxy as how Claude Code receives team context. It
+// is not: Claude Code is covered end to end by Klio's hooks (injection
+// on SessionStart, capture on PostToolUse/UserPromptSubmit), and under
+// a Claude subscription it does not route to a custom base URL at all —
+// measured live, zero connections reached a healthy proxy. The proxy's
+// value is agents that cannot do hooks.
+
+test("the proxy offer says Claude Code is already covered by hooks", async () => {
+  let asked = "";
+  await maybeOfferProxy({
+    anyProxyableAgent: true,
+    ask: async (message: string) => {
+      asked = message;
+      return "n";
+    },
+    wire: async () => {},
+  });
+
+  assert.match(asked, /hook/i, "must name hooks");
+  assert.match(
+    asked,
+    /claude code[\s\S]{0,300}(already|not needed|no need)/i,
+    `must say Claude Code is already covered:\n${asked}`,
+  );
+  assert.match(asked, /codex/i, "must name who it IS for");
+  assert.doesNotMatch(
+    asked,
+    /codex[\s\S]{0,160}(forwarded unchanged|pass-?through)/i,
+    `Codex is no longer forwarded unchanged:\n${asked}`,
+  );
+  assert.match(asked, /\[Y\/n\]/, "still defaults to yes");
+});

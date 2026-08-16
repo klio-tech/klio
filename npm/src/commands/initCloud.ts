@@ -157,7 +157,12 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
     log(`  ! ${e.name}: ${e.message}`);
   }
   if (result.configured.length > 0) {
-    log(`  ✓ ${result.configured.join(" + ")} connected`);
+    // Say WHAT they are connected to. This line lists every agent that
+    // got an MCP server entry, and it printed immediately above the
+    // proxy offer — so a list ending in "codex" read as though all of
+    // them were about to be, or already were, routed through the proxy.
+    // They are two different integrations with two different reaches.
+    log(`  ✓ ${result.configured.join(" + ")} — Klio MCP server connected`);
   } else if (result.skipped.length === 0 && result.errored.length === 0) {
     log("  — No MCP-capable agents found. Install Claude Code, Cursor, or");
     log("    Codex and re-run `klio init` to wire them up.");
@@ -313,22 +318,24 @@ export async function maybeOfferProxy(
   if (opts.isInteractive === false) {
     return { enabled: false, skippedNonInteractive: true };
   }
-  // The claim here is scoped on purpose. Injection and capture both
-  // gate on a POST to a path ending `/messages` (proxy/server.ts), so
-  // they reach agents on Anthropic's messages API — Claude Code, and
-  // anything else speaking that shape. Codex is wired to the proxy as
-  // well, but `wire_api = "responses"` (proxy/codexProxy.ts) puts its
-  // traffic on `/v1/responses`, which this release forwards byte for
-  // byte. Saying "every request" and "even in agents without hook
-  // support" without that carve-out promised Codex users three things
-  // they do not get.
+  // The claim here is scoped on purpose, and the scope is the whole
+  // point of the question. Injection and capture now cover BOTH
+  // Anthropic's /v1/messages and OpenAI's /v1/responses
+  // (proxy/server.ts), so Codex is genuinely served. Claude Code is
+  // NOT the reason to say yes: its hooks already inject and capture
+  // regardless of auth mode, and on a Claude subscription it never
+  // routes to a custom base URL at all — measured live, zero
+  // connections reached a healthy proxy. Selling this as the way
+  // Claude Code gets team context was selling a no-op.
   const raw = await opts.ask(
-    "Route model calls through a local Klio proxy? Recommended — it's the\n" +
-      "only integration that needs nothing from your agent (no hooks, no\n" +
-      "SDK). For agents on Anthropic's messages API (Claude Code), it\n" +
-      "appends your team's context to each request and captures the\n" +
-      "session for grading. Codex is forwarded unchanged for now (it uses\n" +
-      "the /v1/responses API). It does reroute every model call through a\n" +
+    "Route model calls through a local Klio proxy? Recommended if you use\n" +
+      "Codex or your own agents — it's the only integration that needs\n" +
+      "nothing from the agent (no hooks, no SDK). It appends your team's\n" +
+      "context to each request (Anthropic's messages API and OpenAI's\n" +
+      "/v1/responses, which is what Codex speaks) and captures the session\n" +
+      "for grading. Claude Code does not need it: Klio's hooks already\n" +
+      "inject and capture there, and on a Claude subscription it won't use\n" +
+      "a custom base URL anyway. It does reroute model calls through a\n" +
       "local process on 127.0.0.1 — but it fails open, is auto-revived if\n" +
       "it dies, and you can turn it off any time (`klio uninit`, or\n" +
       "`klio proxy inject off` / `capture off`). [Y/n]: ",
