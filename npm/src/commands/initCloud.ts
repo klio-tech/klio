@@ -192,6 +192,17 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   const proxyOffer = await maybeOfferProxy({
     ask: buildProxyAsk(promptFn),
     anyProxyableAgent,
+    // A non-interactive stdin (CI, `npx klio init < /dev/null`, any
+    // piped script) must never silently install a proxy, a supervisor
+    // unit, and rewrite agent configs just because nobody was there to
+    // read the prompt. `default: "y"` makes an EMPTY line accept, and a
+    // closed/piped stdin resolves to an empty line the instant the
+    // stream ends (see buildProxyAsk / prompt.ts's handleEnd) — so
+    // without this check, non-interactive init would silently opt in.
+    // Checked here rather than inside `maybeOfferProxy` so the answer-
+    // parsing tests stay TTY-free; production is the only caller that
+    // ever inspects `process.stdin` directly.
+    isInteractive: process.stdin.isTTY === true,
     // The fingerprint of the config written moments ago is what lets
     // step 3 tell "the proxy I just started" from "a survivor of an
     // earlier init still holding 8787 with the key you rotated away
@@ -209,9 +220,14 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
     log("");
     log(`  ! Could not turn on the proxy: ${proxyOffer.error}`);
     log("    Your agents are unaffected — re-run `klio init` to try again.");
+  } else if (proxyOffer.skippedNonInteractive) {
+    log("");
+    log("  — Proxy skipped: no interactive terminal to ask (stdin isn't a");
+    log("    TTY). Re-run `klio init` from a terminal to enable it, or turn");
+    log("    it on later the same way.");
   } else if (anyProxyableAgent) {
     log("");
-    log("  — Proxy left off. Enable it later by re-running `klio init`.");
+    log("  — Proxy left off. Enable it any time by re-running `klio init`.");
   }
 
   printReferenceBlock(log, result.configured, key);
@@ -225,32 +241,78 @@ export type OfferProxyOptions = {
   ask: (prompt: string) => Promise<string>;
   anyProxyableAgent: boolean;
   wire: () => Promise<void>;
+  /**
+   * Whether stdin is attached to an interactive terminal. Defaults to
+   * `true` when omitted so every test that predates this option (and
+   * every test that isn't specifically about the TTY guard) keeps
+   * exercising the answer-parsing/wiring logic unchanged. Production
+   * (initCloud.ts) always passes `process.stdin.isTTY === true`
+   * explicitly.
+   *
+   * When `false`, the offer is declined WITHOUT calling `ask` at all —
+   * `default: "y"` (buildProxyAsk) makes an empty read resolve to
+   * accept, and a non-interactive stdin (closed, piped, `/dev/null`)
+   * resolves to an empty read the instant the stream ends. Reaching
+   * `ask` at all on a non-interactive stdin would mean the default
+   * silently wins with nobody there to have chosen it — installing a
+   * proxy, a supervisor unit, and rewriting agent config as a side
+   * effect nobody asked for. That is never acceptable as an implicit
+   * outcome, so this check comes first and short-circuits the prompt
+   * entirely.
+   */
+  isInteractive?: boolean;
 };
 
 /**
- * `enabled` is false either because the user declined or because
- * `wire()` threw — `error` distinguishes the two. Note that a
+ * `enabled` is false because the user declined, the session was
+ * non-interactive, or `wire()` threw — `error` and
+ * `skippedNonInteractive` distinguish the three. Note that a
  * *supervisor* install failure specifically (step 2 of `wireProxyStack`)
  * does NOT show up here: it is non-fatal by design (proxy/supervisor.ts)
  * and is reported only through the `log()` lines `wireProxyStack` writes
  * while wiring, not through this result.
  */
-export type OfferProxyResult = { enabled: boolean; error?: string };
+export type OfferProxyResult = {
+  enabled: boolean;
+  error?: string;
+  /** True when the offer was declined because stdin isn't a TTY — `ask` was never called. */
+  skippedNonInteractive?: boolean;
+};
 
 /**
- * Offer the local proxy, defaulting to NO.
+ * Offer the local proxy, defaulting to YES.
  *
- * Pointing ANTHROPIC_BASE_URL at localhost is the most invasive thing
- * this tool does to a machine — every model call an agent makes then
- * flows through a process we installed. A Cloud user signed up
- * specifically to avoid running things. So this is opt-in, and a bare
- * Enter declines: anything other than an explicit `y`/`yes` (any case)
- * is a decline, never a re-prompt.
+ * The proxy is the only integration point that needs nothing from the
+ * agent — no hook support, no SDK, nothing to configure — so a user who
+ * skips it gets the weakest version of the product for no reason most
+ * of the time. It fails open (proxy/wiring.ts, proxy/server.ts), is
+ * supervised back to life every 60s, is healed by `klio doctor`, and
+ * can be turned off in one command (`klio uninit`, or the standing kill
+ * switches `klio proxy inject off` / `klio proxy capture off`) — the
+ * safety net that used to justify defaulting to no has since shipped.
+ * So this is opt-out: a bare Enter accepts.
+ *
+ * Answer parsing is intentionally narrow and exact-match, in both
+ * directions:
+ *   - Accept only on an EMPTY answer (the bare-Enter default) or an
+ *     exact `y` / `yes` (any case).
+ *   - Decline on everything else — that includes the explicit `n` /
+ *     `no`, but ALSO any unrecognized text (`nope`, `sure`, `yep`,
+ *     `yy`, `   `). A default-yes prompt has to fail toward the safer
+ *     outcome when the input isn't a clean match; silently treating
+ *     "anything that isn't an exact no" as a yes would mean garbled
+ *     input (a fat-fingered paste, a stray keystroke) turns into an
+ *     unrequested proxy install. No prefix matching either way, so
+ *     "nope" is not mistaken for "no" and does not get special-cased
+ *     into an accept by falling through a loose check.
  */
 export async function maybeOfferProxy(
   opts: OfferProxyOptions,
 ): Promise<OfferProxyResult> {
   if (!opts.anyProxyableAgent) return { enabled: false };
+  if (opts.isInteractive === false) {
+    return { enabled: false, skippedNonInteractive: true };
+  }
   // The claim here is scoped on purpose. Injection and capture both
   // gate on a POST to a path ending `/messages` (proxy/server.ts), so
   // they reach agents on Anthropic's messages API — Claude Code, and
@@ -260,18 +322,29 @@ export async function maybeOfferProxy(
   // byte. Saying "every request" and "even in agents without hook
   // support" without that carve-out promised Codex users three things
   // they do not get.
-  const answer = (
-    await opts.ask(
-      "Route model calls through a local Klio proxy? For agents on Anthropic's\n" +
-        "messages API (Claude Code), it appends your team's context to each\n" +
-        "request and captures the session for grading — no hook support needed.\n" +
-        "Codex is forwarded unchanged for now (it uses the /v1/responses API).\n" +
-        "Runs on 127.0.0.1 and fails open. [y/N]: ",
-    )
-  )
-    .trim()
-    .toLowerCase();
-  if (answer !== "y" && answer !== "yes") return { enabled: false };
+  const raw = await opts.ask(
+    "Route model calls through a local Klio proxy? Recommended — it's the\n" +
+      "only integration that needs nothing from your agent (no hooks, no\n" +
+      "SDK). For agents on Anthropic's messages API (Claude Code), it\n" +
+      "appends your team's context to each request and captures the\n" +
+      "session for grading. Codex is forwarded unchanged for now (it uses\n" +
+      "the /v1/responses API). It does reroute every model call through a\n" +
+      "local process on 127.0.0.1 — but it fails open, is auto-revived if\n" +
+      "it dies, and you can turn it off any time (`klio uninit`, or\n" +
+      "`klio proxy inject off` / `capture off`). [Y/n]: ",
+  );
+  // `raw === ""` catches ONLY the true bare-Enter case: prompt.ts
+  // substitutes an empty line with `default: "y"` (buildProxyAsk)
+  // before it ever reaches here, so in production `raw` is either that
+  // substituted "y" or whatever the user actually typed — this branch
+  // exists for callers/tests that hand `ask` a raw, unsubstituted
+  // empty string directly. A line of pure whitespace is NOT the same
+  // as bare-Enter (the user typed something), so it falls through to
+  // the exact-match check below like any other non-empty input and
+  // declines.
+  const trimmed = raw.trim().toLowerCase();
+  const accepted = raw === "" || trimmed === "y" || trimmed === "yes";
+  if (!accepted) return { enabled: false };
   try {
     await opts.wire();
     return { enabled: true };
@@ -284,13 +357,13 @@ export async function maybeOfferProxy(
  * Build the `ask` callback `maybeOfferProxy` calls, wired through the
  * real `prompt()` helper.
  *
- * The single, load-bearing thing this does is pass `default: "n"`.
- * Without it, `prompt()` treats an empty line as invalid input when no
- * default is set (prompt.ts: `if (!final && !opts.default)`) and loops
- * back to read another line — which breaks two ways:
+ * The single, load-bearing thing this does is pass `default: "y"`.
+ * Without SOME default, `prompt()` treats an empty line as invalid input
+ * (prompt.ts: `if (!final && !opts.default)`) and loops back to read
+ * another line — which breaks two ways:
  *
  *   - Interactive: a bare Enter re-prints "value required" and asks
- *     again, so the user can never simply hit Enter to decline — the
+ *     again, so the user can never simply hit Enter to accept — the
  *     headline requirement of this feature.
  *   - Non-interactive (piped/closed stdin): once the stream ends,
  *     `readLine()` resolves `""` immediately and forever (see
@@ -299,8 +372,13 @@ export async function maybeOfferProxy(
  *     a genuine hang that would brick `npx klio init` under CI or any
  *     piped input.
  *
- * With `default: "n"`, an empty line resolves immediately to `"n"`,
- * which `maybeOfferProxy` already treats as a decline.
+ * With `default: "y"`, an empty line resolves immediately to `"y"`,
+ * which `maybeOfferProxy` already treats as an accept. Do NOT remove
+ * this default to "fix" the non-interactive case — that is handled one
+ * layer up, by `maybeOfferProxy`'s `isInteractive` check, which stops a
+ * non-interactive stdin from ever reaching `ask` at all. Removing the
+ * default here would just reintroduce the hang above for anyone who
+ * DOES have a TTY and wants to bare-Enter accept.
  *
  * Exported (rather than inlined at the `initCloud` call site) so the
  * unit suite can drive this exact call shape through the REAL
@@ -314,7 +392,7 @@ export function buildProxyAsk(
     mask?: boolean;
   }) => Promise<string>,
 ): (message: string) => Promise<string> {
-  return (message: string) => promptFn({ message, default: "n" });
+  return (message: string) => promptFn({ message, default: "y" });
 }
 
 /** Inputs to `wireProxyStack`. Every collaborator is injectable for tests. */
