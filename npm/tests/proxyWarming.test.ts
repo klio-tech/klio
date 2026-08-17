@@ -36,6 +36,8 @@ type EngineOptions = {
 type FakeEngine = {
   base: string;
   calls: string[];
+  /** Full parsed request bodies, in order — for asserting on `repo_root`/`git_remote`. */
+  bodies: Record<string, unknown>[];
   close: () => Promise<void>;
   setMemories: (fn: (query: string) => { id: string; content: string }[]) => void;
   setStatus: (status: number) => void;
@@ -46,6 +48,7 @@ async function startEngine(opts: EngineOptions = {}): Promise<FakeEngine> {
   let status = opts.status ?? 200;
   let memoriesFor = opts.memories ?? ((q: string) => [{ id: "m1", content: `memory for ${q}` }]);
   const calls: string[] = [];
+  const bodies: Record<string, unknown>[] = [];
   const timers = new Set<NodeJS.Timeout>();
 
   const server = http.createServer((req, res) => {
@@ -54,7 +57,9 @@ async function startEngine(opts: EngineOptions = {}): Promise<FakeEngine> {
     req.on("end", () => {
       let query = "";
       try {
-        query = String((JSON.parse(Buffer.concat(chunks).toString("utf8")) as { query?: string }).query ?? "");
+        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+        query = String(parsed.query ?? "");
+        bodies.push(parsed);
       } catch {
         query = "";
       }
@@ -75,6 +80,7 @@ async function startEngine(opts: EngineOptions = {}): Promise<FakeEngine> {
   return {
     base: `http://127.0.0.1:${port}`,
     calls,
+    bodies,
     setMemories: (fn) => { memoriesFor = fn; },
     setStatus: (s) => { status = s; },
     close: async () => {
@@ -103,6 +109,8 @@ type HarnessOptions = {
   inject?: boolean;
   withConfig?: boolean;
   log?: (line: string) => void;
+  /** The project this harness's recaller should be scoped to, if any. */
+  project?: { repo_root?: string; git_remote?: string };
 };
 
 async function withWarmingProxy(opts: HarnessOptions, run: (h: Harness) => Promise<void>): Promise<void> {
@@ -133,6 +141,7 @@ async function withWarmingProxy(opts: HarnessOptions, run: (h: Harness) => Promi
     ttlMs: opts.ttlMs,
     budgetMs: opts.budgetMs,
     log: opts.log ?? (() => {}),
+    project: opts.project,
   });
   recaller.start();
 
@@ -372,6 +381,43 @@ test("reason: empty when the engine answers with no memories", async () => {
   });
 });
 
+// The engine now applies a relevance floor and can legitimately return
+// zero memories for a query that later gets a real answer — e.g. because
+// the org's memory grew, or the floor's judgment call was query-
+// dependent. An `empty` verdict must be a FRESHNESS-BOUNDED cache entry,
+// not a standing "never ask again": once it goes stale it is refetched
+// like any other entry (see recall.ts's stale-while-revalidate
+// invariant), and a query that now has a real answer gets it — nothing
+// from the earlier empty result leaks forward and suppresses it.
+test("an empty recall does not permanently suppress a later good result", async () => {
+  await withWarmingProxy(
+    { engine: { memories: () => [] }, ttlMs: 50 },
+    async (h) => {
+      assert.equal((await turn(h.proxyBase, "grows an answer")).reason, "cold");
+      await h.recaller.idle();
+
+      const second = await turn(h.proxyBase, "grows an answer");
+      assert.equal(second.injected, 0);
+      assert.equal(second.reason, "empty");
+
+      // The org's memory grew: the same query now has a real answer.
+      h.engine.setMemories(() => [{ id: "m1", content: "now known" }]);
+
+      // Past the (short, test-only) TTL, the stale-but-served empty entry
+      // triggers a background refresh — same mechanism as any other stale
+      // entry, no special-casing for "empty" needed or present.
+      await sleep(100);
+      const third = await turn(h.proxyBase, "grows an answer");
+      assert.equal(third.reason, "empty", "the stale entry is still served while the refresh runs");
+      await h.recaller.idle();
+
+      const fourth = await turn(h.proxyBase, "grows an answer");
+      assert.equal(fourth.injected, 1, "the refreshed entry must carry the now-real answer");
+      assert.equal(fourth.reason, "hit");
+    },
+  );
+});
+
 test("reason: error, and one log line, when the background recall fails", async () => {
   const logged: string[] = [];
   await withWarmingProxy(
@@ -553,5 +599,33 @@ test("a stopped recaller starts no new work", async () => {
     assert.equal(t.injected, 0);
     await sleep(100);
     assert.equal(h.engine.calls.length, callsBefore, "a stopped recaller must not fetch");
+  });
+});
+
+// ---------------------------------------------------------------------
+// G. Project scoping — the proxy sends `repo_root`/`git_remote` end to
+// end, on the wire the engine actually sees.
+// ---------------------------------------------------------------------
+
+test("a resolved project is sent as repo_root/git_remote on the recall request", async () => {
+  await withWarmingProxy(
+    { project: { repo_root: "/repo/klio", git_remote: "git@github.com:klio-tech/klio.git" } },
+    async (h) => {
+      await turn(h.proxyBase, "why postgres");
+      await h.recaller.idle();
+      assert.equal(h.engine.bodies.length, 1);
+      assert.equal(h.engine.bodies[0]!.repo_root, "/repo/klio");
+      assert.equal(h.engine.bodies[0]!.git_remote, "git@github.com:klio-tech/klio.git");
+    },
+  );
+});
+
+test("no project resolved sends neither field — fail-open, unscoped recall", async () => {
+  await withWarmingProxy({}, async (h) => {
+    await turn(h.proxyBase, "why postgres");
+    await h.recaller.idle();
+    assert.equal(h.engine.bodies.length, 1);
+    assert.ok(!("repo_root" in h.engine.bodies[0]!), "no repo_root when no project was resolved");
+    assert.ok(!("git_remote" in h.engine.bodies[0]!), "no git_remote when no project was resolved");
   });
 });

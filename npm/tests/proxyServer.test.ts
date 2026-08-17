@@ -1202,6 +1202,64 @@ test("KLIO_PROXY_CAPTURE=off is a kill switch even with a valid cloud config", a
   assert.equal(calls, 0, "the documented kill switch must still turn capture off");
 });
 
+// `startProxy` resolves its project ONCE, at startup — see the docblock
+// at its call site in server.ts for why a long-lived daemon has no
+// per-request cwd to resolve it from instead. `StartProxyOptions.project`
+// is the test seam that skips the real `git`/`process.cwd()` resolution;
+// this proves it actually reaches the recaller (and, from there, the
+// wire) rather than being silently dropped between the two. Ambient
+// warming (on by default) fires at `start()` independent of any client
+// request, so polling briefly after `startProxy` resolves is enough — no
+// request needs to be sent.
+test("startProxy threads its resolved project through to the recall request", async () => {
+  const brainBodies: Record<string, unknown>[] = [];
+  const brain = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      try {
+        brainBodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+      } catch {
+        /* ignore */
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ memories: [] }));
+    });
+  });
+  await new Promise<void>((r) => brain.listen(0, "127.0.0.1", r));
+  const brainPort = (brain.address() as AddressInfo).port;
+
+  const home = mkdtempSync(join(tmpdir(), "klio-proxy-project-"));
+  let started: { server: http.Server; port: number } | null = null;
+  try {
+    mkdirSync(join(home, ".klio"), { recursive: true });
+    writeFileSync(
+      join(home, ".klio", "config.json"),
+      JSON.stringify({ apiKey: "ag_live_test", agentId: "agent-x", baseUrl: `http://127.0.0.1:${brainPort}` }),
+      "utf8",
+    );
+    started = await startProxy({
+      port: 0,
+      host: "127.0.0.1",
+      configPath: join(home, ".klio", "config.json"),
+      project: { repo_root: "/repo/klio", git_remote: "git@github.com:klio-tech/klio.git" },
+    });
+
+    const deadline = Date.now() + 3_000;
+    while (brainBodies.length === 0 && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 20));
+    }
+    assert.equal(brainBodies.length, 1, "ambient warming must have reached the brain");
+    assert.equal(brainBodies[0]!.repo_root, "/repo/klio");
+    assert.equal(brainBodies[0]!.git_remote, "git@github.com:klio-tech/klio.git");
+  } finally {
+    if (started) await new Promise<void>((r) => (started as { server: http.Server }).server.close(() => r()));
+    brain.closeAllConnections();
+    await new Promise<void>((r) => brain.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 // --- health identifies WHICH proxy is answering ------------------------
 //
 // `klio proxy status` printed "alive (unknown mode)" because the Node

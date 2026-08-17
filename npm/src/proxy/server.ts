@@ -50,6 +50,7 @@ import {
   type RecallLookup,
 } from "./recall.js";
 import { resolveProxyToggles } from "./toggles.js";
+import { resolveProject, type ResolvedProject } from "../project.js";
 
 /** Above this, a request body is forwarded raw, unbuffered, uninjected. */
 const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
@@ -902,6 +903,14 @@ export type StartProxyOptions = Omit<CreateProxyServerOptions, "config" | "recal
    * developer's own credentials and persisted preferences.
    */
   configPath?: string;
+  /**
+   * Project identity for this proxy's recalls, for tests. Defaults to
+   * resolving from `process.cwd()` — see the call site below for why
+   * that, and not per-request resolution, is what a long-lived daemon
+   * can actually do. Passing this directly skips that resolution
+   * entirely (no `git` subprocess), which is what every test wants.
+   */
+  project?: ResolvedProject;
 };
 
 export async function startProxy(
@@ -932,12 +941,40 @@ export async function startProxy(
   const inject = toggles.inject.enabled ? (opts.inject ?? true) : false;
   const captureEnabled = toggles.capture.enabled ? (opts.captureEnabled ?? true) : false;
 
+  // Project identity for this proxy's recalls, resolved ONCE — not per
+  // request. `klio hook` gets a fresh, correct `cwd` on every invocation
+  // (Claude Code passes it in the hook payload); this proxy is a
+  // long-lived daemon fronting `/v1/messages` and `/v1/responses`,
+  // neither of which carries a cwd or project field, only the
+  // conversation. There is no per-request answer to "which project is
+  // this for", so the best available one is the daemon's OWN process
+  // cwd at the moment it started — typically wherever `klio proxy serve`
+  // was launched from, which the supervisor point at the directory
+  // `klio init`/`klio proxy` ran in.
+  //
+  // KNOWN LIMITATION: a single running proxy instance serves every
+  // client that points its `ANTHROPIC_BASE_URL` /
+  // `OPENAI_BASE_URL` at it, regardless of which project's directory
+  // that client is actually running in — a second terminal in a second
+  // repo, talking to the same proxy on 8787, gets the FIRST repo's
+  // `repo_root`/`git_remote` on every recall. This is strictly better
+  // than the previous behaviour (no project sent, no scoping at all, in
+  // an org where recall now fences by project), not a correct multi-
+  // project resolution. `resolveProject` itself is fail-open — a cwd
+  // that resolves to nothing (not a git repo, `git` missing) yields
+  // `{}`, so a proxy started outside any project degrades to exactly
+  // today's unscoped recall rather than sending a wrong or empty
+  // `repo_root`.
+  const project = opts.project ?? resolveProject(process.cwd());
+
   // The warmer owns every background fetch and every timer this process
   // creates for recall. It is started here and STOPPED when the server
   // closes — a refresh interval that outlives its server would keep the
   // process alive after shutdown, which is exactly the class of bug
   // Task 3 already shipped once.
-  const recaller = config ? createWarmingRecaller({ config, fetchImpl: opts.fetchImpl }) : undefined;
+  const recaller = config
+    ? createWarmingRecaller({ config, fetchImpl: opts.fetchImpl, project })
+    : undefined;
   recaller?.start();
 
   const server = createProxyServer({

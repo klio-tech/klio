@@ -464,6 +464,20 @@ a question the cache has not seen is answered immediately from that set
 the next turn on the same topic is warm. Repeat questions collapse to
 one recall, never one per turn.
 
+**Recall is project-scoped.** Every recall carries `repo_root` and
+`git_remote` (when the proxy is running inside a git repo), so a
+session about one project is not injected with facts from another. The
+proxy resolves its project once, from its own process directory, when
+it starts — not per request, since neither `/v1/messages` nor
+`/v1/responses` carries a cwd. One running proxy therefore answers
+every client pointed at it with the same project; running a separate
+proxy per project (or restarting it from the right directory) is how
+to scope correctly across more than one. A directory that is not a git
+repo sends neither field — unscoped, exactly like before this existed
+— rather than guessing. The engine can legitimately answer with zero
+memories (a relevance floor, not a bug): that is `x-klio-injected: 0`,
+reason `empty`, same as any other clean miss.
+
 Every response carries two headers, so you can see what it did without
 reading logs:
 

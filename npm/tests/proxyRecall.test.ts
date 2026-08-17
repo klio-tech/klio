@@ -11,7 +11,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { AMBIENT_QUERY, createWarmingRecaller } from "../src/proxy/recall.js";
+import { AMBIENT_QUERY, cacheKeyFor, createWarmingRecaller } from "../src/proxy/recall.js";
 
 const CONFIG = { apiKey: "k", agentId: "a", baseUrl: "https://api.example" };
 
@@ -55,6 +55,182 @@ test("sends the key + agent headers, and the documented body", async () => {
   const out = recaller.lookup("why postgres");
   assert.equal(out.memories.length, 1);
   assert.equal(out.reason, "hit");
+  recaller.stop();
+});
+
+// ---------------------------------------------------------------------
+// Project scoping — vex_engine PR #33 fences recall to the caller's
+// project via `repo_root`/`git_remote`. These are additive and,
+// deliberately, ONE VALUE FOR THE WHOLE RECALLER (see
+// RecallerOptions.project): a proxy resolves its project once at
+// startup, not per request.
+// ---------------------------------------------------------------------
+
+test("sends repo_root and git_remote when a project is resolved", async () => {
+  let seenBody: Record<string, unknown> = {};
+  const recaller = await warmed(
+    {
+      config: CONFIG,
+      project: { repo_root: "/repo/klio", git_remote: "git@github.com:klio-tech/klio.git" },
+      fetchImpl: (async (_u: any, init: any) => {
+        seenBody = JSON.parse(init.body);
+        return new Response(JSON.stringify({ memories: [] }), { status: 200 });
+      }) as unknown as typeof fetch,
+    },
+    "why postgres",
+  );
+  assert.deepEqual(seenBody, {
+    query: "why postgres",
+    limit: 8,
+    scope: "org",
+    repo_root: "/repo/klio",
+    git_remote: "git@github.com:klio-tech/klio.git",
+  });
+  recaller.stop();
+});
+
+test("no project resolved sends neither field — fail-open, unscoped recall", async () => {
+  let seenBody: Record<string, unknown> = {};
+  const recaller = await warmed(
+    {
+      config: CONFIG,
+      fetchImpl: (async (_u: any, init: any) => {
+        seenBody = JSON.parse(init.body);
+        return new Response(JSON.stringify({ memories: [] }), { status: 200 });
+      }) as unknown as typeof fetch,
+    },
+    "why postgres",
+  );
+  assert.deepEqual(seenBody, { query: "why postgres", limit: 8, scope: "org" });
+  assert.ok(!("repo_root" in seenBody));
+  assert.ok(!("git_remote" in seenBody));
+  recaller.stop();
+});
+
+test("a partial project (repo_root only, no remote) sends just that field", async () => {
+  let seenBody: Record<string, unknown> = {};
+  const recaller = await warmed(
+    {
+      config: CONFIG,
+      project: { repo_root: "/repo/klio" },
+      fetchImpl: (async (_u: any, init: any) => {
+        seenBody = JSON.parse(init.body);
+        return new Response(JSON.stringify({ memories: [] }), { status: 200 });
+      }) as unknown as typeof fetch,
+    },
+    "q",
+  );
+  assert.equal(seenBody.repo_root, "/repo/klio");
+  assert.ok(!("git_remote" in seenBody));
+  recaller.stop();
+});
+
+test("cacheKeyFor: the same query under two different projects produces different keys", () => {
+  const a = cacheKeyFor({ repo_root: "/repo/a" }, "why postgres");
+  const b = cacheKeyFor({ repo_root: "/repo/b" }, "why postgres");
+  const unscoped = cacheKeyFor(undefined, "why postgres");
+  assert.notEqual(a, b, "two different projects must not share a key");
+  assert.notEqual(a, unscoped, "a scoped query must not collide with the unscoped key");
+  assert.notEqual(b, unscoped);
+});
+
+test("cacheKeyFor: an unresolved project collapses to the pre-scoping (unscoped) key", () => {
+  // `{}` (no repo_root, no git_remote — e.g. resolveProject's fail-open
+  // case for a non-git cwd) must key identically to `undefined`, not
+  // introduce a THIRD distinct "empty project" bucket.
+  assert.equal(cacheKeyFor({}, "q"), cacheKeyFor(undefined, "q"));
+  assert.equal(cacheKeyFor(undefined, "q"), "q");
+});
+
+test("the same query from two different projects does not share a cache entry", async () => {
+  // Two independently-configured recallers (one project resolved per
+  // recaller instance, per contract) stand in for "two projects talking
+  // to recall": each must warm and read back its OWN answer for the
+  // identical query text, never the other's.
+  const recallerA = createWarmingRecaller({
+    config: CONFIG,
+    ambient: false,
+    log: () => {},
+    project: { repo_root: "/repo/a" },
+    fetchImpl: (async () =>
+      new Response(JSON.stringify({ memories: [{ id: "a1", content: "project A's answer" }] }), {
+        status: 200,
+      })) as unknown as typeof fetch,
+  });
+  const recallerB = createWarmingRecaller({
+    config: CONFIG,
+    ambient: false,
+    log: () => {},
+    project: { repo_root: "/repo/b" },
+    fetchImpl: (async () =>
+      new Response(JSON.stringify({ memories: [{ id: "b1", content: "project B's answer" }] }), {
+        status: 200,
+      })) as unknown as typeof fetch,
+  });
+
+  recallerA.lookup("same query text");
+  recallerB.lookup("same query text");
+  await Promise.all([recallerA.idle(), recallerB.idle()]);
+
+  assert.deepEqual(recallerA.lookup("same query text").memories, [{ id: "a1", content: "project A's answer" }]);
+  assert.deepEqual(recallerB.lookup("same query text").memories, [{ id: "b1", content: "project B's answer" }]);
+
+  recallerA.stop();
+  recallerB.stop();
+});
+
+test("the ambient warming path is scoped by project too", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const recaller = createWarmingRecaller({
+    config: CONFIG,
+    ambient: true,
+    log: () => {},
+    project: { repo_root: "/repo/klio", git_remote: "git@github.com:klio-tech/klio.git" },
+    fetchImpl: (async (_u: any, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ memories: [{ id: "a", content: "ambient" }] }), { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+  recaller.start();
+  await recaller.idle();
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0]!.query, AMBIENT_QUERY);
+  assert.equal(bodies[0]!.repo_root, "/repo/klio");
+  assert.equal(bodies[0]!.git_remote, "git@github.com:klio-tech/klio.git");
+  recaller.stop();
+});
+
+// ---------------------------------------------------------------------
+// The engine now applies a relevance floor and can legitimately answer
+// with zero memories. That must read as a SUCCESSFUL, freshness-bounded
+// answer (the normal ttlMs) — not a failure (the shorter FAILURE_TTL_MS)
+// — so a genuinely-empty answer does not get retried as aggressively as
+// a broken engine, but still expires and gets a fair re-ask once stale.
+// ---------------------------------------------------------------------
+
+test("a genuinely empty (non-junk) response caches as a success, not a failure", async () => {
+  const calls: string[] = [];
+  let clock = 1_000;
+  const recaller = createWarmingRecaller({
+    config: CONFIG,
+    ambient: false,
+    log: () => {},
+    ttlMs: 60_000, // success freshness window
+    now: () => clock,
+    fetchImpl: okFetch([], calls) as unknown as typeof fetch,
+  });
+
+  recaller.lookup("q");
+  await recaller.idle();
+  assert.equal(recaller.lookup("q").reason, "empty");
+
+  // Past FAILURE_TTL_MS (10s) but still inside ttlMs (60s): a FAILURE
+  // entry would already be stale and refetched here; a success-but-empty
+  // entry must not be.
+  clock += 15_000;
+  recaller.lookup("q");
+  await recaller.idle();
+  assert.equal(calls.length, 1, "an empty-but-successful answer must use the success TTL, not the failure TTL");
   recaller.stop();
 });
 
