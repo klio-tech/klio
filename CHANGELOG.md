@@ -4,6 +4,48 @@ All notable changes to `@klio-tech/klio` and the Klio engine are documented here
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.8] — 2026-08-16
+
+### Changed — the proxy's warm cache is project-aware infrastructure; proxy recall itself stays unscoped
+
+A production diagnosis found that 95% of memories are written with a
+project attached, but 95% of recalls discarded it. vex_engine PR #33
+fences recall to the caller's project on the server side. `klio hook`
+already sends `repo_root`/`git_remote` on every event, since it gets a
+real cwd from Claude Code each time — that path was already fine. The
+proxy does not, and after building (then measuring) a version that
+resolved a project from the daemon's own `process.cwd()` at startup, it
+turned out to be unsafe rather than merely incomplete: the running
+proxy's cwd, on the machine this was measured against, was the parent
+directory of over a dozen sibling repos under one umbrella git checkout
+with its own `origin` — a REAL project row, just the wrong one for
+every client actually working in a sibling repo. The engine only falls
+back to org-wide recall when the sent identifier matches no project; a
+real-but-wrong identifier fences to THAT project plus unfiled memories,
+actively **excluding** the correct project's memories — worse than
+today's unscoped recall, not better. So proxy-side project scoping does
+not ship this release; what does:
+
+- **One shared resolver.** `resolveProject`/`defaultGitRemote` moved out
+  of `commands/hook.ts` into `src/project.ts` so a future caller (a
+  proxy path that can carry genuine per-request attribution) does not
+  have to reimplement it. `klio hook`'s behaviour is unchanged. Also
+  fixed while it was being touched: an injected `gitRemoteFn` that
+  throws no longer breaks the module's own "never throws" contract.
+- **The warm cache is project-aware, unused for now.** `WarmingRecaller`
+  accepts an optional `project` and keys both the per-query and ambient
+  cache entries by it, so a future caller that CAN supply a trustworthy
+  per-request project will not have the same query from two projects
+  share (or leak into) a cache entry. Nothing in this release passes
+  `project` in — the proxy's own recalls stay exactly as unscoped
+  (org-wide) as they were before this work started.
+- **Zero memories is an expected, clean outcome** (unrelated to project
+  scoping, verified while this work was underway). The engine's
+  relevance floor can legitimately answer with nothing. An empty answer
+  caches as a SUCCESS (the normal freshness window), not a FAILURE (the
+  shorter one), so it neither spams retries nor permanently suppresses a
+  later query that does get a real answer once it goes stale.
+
 ## [0.9.7] — 2026-08-16
 
 ### Changed — Klio no longer wires Claude Code to the proxy, and undoes what it did

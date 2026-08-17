@@ -932,6 +932,25 @@ export async function startProxy(
   const inject = toggles.inject.enabled ? (opts.inject ?? true) : false;
   const captureEnabled = toggles.capture.enabled ? (opts.captureEnabled ?? true) : false;
 
+  // NOT wired to a project. `WarmingRecaller` supports one (see
+  // `RecallerOptions.project` in recall.ts) for a future caller that can
+  // supply a genuine per-request attribution, but this proxy is not that
+  // caller: it fronts `/v1/messages` and `/v1/responses`, neither of
+  // which carries a cwd or project field, so the only project this
+  // process could offer is its OWN `process.cwd()` at startup — which is
+  // wrong far more often than it is right. Measured on a real machine:
+  // the running proxy's cwd was the parent directory of ~14 sibling
+  // repos (a single umbrella git checkout with its own `origin`), so
+  // every client of every one of those repos would have had ITS recall
+  // fenced to the umbrella repo's project. The engine falls back to
+  // org-wide only when the sent identifier matches NO project row — a
+  // real-but-wrong project fences to that project's memories PLUS
+  // unfiled ones, actively EXCLUDING the correct project's memories,
+  // which is worse than today's unscoped (org-wide) recall. So: no
+  // project is sent, and recall stays exactly as unscoped as it was
+  // before this option existed, until a caller can supply one that is
+  // actually correct per request.
+  //
   // The warmer owns every background fetch and every timer this process
   // creates for recall. It is started here and STOPPED when the server
   // closes — a refresh interval that outlives its server would keep the

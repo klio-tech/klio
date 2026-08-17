@@ -1202,6 +1202,75 @@ test("KLIO_PROXY_CAPTURE=off is a kill switch even with a valid cloud config", a
   assert.equal(calls, 0, "the documented kill switch must still turn capture off");
 });
 
+// `startProxy` does NOT send a project on recall — deliberately, as a
+// regression guard, not an oversight. `WarmingRecaller` supports one
+// (`RecallerOptions.project`, recall.ts), but the only project this
+// daemon could offer on its own is its own `process.cwd()` at startup,
+// and that is unsafe: measured on a real developer machine, the running
+// proxy's cwd was the parent of ~14 sibling repos under one umbrella
+// git checkout with its own `origin` — a REAL project, just the wrong
+// one for any client actually working in a sibling repo. The engine
+// only falls back to org-wide recall when the sent identifier matches
+// NO project; a real-but-wrong identifier fences to THAT project plus
+// unfiled memories, actively excluding the correct project's memories —
+// worse than today's unscoped (org-wide) recall, not better. So this
+// stays unwired until a caller can supply a per-request project the
+// proxy can actually trust. Ambient warming (on by default) fires at
+// `start()` independent of any client request, so polling briefly after
+// `startProxy` resolves is enough to see what it sent — no request
+// needs to go through `/v1/messages`.
+test("startProxy never sends a project on recall (proxy-side scoping is not wired)", async () => {
+  const brainBodies: Record<string, unknown>[] = [];
+  const brain = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      try {
+        brainBodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+      } catch {
+        /* ignore */
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ memories: [] }));
+    });
+  });
+  await new Promise<void>((r) => brain.listen(0, "127.0.0.1", r));
+  const brainPort = (brain.address() as AddressInfo).port;
+
+  const home = mkdtempSync(join(tmpdir(), "klio-proxy-project-"));
+  let started: { server: http.Server; port: number } | null = null;
+  try {
+    mkdirSync(join(home, ".klio"), { recursive: true });
+    writeFileSync(
+      join(home, ".klio", "config.json"),
+      JSON.stringify({ apiKey: "ag_live_test", agentId: "agent-x", baseUrl: `http://127.0.0.1:${brainPort}` }),
+      "utf8",
+    );
+    // Deliberately no `project` option — none exists on `StartProxyOptions`
+    // any more. This runs from whatever this test process's real cwd is
+    // (a real git repo, inside this monorepo), which is exactly the point:
+    // even though a project WOULD resolve here, nothing sends it.
+    started = await startProxy({
+      port: 0,
+      host: "127.0.0.1",
+      configPath: join(home, ".klio", "config.json"),
+    });
+
+    const deadline = Date.now() + 3_000;
+    while (brainBodies.length === 0 && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 20));
+    }
+    assert.equal(brainBodies.length, 1, "ambient warming must have reached the brain");
+    assert.ok(!("repo_root" in brainBodies[0]!), "the proxy must not send repo_root");
+    assert.ok(!("git_remote" in brainBodies[0]!), "the proxy must not send git_remote");
+  } finally {
+    if (started) await new Promise<void>((r) => (started as { server: http.Server }).server.close(() => r()));
+    brain.closeAllConnections();
+    await new Promise<void>((r) => brain.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 // --- health identifies WHICH proxy is answering ------------------------
 //
 // `klio proxy status` printed "alive (unknown mode)" because the Node

@@ -62,6 +62,7 @@
 //     clears everything, so the process can exit.
 
 import type { CloudConfig } from "../cloudConfig.js";
+import type { ResolvedProject } from "../project.js";
 import type { Memory } from "./inject.js";
 
 /**
@@ -95,12 +96,61 @@ const RECALL_LIMIT = 8;
 const MAX_CACHE_ENTRIES = 256;
 
 /**
- * Cache key for the ambient set. Starts with a NUL so it can never
- * collide with a real query: a query is the text of a user message, and
- * `lookup` rejects one that is blank, but nothing stops a user message
- * containing any printable string.
+ * Cache key SUFFIX for the ambient set. Starts with a NUL — chosen to
+ * be UNLIKELY, not unforgeable: no ordinary chat message contains a
+ * literal NUL, but nothing stops a query engineered to start with
+ * exactly this text from computing the same key `lookup` uses for the
+ * real ambient entry. That is inert in practice, not because the
+ * separator prevents it, but because of what {@link projectPrefix}'s
+ * docblock explains: one recaller has one fixed project for its whole
+ * lifetime and a cache no other recaller can reach, so there is
+ * nothing across a project boundary for a forged key to reach into.
  */
 const AMBIENT_KEY = "\u0000klio-ambient";
+
+/** Cache key PREFIX for a resolved project — see {@link projectPrefix}. */
+const PROJECT_KEY_PREFIX = "\u0000klio-project:";
+
+/**
+ * Stable string for a resolved project, used to prefix every cache key
+ * so the same query text from two different projects does not compute
+ * to the same key (see {@link RecallerOptions.project} for why the
+ * same treatment applies to the ambient key too). No project resolved
+ * (the fail-open case) yields the empty prefix, which is exactly
+ * today's unscoped behaviour: unscoped queries from two callers still
+ * share a cache entry, same as before this feature existed.
+ *
+ * NOT A SECURITY BOUNDARY, same caveat as {@link AMBIENT_KEY}: the
+ * leading NUL makes a COLLIDING query text unlikely, not impossible —
+ * a query engineered to read `\u0000klio-project:<other project's
+ * repo_root>\u0000<other project's git_remote>` computes the identical
+ * key that OTHER project's recaller would use. What actually prevents
+ * cross-project leakage is architectural, not this string: `project`
+ * is fixed per `WarmingRecaller` instance, and each instance owns a
+ * private `Map` — a forged-looking query can only ever land in ITS OWN
+ * recaller's cache, under its OWN recaller's correct project prefix,
+ * never in a different instance's cache it has no handle to. If this
+ * module is ever refactored toward one cache shared across projects,
+ * this prefix stops being sufficient on its own and needs a genuinely
+ * unforgeable key (a project id resolved server-side, never
+ * user-influenced text) — do not assume today's collision-improbability
+ * still holds after that refactor.
+ *
+ * `repo_root` and `git_remote` are joined with a NUL rather than
+ * concatenated bare, so `{repo_root:"/a", git_remote:""}` and
+ * `{repo_root:"/", git_remote:"a"}` cannot collide onto the same prefix
+ * — unlikely in practice (a git remote is a URL, never a bare "a"), but
+ * the separator costs nothing and removes the ambiguity outright.
+ */
+export function projectPrefix(project: ResolvedProject | undefined): string {
+  if (!project || (!project.repo_root && !project.git_remote)) return "";
+  return `${PROJECT_KEY_PREFIX}${project.repo_root ?? ""}\u0000${project.git_remote ?? ""}`;
+}
+
+/** The cache key for `query` under `project` (see projectPrefix above). */
+export function cacheKeyFor(project: ResolvedProject | undefined, query: string): string {
+  return `${projectPrefix(project)}${query}`;
+}
 
 /**
  * The broad query behind the ambient set. Phrased as a question about
@@ -175,6 +225,28 @@ export type RecallerOptions = {
   ambient?: boolean;
   /** Where failure lines go. Defaults to stderr. */
   log?: (line: string) => void;
+  /**
+   * The project this recaller's requests should be scoped to, sent on
+   * every recall (both per-query and ambient) as `repo_root` /
+   * `git_remote` — additive fields the engine uses to fence recall to the
+   * caller's project (vex_engine PR #33). `undefined` (nothing resolved)
+   * sends neither field, which is fail-open: an engine that does not
+   * understand them ignores them, and one that does falls back to its
+   * pre-project-scoping behaviour.
+   *
+   * ONE VALUE FOR THE WHOLE RECALLER, not per-call. `WarmingRecaller`
+   * is one instance per running proxy, and the proxy is a long-lived
+   * daemon that — unlike `klio hook`, which gets a fresh `cwd` on every
+   * invocation — has no per-request notion of "which project is this
+   * request for": the upstream call this proxy fronts (`/v1/messages` /
+   * `/v1/responses`) carries no cwd or project field, only the
+   * conversation. So this is resolved ONCE, from the daemon's own
+   * process cwd, when `startProxy` creates the recaller — see the call
+   * site for why that is the best available answer, not a correct one in
+   * general, and what breaks (nothing; it degrades to unscoped) when it
+   * is wrong.
+   */
+  project?: ResolvedProject;
 };
 
 export type WarmingRecaller = {
@@ -213,6 +285,15 @@ export function createWarmingRecaller(opts: RecallerOptions): WarmingRecaller {
   const inFlight = new Map<string, Promise<void>>();
   const controllers = new Set<AbortController>();
 
+  // Computed once: `opts.project` is fixed for this recaller's whole
+  // lifetime (see RecallerOptions.project), so every key derived from it
+  // is too. `ambientKey` in particular replaces the bare `AMBIENT_KEY`
+  // constant everywhere the cache is actually touched, so the ambient
+  // entry keeps its "never evicted" protection under its real,
+  // project-prefixed key rather than the unprefixed one nothing stores
+  // it under any more.
+  const ambientKey = cacheKeyFor(opts.project, AMBIENT_KEY);
+
   let ambientTimer: NodeJS.Timeout | undefined;
   let stopped = false;
   let lastLoggedAt = 0;
@@ -231,7 +312,7 @@ export function createWarmingRecaller(opts: RecallerOptions): WarmingRecaller {
     // first turn of every later session would be cold again.
     if (!cache.has(key) && cache.size >= MAX_CACHE_ENTRIES) {
       for (const candidate of cache.keys()) {
-        if (candidate === AMBIENT_KEY) continue;
+        if (candidate === ambientKey) continue;
         cache.delete(candidate);
         break;
       }
@@ -299,7 +380,14 @@ export function createWarmingRecaller(opts: RecallerOptions): WarmingRecaller {
             "X-Vex-Key": opts.config.apiKey,
             "X-Vex-Agent": opts.config.agentId,
           },
-          body: JSON.stringify({ query, limit: RECALL_LIMIT, scope: "org" }),
+          // `repo_root` / `git_remote` are additive and OMITTED (not sent
+          // as `undefined` or `null`) when no project was resolved —
+          // `JSON.stringify` already drops `undefined`-valued keys, so
+          // spreading `opts.project` here is the whole mechanism: a
+          // currently-deployed engine that has never heard of these
+          // fields ignores unknown JSON keys, and a proxy that resolved
+          // no project sends exactly the pre-project-scoping body.
+          body: JSON.stringify({ query, limit: RECALL_LIMIT, scope: "org", ...opts.project }),
           signal: controller.signal,
         }),
         deadline,
@@ -359,18 +447,23 @@ export function createWarmingRecaller(opts: RecallerOptions): WarmingRecaller {
 
   function scheduleAmbient(): void {
     if (!ambientEnabled) return;
-    schedule(AMBIENT_KEY, AMBIENT_QUERY);
+    schedule(ambientKey, AMBIENT_QUERY);
   }
 
   function lookup(query: string): RecallLookup {
     if (!opts.config.apiKey) return { memories: [], reason: "no-config" };
     if (!query.trim()) return { memories: [], reason: "no-query" };
 
-    const entry = cache.get(query);
-    if (!entry || isStale(entry)) schedule(query, query);
+    // Project-prefixed: the same query text from two different projects
+    // gets two different keys (see cacheKey/projectPrefix above), so
+    // neither can serve the other a warm hit — or, worse, a confidently
+    // wrong "empty" or "error" cached under a different project entirely.
+    const key = cacheKeyFor(opts.project, query);
+    const entry = cache.get(key);
+    if (!entry || isStale(entry)) schedule(key, query);
     if (entry && entry.memories.length > 0) return { memories: entry.memories, reason: "hit" };
 
-    const ambient = ambientEnabled ? cache.get(AMBIENT_KEY) : undefined;
+    const ambient = ambientEnabled ? cache.get(ambientKey) : undefined;
     if (ambientEnabled && (!ambient || isStale(ambient))) scheduleAmbient();
     if (ambient && ambient.memories.length > 0) {
       return { memories: ambient.memories, reason: "ambient" };

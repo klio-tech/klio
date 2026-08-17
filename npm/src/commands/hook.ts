@@ -33,7 +33,6 @@
 // all resolve to exit 0 with no output — a hook must never block or
 // disrupt the user's session.
 
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 import {
@@ -43,6 +42,7 @@ import {
   perToolAgentId,
 } from "../cloud.js";
 import { type CloudConfig, readCloudConfig } from "../cloudConfig.js";
+import { resolveProject } from "../project.js";
 
 /** Subset of the Claude Code hook stdin payload this client reads. */
 type HookPayload = {
@@ -361,38 +361,6 @@ function fmtField(value: unknown): string {
   if (str === "") return "(none)";
   if (str.length <= MAX_OBS_FIELD) return str;
   return `${str.slice(0, MAX_OBS_FIELD)}... (truncated, original ${str.length} chars)`;
-}
-
-/**
- * Derive best-effort project identity from a cwd: always the repo root
- * (the cwd), plus the git remote when the directory is a git repo. The
- * server uses these to file/recall memories per project.
- */
-function resolveProject(
-  cwd: string | undefined,
-  deps: HookDeps,
-): { repo_root?: string; git_remote?: string } {
-  if (!cwd) return {};
-  const out: { repo_root?: string; git_remote?: string } = { repo_root: cwd };
-  const gitFn = deps.gitRemoteFn ?? defaultGitRemote;
-  const remote = gitFn(cwd);
-  if (remote) out.git_remote = remote;
-  return out;
-}
-
-/** Resolve `origin`'s git remote URL for a cwd; null on any failure. */
-function defaultGitRemote(cwd: string): string | null {
-  try {
-    const out = execFileSync("git", ["-C", cwd, "remote", "get-url", "origin"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2000,
-    });
-    const trimmed = out.trim();
-    return trimmed || null;
-  } catch {
-    return null;
-  }
 }
 
 /**
