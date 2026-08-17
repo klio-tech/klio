@@ -96,29 +96,45 @@ const RECALL_LIMIT = 8;
 const MAX_CACHE_ENTRIES = 256;
 
 /**
- * Cache key SUFFIX for the ambient set. Starts with a NUL so it can
- * never collide with a real query: a query is the text of a user
- * message, and `lookup` rejects one that is blank, but nothing stops a
- * user message containing any printable string.
+ * Cache key SUFFIX for the ambient set. Starts with a NUL — chosen to
+ * be UNLIKELY, not unforgeable: no ordinary chat message contains a
+ * literal NUL, but nothing stops a query engineered to start with
+ * exactly this text from computing the same key `lookup` uses for the
+ * real ambient entry. That is inert in practice, not because the
+ * separator prevents it, but because of what {@link projectPrefix}'s
+ * docblock explains: one recaller has one fixed project for its whole
+ * lifetime and a cache no other recaller can reach, so there is
+ * nothing across a project boundary for a forged key to reach into.
  */
 const AMBIENT_KEY = "\u0000klio-ambient";
 
-/**
- * Cache key PREFIX for a resolved project (see cacheKey below). Starts
- * with a second NUL for the same reason AMBIENT_KEY does: no query and
- * no AMBIENT_KEY suffix can ever begin with one, so the prefix can
- * never be mistaken for part of the key it is attached to.
- */
+/** Cache key PREFIX for a resolved project — see {@link projectPrefix}. */
 const PROJECT_KEY_PREFIX = "\u0000klio-project:";
 
 /**
  * Stable string for a resolved project, used to prefix every cache key
- * so the same query text from two different projects never shares an
- * entry (see RecallerOptions.project for why the same guarantee
- * applies to the ambient key too). No project resolved (the fail-open
- * case) yields the empty prefix, which is exactly today's unscoped
- * behaviour: unscoped queries from two callers still share a cache
- * entry, same as before this feature existed.
+ * so the same query text from two different projects does not compute
+ * to the same key (see {@link RecallerOptions.project} for why the
+ * same treatment applies to the ambient key too). No project resolved
+ * (the fail-open case) yields the empty prefix, which is exactly
+ * today's unscoped behaviour: unscoped queries from two callers still
+ * share a cache entry, same as before this feature existed.
+ *
+ * NOT A SECURITY BOUNDARY, same caveat as {@link AMBIENT_KEY}: the
+ * leading NUL makes a COLLIDING query text unlikely, not impossible —
+ * a query engineered to read `\u0000klio-project:<other project's
+ * repo_root>\u0000<other project's git_remote>` computes the identical
+ * key that OTHER project's recaller would use. What actually prevents
+ * cross-project leakage is architectural, not this string: `project`
+ * is fixed per `WarmingRecaller` instance, and each instance owns a
+ * private `Map` — a forged-looking query can only ever land in ITS OWN
+ * recaller's cache, under its OWN recaller's correct project prefix,
+ * never in a different instance's cache it has no handle to. If this
+ * module is ever refactored toward one cache shared across projects,
+ * this prefix stops being sufficient on its own and needs a genuinely
+ * unforgeable key (a project id resolved server-side, never
+ * user-influenced text) — do not assume today's collision-improbability
+ * still holds after that refactor.
  *
  * `repo_root` and `git_remote` are joined with a NUL rather than
  * concatenated bare, so `{repo_root:"/a", git_remote:""}` and

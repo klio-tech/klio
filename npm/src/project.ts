@@ -1,16 +1,44 @@
 // Project identity resolution — shared by `klio hook` (per-invocation,
-// known cwd) and the cloud proxy (long-lived daemon, no per-request cwd).
+// known cwd) and (as a building block only — see recall.ts and server.ts
+// for why nothing wires it in yet) the cloud proxy.
 //
 // The engine scopes recall to a caller's project via two signals:
 // `repo_root` and `git_remote`. This module is the ONE place that derives
-// them from a directory, so the hook and the proxy answer "what project is
-// this" the same way instead of drifting into two resolvers with two sets
-// of edge cases.
+// them from a directory, so a future caller (the hook today; a
+// per-request-attributed proxy path later) answers "what project is this"
+// the same way instead of drifting into two resolvers with two sets of
+// edge cases.
 //
-// FAIL-OPEN BY CONTRACT: a directory that cannot be resolved (not a git
-// repo, `git` missing, a filesystem error) yields `{}` — no fields at all —
-// rather than a guess. Callers that spread `{}` into a request body send
-// nothing extra, which is exactly today's unscoped behaviour. Never throws.
+// WHAT "FAIL-OPEN" ACTUALLY MEANS HERE — read before assuming a
+// non-git directory yields `{}`. It does not.
+//
+//   * NO cwd at all (`undefined` — e.g. a hook payload that omits it)
+//     yields `{}`: no fields, nothing sent. This is the only case that
+//     degrades to "send nothing".
+//   * ANY cwd, git repo or not, yields `repo_root: cwd` UNCONDITIONALLY.
+//     `repo_root` is the raw directory a caller resolved this against —
+//     there is no `git rev-parse --show-toplevel` anywhere in this
+//     module, so it is NOT necessarily a git repository's actual top
+//     level, and it is sent even for a directory with no git repo at
+//     all. Measured: `resolveProject("/")` → `{repo_root: "/"}`;
+//     `resolveProject("/nonexistent-dir-xyz")` →
+//     `{repo_root: "/nonexistent-dir-xyz"}`.
+//   * `git_remote` is the only field that depends on git succeeding:
+//     present only when the directory is inside a git repo with an
+//     `origin` remote, absent for everything else (not a repo, no
+//     `origin`, `git` missing, a filesystem error).
+//
+// So a caller that wants "send nothing unless we're confident this is a
+// real, identifiable project" cannot rely on this module alone — it has
+// to check for an empty `ResolvedProject`, which happens only on a
+// missing cwd, not on a bad one. This distinction is exactly what made
+// wiring `repo_root: process.cwd()` into the proxy unsafe: a `cwd` that
+// resolves to a REAL BUT WRONG project (a git repo, just not the
+// caller's) still yields a fully-populated, plausible-looking
+// `ResolvedProject` — there is no "this doesn't look right" signal to
+// catch it on.
+//
+// NEVER THROWS — including when the injected `gitRemoteFn` seam does.
 
 import { execFileSync } from "node:child_process";
 
@@ -24,17 +52,29 @@ export type ProjectDeps = {
 };
 
 /**
- * Derive best-effort project identity from a cwd: the repo root (the cwd
- * itself — callers are expected to pass a directory that IS the project
- * root, not an arbitrary subdirectory), plus the git remote when the
- * directory is a git repo. The server uses these to file/recall memories
- * per project.
+ * Derive best-effort project identity from a cwd: `repo_root` is the cwd
+ * itself, sent whenever a cwd is given at all — see the module docblock
+ * for why that is NOT the same thing as "this is confirmed to be a real
+ * project" — plus `git_remote` when the directory is a git repo with an
+ * `origin`. `{}` (both fields absent) happens only when no `cwd` is
+ * given at all.
  */
 export function resolveProject(cwd: string | undefined, deps: ProjectDeps = {}): ResolvedProject {
   if (!cwd) return {};
   const out: ResolvedProject = { repo_root: cwd };
   const gitFn = deps.gitRemoteFn ?? defaultGitRemote;
-  const remote = gitFn(cwd);
+  // `defaultGitRemote` already catches internally, but an INJECTED
+  // `gitRemoteFn` (the test seam) is caller-supplied and this function
+  // is documented never to throw — so the catch lives here too, not
+  // just in the production implementation, or a misbehaving seam (or a
+  // future non-git-based resolver) would violate a contract this
+  // module's own docblock advertises.
+  let remote: string | null;
+  try {
+    remote = gitFn(cwd);
+  } catch {
+    remote = null;
+  }
   if (remote) out.git_remote = remote;
   return out;
 }

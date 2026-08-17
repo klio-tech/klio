@@ -1,22 +1,35 @@
 // Unit tests for the shared project-identity resolver (src/project.ts) —
-// the one place `klio hook` and the cloud proxy both derive `repo_root`/
-// `git_remote` from a directory, so they answer "what project is this"
-// the same way. hook.test.ts already exercises this indirectly through
-// `runHook`; this file is the resolver's own contract, including the
-// fail-open guarantee a proxy at startup depends on.
+// the one place `klio hook` derives `repo_root`/`git_remote` from a
+// directory. hook.test.ts already exercises this indirectly through
+// `runHook`; this file is the resolver's own contract.
+//
+// NOTE: `repo_root` is set unconditionally whenever a `cwd` is given at
+// all — including a `cwd` that is not a git repo. `{}` (no fields)
+// happens ONLY when no `cwd` is given. See src/project.ts's module
+// docblock for why that distinction is exactly what makes this module,
+// on its own, unsuitable for a caller (like the proxy) that cannot
+// confirm the `cwd` it has is actually the right project.
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { resolveProject } from "../src/project.js";
 
-test("no cwd resolves to nothing — fail-open, no fields at all", () => {
+test("no cwd resolves to nothing — the only case that sends no fields", () => {
   assert.deepEqual(resolveProject(undefined), {});
 });
 
-test("a cwd with no git remote yields repo_root only", () => {
+test("a cwd with no git remote still yields repo_root — not {}", () => {
   const out = resolveProject("/repo/klio", { gitRemoteFn: () => null });
   assert.deepEqual(out, { repo_root: "/repo/klio" });
+});
+
+test("a cwd that is not a git repo at all still yields repo_root, not {}", () => {
+  // The concrete case that made proxy-side wiring unsafe: a directory
+  // that is not even a plausible project still comes back with a
+  // populated, plausible-looking repo_root.
+  const out = resolveProject("/nonexistent-dir-xyz", { gitRemoteFn: () => null });
+  assert.deepEqual(out, { repo_root: "/nonexistent-dir-xyz" });
 });
 
 test("a cwd that is a git repo yields both repo_root and git_remote", () => {
@@ -29,20 +42,18 @@ test("a cwd that is a git repo yields both repo_root and git_remote", () => {
   });
 });
 
-test("a gitRemoteFn that throws is not this module's problem — it is a caller contract", () => {
-  // resolveProject calls the injected gitRemoteFn directly and does not
-  // wrap it; defaultGitRemote (the production implementation) is the one
-  // that guarantees never-throws by catching internally. A test seam
-  // that violates that contract is expected to propagate, not be
-  // silently swallowed here — the swallowing is defaultGitRemote's job,
-  // proven separately below.
-  assert.throws(() =>
-    resolveProject("/repo", {
-      gitRemoteFn: () => {
-        throw new Error("boom");
-      },
-    }),
-  );
+test("a gitRemoteFn that throws does not propagate — resolveProject never throws", () => {
+  // resolveProject is documented never to throw. defaultGitRemote (the
+  // production implementation) guarantees that by catching internally,
+  // but the injected `gitRemoteFn` seam is caller-supplied and was not
+  // wrapped — so a misbehaving seam broke the module's own contract.
+  // Fixed: the catch now lives in resolveProject itself too.
+  const out = resolveProject("/repo", {
+    gitRemoteFn: () => {
+      throw new Error("boom");
+    },
+  });
+  assert.deepEqual(out, { repo_root: "/repo" }, "a throwing gitRemoteFn degrades to no git_remote, not a crash");
 });
 
 test("defaultGitRemote never throws for a directory with no git remote", async () => {

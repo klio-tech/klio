@@ -6,38 +6,42 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.9.8] — 2026-08-16
 
-### Changed — the proxy's recalls are now project-scoped
+### Changed — the proxy's warm cache is project-aware infrastructure; proxy recall itself stays unscoped
 
 A production diagnosis found that 95% of memories are written with a
-project attached, but 95% of recalls discarded it — a session about one
-project got injected with facts from unrelated ones. vex_engine PR #33
-fences recall to the caller's project on the server side, but the proxy
-was sending no project signal at all: `POST /capture/recall` carried only
-`{query, limit, scope}`.
+project attached, but 95% of recalls discarded it. vex_engine PR #33
+fences recall to the caller's project on the server side. `klio hook`
+already sends `repo_root`/`git_remote` on every event, since it gets a
+real cwd from Claude Code each time — that path was already fine. The
+proxy does not, and after building (then measuring) a version that
+resolved a project from the daemon's own `process.cwd()` at startup, it
+turned out to be unsafe rather than merely incomplete: the running
+proxy's cwd, on the machine this was measured against, was the parent
+directory of over a dozen sibling repos under one umbrella git checkout
+with its own `origin` — a REAL project row, just the wrong one for
+every client actually working in a sibling repo. The engine only falls
+back to org-wide recall when the sent identifier matches no project; a
+real-but-wrong identifier fences to THAT project plus unfiled memories,
+actively **excluding** the correct project's memories — worse than
+today's unscoped recall, not better. So proxy-side project scoping does
+not ship this release; what does:
 
-- **`repo_root` and `git_remote` are now sent on every recall**, both the
-  per-query fetch and the ambient warm-set fetch. Additive fields, so
-  this is safe against a currently-deployed engine that has never heard
-  of them. The resolution logic (`resolveProject`) is shared with `klio
-  hook`, not duplicated — it now lives in `src/project.ts`.
-- **The proxy resolves its project ONCE, at `startProxy`**, from the
-  daemon's own process `cwd` — not per request. Unlike `klio hook`,
-  which gets a fresh `cwd` on every invocation, the proxy is a
-  long-lived daemon fronting `/v1/messages` and `/v1/responses`, neither
-  of which carries a cwd or project field. A single running proxy
-  therefore answers every client that points at it with the SAME
-  project, regardless of which repo that client is actually in — a
-  known limitation, and strictly better than sending no project at all.
-- **The fail-open contract holds.** A cwd that resolves to nothing (not
-  a git repo, `git` missing) sends neither field, exactly today's
-  unscoped behaviour — never a wrong or empty `repo_root`.
-- **The warm cache is now keyed by project.** The same query text from
-  two different projects no longer shares a cache entry (or, worse, one
-  project's cached answer served to another). The ambient set is keyed
-  consistently with the per-query path.
-- **Zero memories is an expected, clean outcome.** The engine's
-  relevance floor can legitimately answer with nothing — injecting
-  nothing beats injecting the wrong project's memories. An empty answer
+- **One shared resolver.** `resolveProject`/`defaultGitRemote` moved out
+  of `commands/hook.ts` into `src/project.ts` so a future caller (a
+  proxy path that can carry genuine per-request attribution) does not
+  have to reimplement it. `klio hook`'s behaviour is unchanged. Also
+  fixed while it was being touched: an injected `gitRemoteFn` that
+  throws no longer breaks the module's own "never throws" contract.
+- **The warm cache is project-aware, unused for now.** `WarmingRecaller`
+  accepts an optional `project` and keys both the per-query and ambient
+  cache entries by it, so a future caller that CAN supply a trustworthy
+  per-request project will not have the same query from two projects
+  share (or leak into) a cache entry. Nothing in this release passes
+  `project` in — the proxy's own recalls stay exactly as unscoped
+  (org-wide) as they were before this work started.
+- **Zero memories is an expected, clean outcome** (unrelated to project
+  scoping, verified while this work was underway). The engine's
+  relevance floor can legitimately answer with nothing. An empty answer
   caches as a SUCCESS (the normal freshness window), not a FAILURE (the
   shorter one), so it neither spams retries nor permanently suppresses a
   later query that does get a real answer once it goes stale.

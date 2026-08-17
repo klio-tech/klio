@@ -464,19 +464,24 @@ a question the cache has not seen is answered immediately from that set
 the next turn on the same topic is warm. Repeat questions collapse to
 one recall, never one per turn.
 
-**Recall is project-scoped.** Every recall carries `repo_root` and
-`git_remote` (when the proxy is running inside a git repo), so a
-session about one project is not injected with facts from another. The
-proxy resolves its project once, from its own process directory, when
-it starts — not per request, since neither `/v1/messages` nor
-`/v1/responses` carries a cwd. One running proxy therefore answers
-every client pointed at it with the same project; running a separate
-proxy per project (or restarting it from the right directory) is how
-to scope correctly across more than one. A directory that is not a git
-repo sends neither field — unscoped, exactly like before this existed
-— rather than guessing. The engine can legitimately answer with zero
-memories (a relevance floor, not a bug): that is `x-klio-injected: 0`,
-reason `empty`, same as any other clean miss.
+**Recall is not yet project-scoped through the proxy.** `klio hook`
+already sends `repo_root`/`git_remote` per invocation, since it gets a
+real cwd from Claude Code on every event. The proxy could too — its
+warm cache is already keyed to support it — but nothing wires it in:
+this daemon has no per-request cwd (`/v1/messages` and `/v1/responses`
+carry only the conversation), so the only project it could offer on its
+own is its own process directory at startup, and that is unsafe to
+send. Measured: a proxy started from the parent of several sibling
+repos resolves that PARENT as a real, plausible-looking project, and
+sending a real-but-wrong project fences recall to it instead of falling
+back to unscoped — actively excluding the correct memories, worse than
+today's behaviour. So proxy recall stays org-wide until it can carry a
+genuine per-request attribution. The engine can legitimately answer
+with zero memories regardless (a relevance floor, not a bug): that is
+`x-klio-injected: 0`, reason `empty`, same as any other clean miss, and
+it is cached as a success rather than a failure so it neither spams
+retries nor suppresses a later query that gets a real answer once the
+entry goes stale.
 
 Every response carries two headers, so you can see what it did without
 reading logs:

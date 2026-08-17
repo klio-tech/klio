@@ -142,6 +142,59 @@ test("cacheKeyFor: an unresolved project collapses to the pre-scoping (unscoped)
   assert.equal(cacheKeyFor(undefined, "q"), "q");
 });
 
+test("cacheKeyFor: repo_root alone, git_remote alone, and both together are three distinct keys", () => {
+  // Broader coverage than the two-project comparison above: every shape
+  // ResolvedProject can actually take must produce its own key, not
+  // just "any two projects I happened to pick differ".
+  const repoOnly = cacheKeyFor({ repo_root: "/repo/a" }, "q");
+  const remoteOnly = cacheKeyFor({ git_remote: "git@github.com:o/a.git" }, "q");
+  const both = cacheKeyFor({ repo_root: "/repo/a", git_remote: "git@github.com:o/a.git" }, "q");
+  const unscoped = cacheKeyFor(undefined, "q");
+  const keys = [repoOnly, remoteOnly, both, unscoped];
+  assert.equal(new Set(keys).size, keys.length, `all four must be distinct, got ${JSON.stringify(keys)}`);
+});
+
+// A BEHAVIOURAL counterpart to the cacheKeyFor unit tests above, driven
+// through `lookup()` rather than the pure function directly.
+//
+// HONEST LIMIT ON WHAT THIS CAN PROVE: `project` is fixed per
+// `WarmingRecaller` instance (see RecallerOptions.project) and each
+// instance owns a private `Map`, so no sequence of `lookup()` calls on
+// ONE recaller can ever distinguish a correct `projectPrefix` from one
+// hard-coded to return `""` — every key that function produces for that
+// instance is used self-consistently regardless, and there is no second
+// instance sharing its cache for a wrong key to collide into. That
+// specific mutation is only observable at the `cacheKeyFor`/
+// `projectPrefix` unit-test layer above. What DOES stay observable
+// through `lookup()` on a single instance is the narrower, equally real
+// defect this test targets: `cacheKeyFor` silently ignoring `query` (or
+// any of the project fields) and mapping every distinct query for a
+// project-scoped recaller onto ONE shared entry.
+test("distinct queries within one project-scoped recaller do not collide with each other", async () => {
+  const answers: Record<string, { id: string; content: string }[]> = {
+    "question A": [{ id: "a", content: "answer A" }],
+    "question B": [{ id: "b", content: "answer B" }],
+  };
+  const recaller = createWarmingRecaller({
+    config: CONFIG,
+    ambient: false,
+    log: () => {},
+    project: { repo_root: "/repo/klio", git_remote: "git@github.com:klio-tech/klio.git" },
+    fetchImpl: (async (_u: any, init: any) => {
+      const { query } = JSON.parse(init.body) as { query: string };
+      return new Response(JSON.stringify({ memories: answers[query] ?? [] }), { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+
+  recaller.lookup("question A");
+  recaller.lookup("question B");
+  await recaller.idle();
+
+  assert.deepEqual(recaller.lookup("question A").memories, answers["question A"]);
+  assert.deepEqual(recaller.lookup("question B").memories, answers["question B"]);
+  recaller.stop();
+});
+
 test("the same query from two different projects does not share a cache entry", async () => {
   // Two independently-configured recallers (one project resolved per
   // recaller instance, per contract) stand in for "two projects talking
