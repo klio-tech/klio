@@ -166,9 +166,36 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
     // They are two different integrations with two different reaches.
     log(`  ✓ ${result.configured.join(" + ")} — Klio MCP server connected`);
   } else if (result.skipped.length === 0 && result.errored.length === 0) {
-    log("  — No MCP-capable agents found. Install Claude Code, Cursor, or");
-    log("    Codex and re-run `klio init` to wire them up.");
+    log("  — No MCP-capable agents found on this machine.");
   }
+
+  // WIRING NOTHING IS NOT SUCCESS, AND MUST NOT READ LIKE IT.
+  //
+  // This used to fall through to an unconditional "Phase 2 done — your agents
+  // are talking to Klio Cloud", printed even when zero agents were wired. The
+  // honest "no agents found" line above was contradicted one line later, and
+  // the reference block further down repeated the claim. The last thing the
+  // user read was that it had worked.
+  //
+  // That is how four members of the reference workspace came to hold verified
+  // keys and capture nothing. Agent detection is `existsSync(~/.claude)`,
+  // which is false until Claude Code has been run once — so installing Klio
+  // BEFORE the first Claude Code session, the order our own onboarding
+  // encourages, wires nothing and then reports success.
+  //
+  // A verified key with no wiring is a real, recoverable state. It simply has
+  // to be reported as the unfinished thing it is, and must not continue into
+  // the proxy offer, which is meaningless with no agent to route.
+  if (result.configured.length === 0) {
+    phaseRecap("Phase 2 incomplete — no agents were wired.");
+    printNothingWiredBlock(log, key);
+    // Non-zero so a script, a CI step, or a person skimming the tail can tell
+    // this apart from a working install.
+    process.exitCode = 1;
+
+    return;
+  }
+
   phaseRecap("Phase 2 done — your agents are talking to Klio Cloud.");
 
   // -----------------------------------------------------------------
@@ -707,6 +734,39 @@ async function promptAndVerifyKey(
  * Klio Cloud. No dashboard URL — cloud has none yet. The key is shown
  * masked only (last 4) so it never lands in scrollback in full.
  */
+/**
+ * What to print when the key verified but nothing was wired.
+ *
+ * States the two halves separately — Klio IS configured, and it is NOT yet
+ * capturing — because conflating them is the defect this replaces. The remedy
+ * is ordered by how often it is the cause: run the agent once so it exists on
+ * disk, then re-run init.
+ */
+function printNothingWiredBlock(
+  log: (line: string) => void,
+  key: string,
+): void {
+  log("");
+  log("Klio Cloud is configured, but NOTHING WILL BE CAPTURED yet.");
+  log("");
+  log(`  Memory endpoint:   ${CLOUD_MCP_URL}`);
+  log(`  Authenticated as:  key ${maskKey(key)}`);
+  log("");
+  log("  Your key works — it was verified against the hosted brain. What is");
+  log("  missing is the wiring into an agent, so nothing is being recorded.");
+  log("");
+  log("  Klio wires an agent by detecting it on this machine, and an agent");
+  log("  that has never been run has nothing to detect.");
+  log("");
+  log("  To finish:");
+  log("    1. Start Claude Code (or Cursor / Codex) once on this machine.");
+  log("    2. Re-run:  npx @klio-tech/klio@latest init");
+  log("");
+  log("  Then confirm it took:");
+  log("    npx @klio-tech/klio@latest status");
+  log("");
+}
+
 function printReferenceBlock(
   log: (line: string) => void,
   configured: string[],
