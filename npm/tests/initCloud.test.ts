@@ -30,6 +30,11 @@ function withEmptyFakeHome(t: TestCtx): string {
   process.env.USERPROFILE = home;
   process.env.XDG_CONFIG_HOME = join(home, ".config");
   t.after(() => {
+    // initCloud now sets a non-zero exit code when it wires nothing, which is
+    // the correct behaviour and would otherwise fail the whole test FILE even
+    // though every subtest passed. Reset centrally, since every test here uses
+    // this fixture; the tests that care assert the code before returning.
+    process.exitCode = 0;
     process.env.HOME = prevHome;
     process.env.USERPROFILE = prevUserprofile;
     if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -48,7 +53,14 @@ function verifyFetch(status: number, body = "{}"): typeof fetch {
   return (async () => new Response(body, { status })) as typeof fetch;
 }
 
-test("happy path: 200 verify proceeds to wiring + prints reference block", async (t) => {
+/**
+ * NOTE THE FIXTURE: `withEmptyFakeHome` means NO agent is detectable, so this
+ * has always exercised the zero-wired path. It used to assert "Klio Cloud is
+ * ready" — i.e. it encoded the defect, and would have gone on passing while
+ * users were told a no-op install had succeeded. It now asserts what that path
+ * must actually say.
+ */
+test("verified key with NO agents detected reports an incomplete install", async (t) => {
   withEmptyFakeHome(t);
   const lines: string[] = [];
   let verifyCalls = 0;
@@ -69,8 +81,15 @@ test("happy path: 200 verify proceeds to wiring + prints reference block", async
   const out = lines.join("\n");
   assert.match(out, /Key verified/);
   assert.match(out, /org_x/);
-  assert.match(out, /Klio Cloud is ready/);
+  assert.match(out, /NOTHING WILL BE CAPTURED/);
+  assert.doesNotMatch(out, /Klio Cloud is ready/);
+  assert.doesNotMatch(out, /agents are talking to Klio Cloud/);
+  // It must still tell them the key is fine and what to do next.
+  assert.match(out, /Your key works/);
+  assert.match(out, /Start Claude Code/);
   assert.match(out, /mcp\.klio\.tech\/mcp/);
+  // And it must exit non-zero so this is distinguishable from success.
+  assert.equal(process.exitCode, 1);
   // Key shown masked only — never the full secret.
   assert.match(out, /••••1234/);
   assert.doesNotMatch(out, /sk-valid-key-1234/);

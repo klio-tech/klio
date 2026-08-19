@@ -445,7 +445,10 @@ test("mode routing: --cloud runs the cloud flow and never reaches the local phas
 
   const cloud = cloudLines.join("\n");
   assert.match(cloud, /Key verified/);
-  assert.match(cloud, /Klio Cloud is ready/);
+  // Runs with no detectable agent, so the cloud flow correctly reports an
+  // incomplete install rather than success. See initCloud.test.ts.
+  assert.match(cloud, /NOTHING WILL BE CAPTURED/);
+  process.exitCode = 0;
 
   // The LOCAL welcome preview (a local-only string) must never appear.
   const stdout = cap.lines();
