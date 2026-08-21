@@ -6,6 +6,7 @@
 // parse "klio init --email foo" doesn't pay for itself.
 
 import { init } from "./commands/init.js";
+import { parseInitArgs } from "./initArgs.js";
 import { status } from "./commands/status.js";
 import { down, uninstall } from "./commands/down.js";
 import { runUpdate } from "./commands/update.js";
@@ -100,49 +101,6 @@ function isSubcommand(s: unknown): s is Subcommand {
   return typeof s === "string" && (SUBCOMMANDS as readonly string[]).includes(s);
 }
 
-function parseInitArgs(rest: string[]): Parameters<typeof init>[0] {
-  const opts: Parameters<typeof init>[0] = {
-    imageTag: packageVersion(),
-  };
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === "--email") {
-      opts.email = expectValue(rest, ++i, "--email");
-    } else if (a === "--image-tag") {
-      opts.imageTag = expectValue(rest, ++i, "--image-tag");
-    } else if (a === "--engine-url") {
-      opts.engineURL = expectValue(rest, ++i, "--engine-url");
-    } else if (a === "--skip-provider") {
-      opts.skipProvider = true;
-    } else if (a === "--skip-wow") {
-      opts.skipWow = true;
-    } else if (a === "--skip-community") {
-      opts.skipCommunity = true;
-    } else if (a === "--quiet") {
-      opts.quiet = true;
-    } else if (a === "--cloud") {
-      // Force the hosted-brain flow, skipping the mode prompt. Mutually
-      // exclusive with --local; the last one on the command line wins,
-      // mirroring standard getopt "last flag" semantics.
-      opts.mode = "cloud";
-    } else if (a === "--local") {
-      // Force the self-hosted Docker flow, skipping the mode prompt.
-      opts.mode = "local";
-    } else if (a === "-h" || a === "--help") {
-      process.stdout.write(
-        "usage: klio init [--cloud | --local] [--email <addr>] [--image-tag <tag>]\n" +
-          "                 [--engine-url <url>] [--skip-provider] [--skip-wow]\n" +
-          "                 [--skip-community] [--quiet]\n",
-      );
-      process.exit(0);
-    } else {
-      process.stderr.write(`klio init: unknown flag: ${a}\n`);
-      process.exit(2);
-    }
-  }
-  return opts;
-}
-
 function parseUninitArgs(rest: string[]): { keepRunning?: boolean } {
   const opts: { keepRunning?: boolean } = {};
   for (const a of rest) {
@@ -186,15 +144,6 @@ function parseDoctorArgs(rest: string[]): { skipEndToEnd?: boolean; dryRun?: boo
     }
   }
   return opts;
-}
-
-function expectValue(argv: string[], idx: number, flag: string): string {
-  const v = argv[idx];
-  if (v === undefined || v.startsWith("--")) {
-    process.stderr.write(`${flag} requires a value\n`);
-    process.exit(2);
-  }
-  return v;
 }
 
 function printUsage(): void {

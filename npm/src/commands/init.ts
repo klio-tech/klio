@@ -245,6 +245,16 @@ export type InitOptions = {
    * the cloud flow uses the real readline / fetch / claude binary.
    */
   cloudDeps?: InitCloudOptions;
+  /**
+   * API key for cloud mode, supplied instead of typed at the masked prompt.
+   * Set by `--key` (or the `KLIO_API_KEY` environment variable) so a coding
+   * agent can run cloud init on the user's behalf without a TTY. Ignored in
+   * local mode, which has no hosted key.
+   *
+   * Threaded here rather than into `cloudDeps` because `cloudDeps` is a test
+   * seam — a user-facing flag must not have to travel through one.
+   */
+  apiKey?: string;
 };
 
 /**
@@ -277,7 +287,9 @@ export async function init(opts: InitOptions): Promise<void> {
     // Cloud is dramatically simpler: no Docker, no model setup, no
     // local engine. Hand off to the cloud flow and RETURN — the local
     // phases below never run.
-    await initCloud({ log: writeLine, ...opts.cloudDeps });
+    // `cloudDeps` spreads LAST so a test can still override apiKey (and
+    // anything else) explicitly; the flag is the production default.
+    await initCloud({ log: writeLine, apiKey: opts.apiKey, ...opts.cloudDeps });
     return;
   }
 

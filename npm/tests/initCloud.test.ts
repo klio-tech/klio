@@ -48,6 +48,18 @@ function withEmptyFakeHome(t: TestCtx): string {
   return home;
 }
 
+/**
+ * No-op phase banners.
+ *
+ * `phaseHeader`/`phaseRecap` write to `process.stdout` directly, which under
+ * `node --test` is also the runner's IPC channel. The banner's box-drawing
+ * rule is multi-byte, and a frame split across it corrupts the stream — the
+ * runner then reports "Unable to deserialize cloned data" against whichever
+ * file was mid-write, which is not necessarily this one. Every test here
+ * injects these so the suite produces no raw stdout.
+ */
+const SILENT_BANNER = { header: () => {}, recap: () => {} };
+
 /** Build a fetch stub that returns the given status for /verify. */
 function verifyFetch(status: number, body = "{}"): typeof fetch {
   return (async () => new Response(body, { status })) as typeof fetch;
@@ -72,6 +84,7 @@ test("verified key with NO agents detected reports an incomplete install", async
   }) as typeof fetch;
 
   await initCloud({
+    phaseFns: SILENT_BANNER,
     promptFn: async () => "sk-valid-key-1234",
     fetchFn,
     log: (l) => lines.push(l),
@@ -110,6 +123,7 @@ test("403 missing scope: re-prompts with the scope message, then a valid key pro
   }) as typeof fetch;
 
   await initCloud({
+    phaseFns: SILENT_BANNER,
     promptFn: async () => keys[i++] ?? "",
     fetchFn,
     log: (l) => lines.push(l),
@@ -135,6 +149,7 @@ test("401 invalid key: re-prompts, then a valid key proceeds", async (t) => {
   }) as typeof fetch;
 
   await initCloud({
+    phaseFns: SILENT_BANNER,
     promptFn: async () => keys[i++] ?? "",
     fetchFn,
     log: (l) => lines.push(l),
@@ -157,6 +172,7 @@ test("network error: surfaces a message and offers retry; abort returns cleanly"
   }) as typeof fetch;
 
   await initCloud({
+    phaseFns: SILENT_BANNER,
     promptFn: async () => replies[i++] ?? "",
     fetchFn,
     log: (l) => lines.push(l),
@@ -182,6 +198,7 @@ test("empty key input re-prompts before verifying", async (t) => {
   }) as typeof fetch;
 
   await initCloud({
+    phaseFns: SILENT_BANNER,
     promptFn: async () => replies[i++] ?? "",
     fetchFn,
     log: (l) => lines.push(l),
@@ -199,6 +216,7 @@ test("attempt cap: repeated invalid keys eventually abort without crashing", asy
   const fetchFn = verifyFetch(401, "nope");
 
   await initCloud({
+    phaseFns: SILENT_BANNER,
     promptFn: async () => `sk-bad-${i++}`,
     fetchFn,
     log: (l) => lines.push(l),
@@ -215,6 +233,7 @@ test("wiring runs after verify: Cursor entry written with headers", async (t) =>
   mkdirSync(join(home, ".cursor"));
 
   await initCloud({
+    phaseFns: SILENT_BANNER,
     promptFn: async () => "sk-wire-key-7777",
     fetchFn: verifyFetch(200, JSON.stringify({ valid: true })),
     claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
@@ -234,6 +253,7 @@ test("persists cloud config (key + agent id + base url) after verify", async (t)
   let saved: { apiKey: string; agentId: string; baseUrl: string } | undefined;
 
   await initCloud({
+    phaseFns: SILENT_BANNER,
     promptFn: async () => "sk-cfg-key-2468",
     fetchFn: verifyFetch(200, JSON.stringify({ valid: true })),
     claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
@@ -247,4 +267,138 @@ test("persists cloud config (key + agent id + base url) after verify", async (t)
   assert.equal(saved!.apiKey, "sk-cfg-key-2468");
   assert.match(saved!.agentId, /^klio-/);
   assert.equal(saved!.baseUrl, "https://mcp.klio.tech");
+});
+
+// ---------------------------------------------------------------------------
+// Non-interactive key supply (`--key` / KLIO_API_KEY)
+//
+// These exist so a CODING AGENT can run cloud init on the user's behalf: the
+// dashboard hands the user a prompt to paste into Claude Code / Cursor, and
+// that agent shells out to `klio init --cloud`. The masked key prompt is the
+// one thing in cloud mode that blocks a non-TTY caller, so a supplied key must
+// bypass it ENTIRELY — never fall back to prompting, which would hang the
+// agent's subshell on a stream that never produces a line.
+// ---------------------------------------------------------------------------
+
+/** A prompt stub that fails the test if the flow ever reaches it. */
+function forbiddenPrompt(): (opts: {
+  message: string;
+  default?: string;
+  mask?: boolean;
+}) => Promise<string> {
+  return async (opts) => {
+    assert.fail(
+      `initCloud must not prompt when a key is supplied (asked: ${opts.message})`,
+    );
+  };
+}
+
+test("supplied key verifies without ever prompting", async (t) => {
+  withEmptyFakeHome(t);
+  let saved: { apiKey: string } | undefined;
+  const lines: string[] = [];
+
+  await initCloud({
+    phaseFns: SILENT_BANNER,
+    apiKey: "sk-supplied-1234",
+    promptFn: forbiddenPrompt(),
+    fetchFn: verifyFetch(200, JSON.stringify({ valid: true })),
+    claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+    writeConfigFn: (cfg) => {
+      saved = cfg;
+    },
+    log: (l) => lines.push(l),
+  });
+
+  assert.ok(saved, "a supplied key must still be persisted");
+  assert.equal(saved!.apiKey, "sk-supplied-1234");
+  assert.ok(
+    lines.some((l) => l.includes("Key verified")),
+    `expected a verified line, got:\n${lines.join("\n")}`,
+  );
+});
+
+test("supplied key that is invalid aborts instead of falling back to a prompt", async (t) => {
+  withEmptyFakeHome(t);
+  const lines: string[] = [];
+
+  await initCloud({
+    phaseFns: SILENT_BANNER,
+    apiKey: "sk-bad-9999",
+    promptFn: forbiddenPrompt(),
+    fetchFn: verifyFetch(401),
+    claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+    log: (l) => lines.push(l),
+  });
+
+  assert.equal(
+    process.exitCode,
+    1,
+    "an unusable supplied key must exit non-zero",
+  );
+  assert.ok(
+    lines.some((l) => l.includes("Key invalid")),
+    `expected an invalid-key line, got:\n${lines.join("\n")}`,
+  );
+});
+
+test("supplied key lacking the memory scope aborts with the scope message", async (t) => {
+  withEmptyFakeHome(t);
+  const lines: string[] = [];
+
+  await initCloud({
+    phaseFns: SILENT_BANNER,
+    apiKey: "sk-noscope-5555",
+    promptFn: forbiddenPrompt(),
+    fetchFn: verifyFetch(403),
+    claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+    log: (l) => lines.push(l),
+  });
+
+  assert.equal(process.exitCode, 1);
+  assert.ok(
+    lines.some((l) => l.includes("memory")),
+    `expected the scope message, got:\n${lines.join("\n")}`,
+  );
+});
+
+test("a blank supplied key is treated as absent and falls back to the prompt", async (t) => {
+  withEmptyFakeHome(t);
+  let asked = 0;
+
+  await initCloud({
+    phaseFns: SILENT_BANNER,
+    apiKey: "   ",
+    promptFn: async () => {
+      asked++;
+      return "sk-prompted-4321";
+    },
+    fetchFn: verifyFetch(200, JSON.stringify({ valid: true })),
+    claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+    log: () => {},
+  });
+
+  assert.equal(asked, 1, "a whitespace-only key must not be sent to /verify");
+});
+
+test("a network failure on a supplied key aborts rather than asking to retry", async (t) => {
+  withEmptyFakeHome(t);
+  const lines: string[] = [];
+
+  await initCloud({
+    phaseFns: SILENT_BANNER,
+    apiKey: "sk-offline-1111",
+    promptFn: forbiddenPrompt(),
+    fetchFn: (async () => {
+      throw new Error("getaddrinfo ENOTFOUND mcp.klio.tech");
+    }) as unknown as typeof fetch,
+    claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+    log: (l) => lines.push(l),
+  });
+
+  assert.equal(process.exitCode, 1);
+  assert.ok(
+    lines.some((l) => l.includes("Couldn't reach")),
+    `expected a transport message, got:\n${lines.join("\n")}`,
+  );
 });
