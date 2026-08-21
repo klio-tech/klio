@@ -3,7 +3,8 @@
 // Where the LOCAL flow (src/commands/init.ts) runs six Docker-heavy
 // phases, cloud mode is three short steps:
 //
-//   1. Prompt for the API key.
+//   1. Take the API key — from `--key` / KLIO_API_KEY, or the masked
+//      prompt when neither is set.
 //   2. Verify it against the hosted brain's /verify endpoint.
 //   3. Wire detected agents at the hosted MCP URL (X-Vex-Key +
 //      X-Vex-Agent headers) — no Docker, no hooks, no engine.
@@ -94,6 +95,45 @@ export type InitCloudOptions = {
    * home dir.
    */
   writeConfigFn?: (config: CloudConfig) => void;
+  /**
+   * A key supplied up front (`klio init --cloud --key …`, or the
+   * `KLIO_API_KEY` environment variable), instead of typed at the masked
+   * prompt.
+   *
+   * This is what makes cloud init runnable BY AN AGENT rather than by a
+   * human at a TTY: the dashboard hands the user a prompt to paste into
+   * Claude Code / Cursor, and that agent shells out to `klio init --cloud`.
+   * The key prompt is the only interactive gate left in cloud mode, so a
+   * supplied key must bypass it completely — falling back to the prompt on
+   * a bad key would hang the agent's subshell on a stream that never
+   * produces a line, and the agent would report a timeout instead of the
+   * real reason.
+   *
+   * A supplied key therefore gets ONE verification attempt and no retries:
+   * on any failure the flow prints the reason and exits non-zero. Blank or
+   * whitespace-only is treated as absent, so an unset shell variable
+   * (`--key "$KLIO_API_KEY"` with nothing in it) falls back to the prompt
+   * rather than sending an empty string to /verify.
+   */
+  apiKey?: string;
+  /**
+   * Override the phase-banner writers (`phaseHeader` / `phaseRecap`).
+   *
+   * Both helpers write to `process.stdout` DIRECTLY, bypassing `log`. Under
+   * `node --test` that stdout is also the runner's IPC channel, and the
+   * banner's multi-byte box-drawing rule interleaving with a protocol frame
+   * corrupts it — surfacing as an `uncaughtException` reading "Unable to
+   * deserialize cloned data" attributed to whichever test file happened to
+   * be mid-write. It is load-dependent, so it presents as an unrelated flaky
+   * test rather than as output noise.
+   *
+   * Tests inject no-ops. Production leaves this undefined and the real
+   * banners render exactly as before.
+   */
+  phaseFns?: {
+    header: (n: number, total: number, title: string) => void;
+    recap: (line: string) => void;
+  };
   /** Single-line writer. Defaults to stdout. */
   log?: (line: string) => void;
 };
@@ -106,6 +146,7 @@ export type InitCloudOptions = {
  */
 export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   const log = opts.log ?? writeLine;
+  const banner = opts.phaseFns ?? { header: phaseHeader, recap: phaseRecap };
   const promptFn =
     opts.promptFn ??
     ((o: { message: string; default?: string; mask?: boolean }) =>
@@ -114,26 +155,37 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   // -----------------------------------------------------------------
   // Phase 1 / 2 · Verify your key
   // -----------------------------------------------------------------
-  phaseHeader(1, 2, "Verify your key");
+  banner.header(1, 2, "Verify your key");
   log("");
   log("  Klio Cloud stores memory on our hosted brain — no Docker, no");
-  log("  local engine. Paste the API key from your Klio Cloud dashboard.");
+  log(
+    opts.apiKey?.trim()
+      ? "  local engine. Checking the key you supplied."
+      : "  local engine. Paste the API key from your Klio Cloud dashboard.",
+  );
   log("");
 
-  const key = await promptAndVerifyKey(promptFn, opts.fetchFn, log);
+  const key = await resolveApiKey({
+    suppliedKey: opts.apiKey,
+    promptFn,
+    fetchFn: opts.fetchFn,
+    log,
+  });
   if (!key) {
-    // promptAndVerifyKey already explained why (missing scope, or the
-    // attempt cap was hit). Cloud init can't proceed without a valid
-    // key, so we return cleanly rather than wiring agents at a brain
-    // they can't reach.
+    // `resolveApiKey` already explained why (missing scope, a refused
+    // supplied key, or the prompt's attempt cap). Cloud init can't proceed
+    // without a valid key, so we return cleanly rather than wiring agents at
+    // a brain they can't reach. The supplied-key paths have already set a
+    // non-zero exit code; the interactive paths deliberately have not, since
+    // a human who gave up at the prompt did not hit an error.
     return;
   }
-  phaseRecap("Phase 1 done — key verified.");
+  banner.recap("Phase 1 done — key verified.");
 
   // -----------------------------------------------------------------
   // Phase 2 / 2 · Wire your agents
   // -----------------------------------------------------------------
-  phaseHeader(2, 2, "Wire your agents");
+  banner.header(2, 2, "Wire your agents");
   const agentId = deriveAgentId();
 
   // Persist the verified key + agent id BEFORE wiring so the capture hooks
@@ -187,7 +239,7 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   // to be reported as the unfinished thing it is, and must not continue into
   // the proxy offer, which is meaningless with no agent to route.
   if (result.configured.length === 0) {
-    phaseRecap("Phase 2 incomplete — no agents were wired.");
+    banner.recap("Phase 2 incomplete — no agents were wired.");
     printNothingWiredBlock(log, key);
     // Non-zero so a script, a CI step, or a person skimming the tail can tell
     // this apart from a working install.
@@ -196,7 +248,7 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
     return;
   }
 
-  phaseRecap("Phase 2 done — your agents are talking to Klio Cloud.");
+  banner.recap("Phase 2 done — your agents are talking to Klio Cloud.");
 
   // -----------------------------------------------------------------
   // Offer the local proxy — opt-in, defaults to no.
@@ -643,6 +695,80 @@ function describeRollback(undone: WireProxyResult, reason: string): string {
     `${undone.errors.map((e) => e.agent).join(", ")} may still be pointed at the proxy — ` +
     "run `klio uninit` to finish removing it."
   );
+}
+
+/**
+ * Resolve the API key for this run: verify one supplied up front, or fall
+ * back to the interactive masked prompt.
+ *
+ * The two paths differ in their failure handling on purpose. A human at a
+ * prompt can fix a typo, so the prompt loop retries. An agent that passed
+ * `--key` cannot — there is nobody to re-ask, and re-prompting a non-TTY
+ * caller hangs it — so a supplied key gets one attempt, an explanation, and
+ * a non-zero exit.
+ *
+ * Returns the verified key, or `null` when the flow must abort.
+ */
+async function resolveApiKey(args: {
+  suppliedKey: string | undefined;
+  promptFn: (opts: {
+    message: string;
+    default?: string;
+    mask?: boolean;
+  }) => Promise<string>;
+  fetchFn: typeof fetch | undefined;
+  log: (line: string) => void;
+}): Promise<string | null> {
+  const supplied = args.suppliedKey?.trim() ?? "";
+
+  if (supplied.length > 0) {
+    return verifySuppliedKey(supplied, args.fetchFn, args.log);
+  }
+
+  return promptAndVerifyKey(args.promptFn, args.fetchFn, args.log);
+}
+
+/**
+ * Verify a key handed in by flag or environment. One attempt, no prompts.
+ *
+ * Every failure branch sets `process.exitCode = 1` before returning null so
+ * the caller that ran us — a coding agent, a CI step, a script — can tell a
+ * refused key apart from a successful run by exit code alone, without
+ * parsing our stdout.
+ */
+async function verifySuppliedKey(
+  key: string,
+  fetchFn: typeof fetch | undefined,
+  log: (line: string) => void,
+): Promise<string | null> {
+  const result = await verifyCloudKey(key, fetchFn ?? globalThis.fetch);
+
+  switch (result.kind) {
+    case "valid":
+      log(
+        `  ✓ Key verified (${maskKey(key)})` +
+          (result.orgId ? ` — org ${result.orgId}` : ""),
+      );
+      return key;
+    case "missing_scope":
+      log(
+        `  ! That key is valid but lacks the \`memory\` scope (${maskKey(key)}) —`,
+      );
+      log("    it can't access the Klio brain. Mint a key with the `memory`");
+      log("    scope from your dashboard and pass that one instead.");
+      process.exitCode = 1;
+      return null;
+    case "invalid":
+      log(`  ! Key invalid (${maskKey(key)}) — check it and try again.`);
+      log("    Copy the key from your Klio dashboard's connect screen.");
+      process.exitCode = 1;
+      return null;
+    case "network_error":
+      log(`  ! Couldn't reach the Klio brain: ${result.message}`);
+      log("    Check your connection and re-run `klio init --cloud`.");
+      process.exitCode = 1;
+      return null;
+  }
 }
 
 /**
