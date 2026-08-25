@@ -26,7 +26,13 @@ import {
   maskKey,
   verifyCloudKey,
 } from "../cloud.js";
-import { configFingerprint, writeCloudConfig, type CloudConfig } from "../cloudConfig.js";
+import {
+  configFingerprint,
+  writeCloudConfig,
+  writeLastVerification,
+  type CloudConfig,
+  type VerificationRecord,
+} from "../cloudConfig.js";
 import { migrateClaudeCodeProxyEnv } from "../proxy/claudeCodeMigration.js";
 import { PROXY_PROBE_URL } from "../proxy/constants.js";
 import { spawnProxy, type SpawnProxyOptions } from "../proxy/processSupervisor.js";
@@ -134,6 +140,16 @@ export type InitCloudOptions = {
     header: (n: number, total: number, title: string) => void;
     recap: (line: string) => void;
   };
+  /**
+   * Override the verification-outcome recorder. Production persists every
+   * terminal verification outcome (initial verify AND the final live probe)
+   * to ~/.klio/config.json via `writeLastVerification` so `klio status` can
+   * show the last result; tests inject a capturing stub so the suite never
+   * writes to the real home dir. The default is wrapped so a filesystem
+   * failure while recording can never abort an otherwise-working init —
+   * the record is informational, the init is not.
+   */
+  recordVerificationFn?: (record: VerificationRecord) => void;
   /** Single-line writer. Defaults to stdout. */
   log?: (line: string) => void;
 };
@@ -165,13 +181,15 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
   );
   log("");
 
-  const key = await resolveApiKey({
+  const record = opts.recordVerificationFn ?? safeRecordVerification;
+  const resolved = await resolveApiKey({
     suppliedKey: opts.apiKey,
     promptFn,
     fetchFn: opts.fetchFn,
+    record,
     log,
   });
-  if (!key) {
+  if (!resolved) {
     // `resolveApiKey` already explained why (missing scope, a refused
     // supplied key, or the prompt's attempt cap). Cloud init can't proceed
     // without a valid key, so we return cleanly rather than wiring agents at
@@ -180,6 +198,7 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
     // a human who gave up at the prompt did not hit an error.
     return;
   }
+  const key = resolved.key;
   banner.recap("Phase 1 done — key verified.");
 
   // -----------------------------------------------------------------
@@ -324,7 +343,88 @@ export async function initCloud(opts: InitCloudOptions = {}): Promise<void> {
     log("  — Proxy left off. Enable it any time by re-running `klio init`.");
   }
 
-  printReferenceBlock(log, result.configured, key);
+  // -----------------------------------------------------------------
+  // Final live verification probe.
+  //
+  // Init ENDS with one more round-trip to /verify so the last thing
+  // printed reflects reality NOW — after config writes, agent wiring,
+  // and the (optional) proxy — not the state at the start of the flow.
+  // The resolved identity (org) goes into the closing block, which is
+  // exactly what an agent that ran `klio init --key` for the user will
+  // read back and relay. The outcome is recorded for `klio status`.
+  //
+  // A failed probe here is a WARNING, not a failure: the initial verify
+  // succeeded seconds ago and the wiring genuinely happened, so a
+  // transient network blip must not retract a completed install.
+  // -----------------------------------------------------------------
+  const probeOrg = await runFinalProbe({
+    key,
+    fetchFn: opts.fetchFn,
+    record,
+    log,
+  });
+
+  printReferenceBlock(log, result.configured, key, probeOrg ?? resolved.orgId);
+}
+
+/**
+ * Run the closing /verify probe: print the live result, record it, and
+ * return the resolved org id (undefined when the probe failed or the
+ * server sent none).
+ */
+async function runFinalProbe(args: {
+  key: string;
+  fetchFn: typeof fetch | undefined;
+  record: (record: VerificationRecord) => void;
+  log: (line: string) => void;
+}): Promise<string | undefined> {
+  const probe = await verifyCloudKey(args.key, args.fetchFn ?? globalThis.fetch);
+  const at = new Date().toISOString();
+
+  if (probe.kind === "valid") {
+    args.log("");
+    args.log(
+      `  ✓ Live check: the brain accepts this key` +
+        (probe.orgId ? ` — org ${probe.orgId}` : ""),
+    );
+    args.record({ at, ok: true, ...(probe.orgId ? { orgId: probe.orgId } : {}) });
+    return probe.orgId;
+  }
+
+  const detail = describeProbeFailure(probe);
+  args.log("");
+  args.log(`  ! Live check failed: ${detail}`);
+  args.log("    Your agents are wired; if this persists, run `klio status`");
+  args.log("    and check the key on your Klio dashboard.");
+  args.record({ at, ok: false, detail });
+  return undefined;
+}
+
+/** One-line human description of a non-valid verify outcome. */
+function describeProbeFailure(
+  probe: Exclude<Awaited<ReturnType<typeof verifyCloudKey>>, { kind: "valid" }>,
+): string {
+  switch (probe.kind) {
+    case "missing_scope":
+      return "the key is valid but lacks the `memory` scope";
+    case "invalid":
+      return `the brain rejected the key (HTTP ${probe.status})`;
+    case "network_error":
+      return probe.message;
+  }
+}
+
+/**
+ * Default verification recorder: persist to ~/.klio/config.json, but
+ * never let a filesystem error while recording abort the init that is
+ * otherwise succeeding — the record is informational.
+ */
+function safeRecordVerification(record: VerificationRecord): void {
+  try {
+    writeLastVerification(record);
+  } catch {
+    /* status will simply show no record; init's own output already said it */
+  }
 }
 
 /**
@@ -707,8 +807,13 @@ function describeRollback(undone: WireProxyResult, reason: string): string {
  * caller hangs it — so a supplied key gets one attempt, an explanation, and
  * a non-zero exit.
  *
- * Returns the verified key, or `null` when the flow must abort.
+ * Returns the verified key (with the org the server resolved, when it
+ * sent one), or `null` when the flow must abort. Every terminal outcome
+ * — verified, refused, or abandoned — is recorded through `record` so
+ * `klio status` can show the last verification result.
  */
+type ResolvedKey = { key: string; orgId?: string };
+
 async function resolveApiKey(args: {
   suppliedKey: string | undefined;
   promptFn: (opts: {
@@ -717,15 +822,16 @@ async function resolveApiKey(args: {
     mask?: boolean;
   }) => Promise<string>;
   fetchFn: typeof fetch | undefined;
+  record: (record: VerificationRecord) => void;
   log: (line: string) => void;
-}): Promise<string | null> {
+}): Promise<ResolvedKey | null> {
   const supplied = args.suppliedKey?.trim() ?? "";
 
   if (supplied.length > 0) {
-    return verifySuppliedKey(supplied, args.fetchFn, args.log);
+    return verifySuppliedKey(supplied, args.fetchFn, args.record, args.log);
   }
 
-  return promptAndVerifyKey(args.promptFn, args.fetchFn, args.log);
+  return promptAndVerifyKey(args.promptFn, args.fetchFn, args.record, args.log);
 }
 
 /**
@@ -739,9 +845,11 @@ async function resolveApiKey(args: {
 async function verifySuppliedKey(
   key: string,
   fetchFn: typeof fetch | undefined,
+  record: (record: VerificationRecord) => void,
   log: (line: string) => void,
-): Promise<string | null> {
+): Promise<ResolvedKey | null> {
   const result = await verifyCloudKey(key, fetchFn ?? globalThis.fetch);
+  const at = new Date().toISOString();
 
   switch (result.kind) {
     case "valid":
@@ -749,23 +857,27 @@ async function verifySuppliedKey(
         `  ✓ Key verified (${maskKey(key)})` +
           (result.orgId ? ` — org ${result.orgId}` : ""),
       );
-      return key;
+      record({ at, ok: true, ...(result.orgId ? { orgId: result.orgId } : {}) });
+      return { key, ...(result.orgId ? { orgId: result.orgId } : {}) };
     case "missing_scope":
       log(
         `  ! That key is valid but lacks the \`memory\` scope (${maskKey(key)}) —`,
       );
       log("    it can't access the Klio brain. Mint a key with the `memory`");
       log("    scope from your dashboard and pass that one instead.");
+      record({ at, ok: false, detail: "key valid but lacks the `memory` scope" });
       process.exitCode = 1;
       return null;
     case "invalid":
       log(`  ! Key invalid (${maskKey(key)}) — check it and try again.`);
       log("    Copy the key from your Klio dashboard's connect screen.");
+      record({ at, ok: false, detail: `key rejected (HTTP ${result.status})` });
       process.exitCode = 1;
       return null;
     case "network_error":
       log(`  ! Couldn't reach the Klio brain: ${result.message}`);
       log("    Check your connection and re-run `klio init --cloud`.");
+      record({ at, ok: false, detail: result.message });
       process.exitCode = 1;
       return null;
   }
@@ -793,8 +905,9 @@ async function promptAndVerifyKey(
     mask?: boolean;
   }) => Promise<string>,
   fetchFn: typeof fetch | undefined,
+  record: (record: VerificationRecord) => void,
   log: (line: string) => void,
-): Promise<string | null> {
+): Promise<ResolvedKey | null> {
   const verify = (k: string) => verifyCloudKey(k, fetchFn ?? globalThis.fetch);
 
   for (let attempt = 0; attempt < MAX_KEY_ATTEMPTS; attempt++) {
@@ -812,7 +925,12 @@ async function promptAndVerifyKey(
           `  ✓ Key verified (${maskKey(key)})` +
             (result.orgId ? ` — org ${result.orgId}` : ""),
         );
-        return key;
+        record({
+          at: new Date().toISOString(),
+          ok: true,
+          ...(result.orgId ? { orgId: result.orgId } : {}),
+        });
+        return { key, ...(result.orgId ? { orgId: result.orgId } : {}) };
       case "missing_scope":
         log(
           `  ! That key is valid but lacks the \`memory\` scope (${maskKey(key)}) —`,
@@ -834,6 +952,7 @@ async function promptAndVerifyKey(
         const ans = retry.trim().toLowerCase();
         if (ans === "n" || ans === "no") {
           log("  — Aborted. Re-run `klio init` once you're back online.");
+          record({ at: new Date().toISOString(), ok: false, detail: result.message });
           return null;
         }
         // Any other answer (including the default) retries — but the
@@ -851,6 +970,11 @@ async function promptAndVerifyKey(
     "  — Couldn't verify a key after several attempts. Re-run `klio init`",
   );
   log("    with a valid Klio Cloud API key (with the `memory` scope).");
+  record({
+    at: new Date().toISOString(),
+    ok: false,
+    detail: "no key verified after several attempts",
+  });
   return null;
 }
 
@@ -897,6 +1021,7 @@ function printReferenceBlock(
   log: (line: string) => void,
   configured: string[],
   key: string,
+  orgId?: string,
 ): void {
   log("");
   log("Klio Cloud is ready.");
@@ -906,6 +1031,9 @@ function printReferenceBlock(
   }
   log(`  Memory endpoint:   ${CLOUD_MCP_URL}`);
   log(`  Authenticated as:  key ${maskKey(key)}`);
+  if (orgId) {
+    log(`  Org:               ${orgId}`);
+  }
   log("");
   log("  Your agents now read and write memory to Klio Cloud — it");
   log("  persists across sessions, machines, and restarts.");

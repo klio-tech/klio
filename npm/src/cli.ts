@@ -12,7 +12,7 @@ import { down, uninstall } from "./commands/down.js";
 import { runUpdate } from "./commands/update.js";
 import { packageVersion } from "./version.js";
 
-const SUBCOMMANDS = ["init", "status", "down", "uninstall", "uninit", "doctor", "proxy", "update", "configure", "hook", "version"] as const;
+const SUBCOMMANDS = ["init", "quickstart", "status", "down", "uninstall", "uninit", "doctor", "proxy", "update", "configure", "hook", "version"] as const;
 type Subcommand = (typeof SUBCOMMANDS)[number];
 
 async function main(): Promise<void> {
@@ -43,6 +43,13 @@ async function main(): Promise<void> {
     case "init":
       await init(parseInitArgs(rest));
       return;
+    case "quickstart": {
+      // Plain-text, deterministic, agent-readable — the concept map,
+      // the tool list, and per-host MCP config snippets. No flags.
+      const { runQuickstart } = await import("./commands/quickstart.js");
+      runQuickstart();
+      return;
+    }
     case "status":
       await status();
       return;
@@ -156,7 +163,12 @@ usage: klio <command> [options]
 
 commands:
   init        Set up the local stack and wire your AI agents (Claude Code, Cursor)
-  status      Show what's running, where, and as whom
+  quickstart  Print the agent-readable quickstart: concepts, tools, and
+              per-host MCP config snippets (claude-code, claude-desktop,
+              codex, cursor)
+  status      Show what's running, where, and as whom — including whether an
+              API key is configured, which files carry it, and the last
+              verification result
   update      Re-prompt provider/curator/agents, OR upgrade the stack to a new release.
               Stack-wide flags: --check, --to-latest, --to-version <X>, --watch.
               --watch runs a long-lived host-side process that applies background
