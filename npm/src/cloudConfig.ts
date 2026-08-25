@@ -152,6 +152,74 @@ export function writeConfigObject(
   atomicWriteFileSync(path, JSON.stringify(body, null, 2) + "\n", 0o600);
 }
 
+/**
+ * Outcome of the most recent key verification, persisted alongside the
+ * credentials (under the non-credential `lastVerification` key, so
+ * {@link writeCloudConfig} carries it forward) and surfaced by
+ * `klio status`.
+ */
+export type VerificationRecord = {
+  /** ISO-8601 timestamp of when the verification ran. */
+  at: string;
+  /** True when /verify accepted the key with the `memory` scope. */
+  ok: boolean;
+  /** Org resolved from the verify response, when the server sent one. */
+  orgId?: string;
+  /** Human-readable failure reason, present when `ok` is false. */
+  detail?: string;
+};
+
+/** The config key {@link writeLastVerification} owns. */
+const LAST_VERIFICATION_KEY = "lastVerification";
+
+/**
+ * Persist the latest verification outcome without disturbing anything
+ * else in the file — credentials, proxy toggles, unknown keys all carry
+ * forward verbatim. Creates the file (0600 in a 0700 dir) when it does
+ * not exist yet, so a refused `klio init --key` still leaves a record
+ * for `klio status` to explain.
+ */
+export function writeLastVerification(
+  record: VerificationRecord,
+  path: string = cloudConfigPath(),
+): void {
+  const existing = readConfigObject(path) ?? {};
+  const body: Record<string, unknown> = {
+    ...existing,
+    [LAST_VERIFICATION_KEY]: {
+      at: record.at,
+      ok: record.ok,
+      ...(record.orgId !== undefined ? { orgId: record.orgId } : {}),
+      ...(record.detail !== undefined ? { detail: record.detail } : {}),
+    },
+  };
+  writeConfigObject(body, path);
+}
+
+/**
+ * Read the last recorded verification, or `null` when none was ever
+ * recorded or the stored value is malformed. Never throws — status must
+ * render on any config state.
+ */
+export function readLastVerification(
+  path: string = cloudConfigPath(),
+): VerificationRecord | null {
+  const config = readConfigObject(path);
+  if (config === null) return null;
+  const raw = config[LAST_VERIFICATION_KEY];
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const o = raw as Record<string, unknown>;
+  if (typeof o.at !== "string" || typeof o.ok !== "boolean") return null;
+  return {
+    at: o.at,
+    ok: o.ok,
+    ...(typeof o.orgId === "string" ? { orgId: o.orgId } : {}),
+    ...(typeof o.detail === "string" ? { detail: o.detail } : {}),
+  };
+}
+
 /** The credential fields {@link writeCloudConfig} owns. Everything else is somebody else's. */
 const CREDENTIAL_KEYS = ["apiKey", "agentId", "baseUrl"] as const;
 

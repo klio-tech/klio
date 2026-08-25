@@ -1,13 +1,18 @@
 // `klio status` — what's up, where, and as whom.
 //
-// Reads ~/.klio/runtime/.env for the local-dev creds and queries
-// `docker compose ps` for the container state. Prints a JSON
-// blob (so other tools can pipe it through jq) plus a human
-// summary at the end.
+// Two halves:
+//   - CLOUD: is an API key configured, which config files carry it (the
+//     masked form only — the key itself never prints), and the last
+//     recorded verification result (src/cloudStatus.ts).
+//   - LOCAL: ~/.klio/runtime/.env creds + `docker compose ps` state.
+//
+// Prints a JSON blob (so other tools can pipe it through jq) plus a
+// human summary of the cloud half at the end.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { collectCloudStatus, type CloudStatus } from "../cloudStatus.js";
 import { resolveComposeBin } from "../docker.js";
 import { runtimeDir } from "../compose.js";
 import { spawn } from "node:child_process";
@@ -15,8 +20,15 @@ import { spawn } from "node:child_process";
 export async function status(): Promise<void> {
   const dir = runtimeDir();
   const envPath = join(dir, ".env");
+  const cloud = collectCloudStatus();
 
   const out: Record<string, unknown> = {
+    cloud: {
+      key_configured: cloud.configured,
+      key_masked: cloud.keyMasked,
+      key_files: cloud.keyFiles,
+      last_verification: cloud.lastVerification,
+    },
     runtime_dir: dir,
     compose_file: join(dir, "docker-compose.yml"),
     env_file: existsSync(envPath) ? envPath : null,
@@ -49,6 +61,42 @@ export async function status(): Promise<void> {
   }
 
   process.stdout.write(JSON.stringify(out, null, 2) + "\n");
+  process.stdout.write(describeCloud(cloud).join("\n") + "\n");
+}
+
+/**
+ * Human summary of the cloud half — the part a person (or the agent
+ * that just ran `klio init --key` for them) actually reads. Exported
+ * for tests; the JSON blob above stays the machine surface.
+ */
+export function describeCloud(cloud: CloudStatus): string[] {
+  const lines: string[] = [""];
+
+  if (!cloud.configured) {
+    lines.push("Cloud: no API key configured.");
+    lines.push("  Connect with:  npx @klio-tech/klio init --key <api-key>");
+  } else {
+    lines.push(`Cloud: key configured (${cloud.keyMasked}).`);
+    lines.push("  Carried by:");
+    for (const file of cloud.keyFiles) {
+      lines.push(`    - ${file}`);
+    }
+  }
+
+  const v = cloud.lastVerification;
+  if (v === null) {
+    lines.push("  Last verification: never run — `klio init` performs one.");
+  } else if (v.ok) {
+    lines.push(
+      `  Last verification: OK at ${v.at}` + (v.orgId ? ` (org ${v.orgId})` : ""),
+    );
+  } else {
+    lines.push(
+      `  Last verification: FAILED at ${v.at}` + (v.detail ? ` — ${v.detail}` : ""),
+    );
+  }
+
+  return lines;
 }
 
 function parseEnv(body: string): Record<string, string> {

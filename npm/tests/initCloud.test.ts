@@ -402,3 +402,109 @@ test("a network failure on a supplied key aborts rather than asking to retry", a
     `expected a transport message, got:\n${lines.join("\n")}`,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Final live verification probe
+//
+// A wired install ends with one more round-trip to /verify so the LAST thing
+// printed reflects reality at the moment init finished — and the resolved
+// identity (org) is stated in the closing block, where an agent that ran
+// `klio init --key` on the user's behalf will read and relay it. The outcome
+// is recorded (via the injectable recorder) so `klio status` can show the
+// last verification result later.
+// ---------------------------------------------------------------------------
+
+test("wired install ends with a live probe and prints the resolved org", async (t) => {
+  const home = withEmptyFakeHome(t);
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(join(home, ".cursor"));
+
+  const lines: string[] = [];
+  let verifyCalls = 0;
+  const recorded: { at: string; ok: boolean; orgId?: string; detail?: string }[] = [];
+
+  await initCloud({
+    phaseFns: SILENT_BANNER,
+    apiKey: "sk-probe-key-6161",
+    promptFn: forbiddenPrompt(),
+    fetchFn: (async () => {
+      verifyCalls += 1;
+      return new Response(JSON.stringify({ valid: true, org_id: "org_live" }), {
+        status: 200,
+      });
+    }) as typeof fetch,
+    claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+    recordVerificationFn: (rec) => recorded.push(rec),
+    log: (l) => lines.push(l),
+  });
+
+  assert.equal(verifyCalls, 2, "initial verify + one final live probe");
+  const out = lines.join("\n");
+  assert.match(out, /Live check/);
+  assert.match(out, /org_live/);
+  assert.match(out, /Klio Cloud is ready/);
+  // The closing block states the identity, not just the masked key.
+  assert.match(out, /Org:\s+org_live/);
+
+  // Both terminal outcomes were recorded, latest wins for `klio status`.
+  assert.ok(recorded.length >= 1, "verification outcomes must be recorded");
+  const last = recorded[recorded.length - 1];
+  assert.equal(last.ok, true);
+  assert.equal(last.orgId, "org_live");
+  assert.ok(!Number.isNaN(Date.parse(last.at)), "timestamp must be ISO-parseable");
+});
+
+test("a failed final probe warns but does not fail a completed install", async (t) => {
+  const home = withEmptyFakeHome(t);
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(join(home, ".cursor"));
+
+  const lines: string[] = [];
+  let verifyCalls = 0;
+  const recorded: { ok: boolean; detail?: string }[] = [];
+
+  await initCloud({
+    phaseFns: SILENT_BANNER,
+    apiKey: "sk-flaky-key-8282",
+    promptFn: forbiddenPrompt(),
+    fetchFn: (async () => {
+      verifyCalls += 1;
+      if (verifyCalls === 1) {
+        return new Response(JSON.stringify({ valid: true }), { status: 200 });
+      }
+      throw new Error("socket hang up");
+    }) as typeof fetch,
+    claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+    recordVerificationFn: (rec) => recorded.push(rec),
+    log: (l) => lines.push(l),
+  });
+
+  const out = lines.join("\n");
+  // The wiring genuinely happened; a transient probe failure must not
+  // retract the install or flip the exit code.
+  assert.match(out, /Klio Cloud is ready/);
+  assert.match(out, /socket hang up/);
+  assert.notEqual(process.exitCode, 1);
+  const last = recorded[recorded.length - 1];
+  assert.equal(last.ok, false);
+  assert.match(last.detail ?? "", /socket hang up/);
+});
+
+test("a refused supplied key records a failed verification", async (t) => {
+  withEmptyFakeHome(t);
+  const recorded: { ok: boolean; detail?: string }[] = [];
+
+  await initCloud({
+    phaseFns: SILENT_BANNER,
+    apiKey: "sk-refused-key-9393",
+    promptFn: forbiddenPrompt(),
+    fetchFn: verifyFetch(401),
+    claudeCliFn: async () => ({ code: 0, stdout: "", stderr: "" }),
+    recordVerificationFn: (rec) => recorded.push(rec),
+    log: () => {},
+  });
+
+  assert.equal(process.exitCode, 1);
+  const last = recorded[recorded.length - 1];
+  assert.equal(last.ok, false);
+});
