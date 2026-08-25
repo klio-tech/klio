@@ -64,3 +64,44 @@ test("defaultGitRemote never throws for a directory with no git remote", async (
   const out = defaultGitRemote("/");
   assert.ok(out === null || typeof out === "string");
 });
+
+test("a git repo on a feature branch yields git_branch", () => {
+  const out = resolveProject("/repo/klio", {
+    gitRemoteFn: () => "git@github.com:klio-tech/klio.git",
+    gitBranchFn: () => "feat/billing",
+  });
+  assert.equal(out.git_branch, "feat/billing");
+});
+
+test("the default branch is omitted — main IS the absence of a branch", () => {
+  // The engine maps main/master to NULL anyway; omitting it here keeps the
+  // payload honest and saves the server the normalization.
+  for (const name of ["main", "master", "Main", "MASTER"]) {
+    const out = resolveProject("/repo/klio", {
+      gitRemoteFn: () => null,
+      gitBranchFn: () => name,
+    });
+    assert.equal(out.git_branch, undefined, `expected ${name} to be omitted`);
+  }
+});
+
+test("a detached HEAD is omitted — 'HEAD' is not a branch name", () => {
+  const out = resolveProject("/repo/klio", {
+    gitRemoteFn: () => null,
+    gitBranchFn: () => "HEAD",
+  });
+  assert.equal(out.git_branch, undefined);
+});
+
+test("a throwing gitBranchFn never breaks resolution", () => {
+  const out = resolveProject("/repo/klio", {
+    gitRemoteFn: () => "git@github.com:klio-tech/klio.git",
+    gitBranchFn: () => {
+      throw new Error("boom");
+    },
+  });
+  assert.deepEqual(out, {
+    repo_root: "/repo/klio",
+    git_remote: "git@github.com:klio-tech/klio.git",
+  });
+});

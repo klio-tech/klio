@@ -42,13 +42,25 @@
 
 import { execFileSync } from "node:child_process";
 
-/** The two project-identity fields the engine's `RecallRequest` accepts. */
-export type ResolvedProject = { repo_root?: string; git_remote?: string };
+/** The project-identity fields the engine's capture endpoints accept. */
+export type ResolvedProject = {
+  repo_root?: string;
+  git_remote?: string;
+  /**
+   * The current git branch, so hook captures land on the project's context
+   * branch of the same name (engine Track C). Omitted for the default branch
+   * — `main`/`master` IS the absence of a branch — and for a detached HEAD,
+   * whose `rev-parse --abbrev-ref` output is the literal string `HEAD`.
+   */
+  git_branch?: string;
+};
 
 /** Injectable seam so callers can test resolution hermetically — no real git. */
 export type ProjectDeps = {
   /** Resolve `origin`'s git remote URL for a cwd; null on any failure. */
   gitRemoteFn?: (cwd: string) => string | null;
+  /** Resolve the current git branch name for a cwd; null on any failure. */
+  gitBranchFn?: (cwd: string) => string | null;
 };
 
 /**
@@ -76,7 +88,34 @@ export function resolveProject(cwd: string | undefined, deps: ProjectDeps = {}):
     remote = null;
   }
   if (remote) out.git_remote = remote;
+  const branchFn = deps.gitBranchFn ?? defaultGitBranch;
+  let branch: string | null;
+  try {
+    branch = branchFn(cwd);
+  } catch {
+    branch = null;
+  }
+  // `main`/`master` map to "no branch": the engine treats the default branch
+  // as main (branch_id NULL), and `HEAD` is what a detached checkout reports.
+  if (branch && !["main", "master", "head"].includes(branch.toLowerCase())) {
+    out.git_branch = branch;
+  }
   return out;
+}
+
+/** Resolve the current git branch for a cwd; null on any failure. */
+export function defaultGitBranch(cwd: string): string | null {
+  try {
+    const out = execFileSync("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2000,
+    });
+    const trimmed = out.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Resolve `origin`'s git remote URL for a cwd; null on any failure. */
