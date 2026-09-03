@@ -4,6 +4,11 @@ Embeds the query with the *space's* embedding model (not a global one),
 then queries the matching shadow table joined to a tenant-scoped CTE on
 entries. The CTE-before-HNSW pattern preserves the design-doc guarantee
 that tenant boundaries are enforced before vector similarity ranking.
+
+Every optional narrowing -- kind, project, agent -- belongs INSIDE that
+CTE for the same reason: applied outside it, the planner is free to scan
+the global vector index and post-filter, which is a tenant boundary
+enforced after ranking rather than before.
 """
 from __future__ import annotations
 
@@ -31,6 +36,7 @@ class RecallService:
         query: str,
         kind: EntryKind | None = None,
         project_id: uuid.UUID | None = None,
+        agent_id: uuid.UUID | None = None,
         limit: int = 10,
     ) -> list[tuple[Entry, float]]:
         space = await session.get(Space, space_id)
@@ -65,6 +71,16 @@ class RecallService:
         if kind is not None:
             sql += " AND e.kind::text = :kind"
             params["kind"] = kind.value
+        if agent_id is not None:
+            # Opt-in agent isolation (`scope="agent"`). Entries always carry
+            # a non-nullable agent_id, but recall filtered only on
+            # (user_id, space_id) -- so one API key meant one shared pool
+            # however many end users a consumer served, and agents surfaced
+            # each other's memory. There is deliberately NO `OR agent_id IS
+            # NULL` branch here: unlike project_id, the column cannot be
+            # null, so a fallback would only re-open the leak.
+            sql += " AND e.agent_id = :agent_id"
+            params["agent_id"] = agent_id
         if project_id is not None:
             # NULL-tagged entries surface in every project's recall —
             # this is the safe default for legacy entries (written

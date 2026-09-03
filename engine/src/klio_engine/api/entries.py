@@ -255,6 +255,10 @@ async def recall(
         query=body.query,
         kind=EntryKind(body.kind) if body.kind else None,
         project_id=project_id,
+        # `ctx.agent_id` is the authenticated caller (the same identity the
+        # ACL check above used), never a value from the body -- a client
+        # must not be able to name another agent and read its memory.
+        agent_id=ctx.agent_id if body.scope == "agent" else None,
         limit=body.limit,
     )
 
