@@ -23,7 +23,11 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from klio_engine.api.auth import _mint_for_test
+from klio_engine.models.agent import Agent, AgentKind
+from klio_engine.models.permission import Permission, PermissionScope
 from tests.api.conftest import (
+    JWT_SECRET,
     AuthCtx,
     provision,
     seed_project,
@@ -187,3 +191,138 @@ async def test_recall_normalizes_whitespace_and_empty_string(app_client: TestCli
             f"project={raw!r} should normalize to cross-project (None), "
             f"got {resp.status_code}: {resp.text}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Agent isolation (`scope: "agent"`)
+#
+# Entries carry a non-nullable `agent_id`, but the recall query never
+# filtered on it: one (user_id, space_id) was one shared pool, whatever
+# agent asked. A consumer that authenticates every end user with a single
+# API key therefore had one pool for ALL of them, and agents quoted each
+# other's memory across tenants.
+#
+# `scope: "agent"` is opt-in. The default stays user-wide, because
+# consumers legitimately write under one agent identity and read under
+# another (a bridge writing from a hook, a CLI reading back).
+# ---------------------------------------------------------------------------
+
+
+async def _second_agent(
+    db_session: AsyncSession, ctx: AuthCtx
+) -> AuthCtx:
+    """A second agent belonging to the SAME user, with admin scope on the
+    same space — the shape a multi-tenant consumer produces when it
+    authenticates many end users through one API key."""
+    agent = Agent(
+        user_id=ctx.user_id,
+        kind=AgentKind.CLAUDE_CODE,
+        install_id=uuid.uuid4(),
+        display_name="second-agent",
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    db_session.add(
+        Permission(
+            user_id=ctx.user_id,
+            space_id=ctx.default_space_id,
+            agent_id=agent.id,
+            scope=PermissionScope.ADMIN,
+        )
+    )
+    await db_session.commit()
+    return AuthCtx(
+        user_id=ctx.user_id,
+        agent_id=agent.id,
+        default_space_id=ctx.default_space_id,
+        api_key=ctx.api_key,
+        access_token=_mint_for_test(
+            JWT_SECRET, ctx.user_id, agent.id, ["read", "write", "admin"], ttl=3600
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_recall_agent_scope_excludes_other_agents_memory(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """The isolation defect. Two agents, one user, one space: with
+    `scope="agent"` a caller must see only what it wrote itself."""
+    a: AuthCtx = provision(app_client)
+    write_memory(app_client, a, "Alpha Studio ships the racing game on Tuesday.")
+
+    b = await _second_agent(db_session, a)
+    write_memory(app_client, b, "Beta Studio ships the puzzle game on Friday.")
+
+    r = app_client.post(
+        f"/v1/spaces/{b.default_space_id}/recall",
+        json={"query": "when does the studio ship", "scope": "agent"},
+        headers=b.auth_header(),
+    )
+    assert r.status_code == 200, r.text
+    contents = [row["content"] for row in r.json()]
+
+    assert any("Beta Studio" in c for c in contents), contents
+    # The leak: agent A's memory reaching agent B.
+    assert not any("Alpha Studio" in c for c in contents), contents
+
+
+@pytest.mark.asyncio
+async def test_recall_without_agent_scope_still_returns_user_wide(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """The default is unchanged. Consumers that write under one agent and
+    read under another must keep working."""
+    a: AuthCtx = provision(app_client)
+    write_memory(app_client, a, "Alpha Studio ships the racing game on Tuesday.")
+
+    b = await _second_agent(db_session, a)
+    write_memory(app_client, b, "Beta Studio ships the puzzle game on Friday.")
+
+    r = app_client.post(
+        f"/v1/spaces/{b.default_space_id}/recall",
+        json={"query": "when does the studio ship"},
+        headers=b.auth_header(),
+    )
+    assert r.status_code == 200, r.text
+    contents = [row["content"] for row in r.json()]
+
+    assert any("Alpha Studio" in c for c in contents), contents
+    assert any("Beta Studio" in c for c in contents), contents
+
+
+@pytest.mark.asyncio
+async def test_recall_agent_scope_composes_with_project_filter(
+    app_client: TestClient, db_session: AsyncSession
+) -> None:
+    """Agent scoping narrows alongside the project filter; it does not
+    replace it, and it does not resurrect the other agent's rows."""
+    a: AuthCtx = provision(app_client)
+    project_id = await seed_project(
+        db_session,
+        user_id=a.user_id,
+        git_remote="git@github.com:klio-tech/repo-scope.git",
+        repo_root_path="/Users/x/repo-scope",
+        display_name="repo-scope",
+    )
+    write_memory(app_client, a, "Alpha Studio ships the racing game on Tuesday.")
+
+    b = await _second_agent(db_session, a)
+    write_memory(app_client, b, "Beta Studio ships the puzzle game on Friday.")
+
+    r = app_client.post(
+        f"/v1/spaces/{b.default_space_id}/recall",
+        json={
+            "query": "when does the studio ship",
+            "scope": "agent",
+            "project": str(project_id),
+        },
+        headers=b.auth_header(),
+    )
+    assert r.status_code == 200, r.text
+    contents = [row["content"] for row in r.json()]
+
+    # Both writes are project_id=NULL, so B2's NULL-fallback keeps B's own
+    # row visible under a project filter — but A's must still be gone.
+    assert any("Beta Studio" in c for c in contents), contents
+    assert not any("Alpha Studio" in c for c in contents), contents

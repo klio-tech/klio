@@ -50,6 +50,15 @@ class RecallRequest(BaseModel):
     # to RecallService. See `klio_engine.api.entries._resolve_project_arg`
     # for the four resolution branches and why "unknown" returns 404 not 422.
     project: str | None = Field(default=None, max_length=2048)
+    # "user" (default) == every entry this user owns in the space, whatever
+    # agent wrote it -- the v0.x behaviour consumers that write from one
+    # agent and read from another depend on. "agent" == only the calling
+    # agent's own entries.
+    #
+    # Validated rather than ignored: an unrecognised value is a 422, never a
+    # silent widening to user-wide. Silently dropping this field is exactly
+    # how agent memory leaked across tenants.
+    scope: str | None = Field(default=None, pattern="^(user|agent)$")
 
 
 class AgentResponse(BaseModel):
